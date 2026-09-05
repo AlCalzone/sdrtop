@@ -25,7 +25,7 @@ use std::time::Duration;
 use crate::config::AppConfig;
 use crate::event::EventStream;
 use crate::hardware;
-use crate::signal::{DemodWorker, FftWorker, NetWorker};
+use crate::signal::{DemodWorker, FftWorker, NetWorker, PowerWorker};
 use crate::state::SdrMetrics;
 use crate::tasks;
 
@@ -90,6 +90,10 @@ impl App {
             &cfg,
             Boot::normal(&cfg, Arc::clone(&caps), tuning, &info),
         )));
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .device_options = device.options();
 
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,7 +117,7 @@ impl App {
             // RTL-SDR reports a tuner instead of a board revision / USB-API version.
             if let Some(tuner) = &info.tuner_name {
                 m.push_log(format!("Tuner: {}", tuner));
-            } else {
+            } else if caps.acquisition == hardware::AcquisitionModel::IqSamples {
                 m.push_log(board);
             }
             // Anything the backend declined while opening. Both native paths
@@ -157,6 +161,7 @@ impl App {
         // thread, and anything deeper starts hiding the losses rather than
         // absorbing them.
         let (net_tx, net_rx) = crossbeam_channel::bounded::<crate::hardware::StreamBlock>(4);
+        let (power_tx, power_rx) = crossbeam_channel::bounded::<hardware::PowerTrace>(4);
         let rx_ctx = Arc::new(hardware::RxContext {
             metrics: Arc::clone(&state),
             sample_tx,
@@ -164,23 +169,37 @@ impl App {
             demod_tx,
             net_tx,
             net_feed: hardware::FeedHealth::default(),
+            power_tx,
             geometry,
         });
 
-        let fft_state = Arc::clone(&state);
-        std::thread::spawn(move || FftWorker::new(sample_rx, fft_state, geometry).run());
+        match caps.acquisition {
+            hardware::AcquisitionModel::IqSamples => {
+                let fft_state = Arc::clone(&state);
+                std::thread::spawn(move || FftWorker::new(sample_rx, fft_state, geometry).run());
 
-        let demod_state = Arc::clone(&state);
-        std::thread::spawn(move || DemodWorker::new(demod_rx, demod_state, geometry).run());
+                let demod_state = Arc::clone(&state);
+                std::thread::spawn(move || DemodWorker::new(demod_rx, demod_state, geometry).run());
 
-        // Spawned whether or not the gate admitted the section: with no section
-        // on screen nothing is forwarded, so the thread costs one blocked
-        // `recv`. Deciding here would mean two places that know what admits the
-        // feature, and the one that already knows is `net::gate`.
+                tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
+            }
+            hardware::AcquisitionModel::PowerSweep => {
+                std::thread::spawn({
+                    let power_state = Arc::clone(&state);
+                    move || PowerWorker::new(power_rx, power_state).run()
+                });
+                tasks::spawn_power_rx_task(
+                    Arc::clone(&state),
+                    Arc::clone(&device),
+                    Arc::clone(&rx_ctx),
+                );
+            }
+        }
+        // Spawned whether or not the gate admitted the section. Without the NET
+        // section nothing is forwarded, so the thread blocks without work.
         let net_state = Arc::clone(&state);
         std::thread::spawn(move || NetWorker::new(net_rx, net_state, geometry).run());
 
-        tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
         tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));
         tasks::spawn_net_survey_task(Arc::clone(&state), Arc::clone(&device));
         tasks::spawn_sys_resource_task(Arc::clone(&state));
@@ -261,8 +280,18 @@ impl App {
         };
 
         let active = preset_override.unwrap_or(&cfg.display.active_preset);
-        let (engine, focus_keys) =
-            Self::build_ui(active, &cfg.presets, presets_dir.as_deref(), net.is_ok());
+        let acquisition = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .caps
+            .acquisition;
+        let (engine, focus_keys) = Self::build_ui_for(
+            active,
+            &cfg.presets,
+            presets_dir.as_deref(),
+            net.is_ok(),
+            acquisition,
+        );
 
         // A user preset that wanted a number key already taken says so, once,
         // here. `menu::model::build` collects these instead of logging them so it
@@ -306,6 +335,7 @@ impl App {
             theme,
             focus_keys,
             theme_config: cfg.theme.clone(),
+            tinysa_config: cfg.tinysa.clone(),
             user_presets: cfg.presets,
         }
     }

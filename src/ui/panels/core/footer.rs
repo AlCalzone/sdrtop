@@ -43,7 +43,10 @@ fn base_normal_items(gm: &GainModel) -> Vec<String> {
     if !gm.is_single() {
         return NORMAL_ITEMS.iter().map(|s| s.to_string()).collect();
     }
-    let mut items: Vec<String> = vec!["[Q] Quit".into(), "[Space] RX".into(), "[↑↓] Gain".into()];
+    let mut items: Vec<String> = vec!["[Q] Quit".into(), "[Space] RX".into()];
+    if !gm.stages().is_empty() {
+        items.push("[↑↓] Gain".into());
+    }
     if gm.has_boost() {
         items.push(format!("[A] {}", gm.boost_label()));
     }

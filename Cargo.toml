@@ -6,11 +6,11 @@ name = "sdrtop"
 version = "0.5.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Terminal monitor for HackRF One, RTL-SDR and any SoapySDR radio: live spectrum, waterfall, and IQ/RF/timing/signal diagnostics"
+description = "Terminal monitor for SDRs and tinySA analyzers: live spectrum, waterfall, sweeps, and radio diagnostics"
 repository = "https://github.com/musithang/sdrtop"
 homepage = "https://github.com/musithang/sdrtop"
 readme = "README.md"
-keywords = ["sdr", "hackrf", "rtl-sdr", "soapysdr", "tui"]
+keywords = ["sdr", "hackrf", "rtl-sdr", "tinysa", "tui"]
 categories = ["command-line-utilities", "hardware-support", "science"]
 # Measured, not guessed: `slice::as_chunks` (hot path, `hardware/process.rs` and
 # `signal/demod`) stabilised in 1.88.0 and `u32::is_multiple_of` in 1.87.0. The
@@ -56,6 +56,7 @@ num-complex = "0.4"
 # exactly the binary it runs today and simply sees no Soapy devices. See
 # dev_docs/soapy-design.md, decision 1.
 libloading = "0.8"
+serialport = { version = "4", default-features = false }
 
 [build-dependencies]
 pkg-config = "0.3"

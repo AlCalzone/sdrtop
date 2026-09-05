@@ -161,6 +161,54 @@ impl Default for SweepSettings {
     }
 }
 
+fn default_tinysa_points() -> u32 {
+    450
+}
+
+fn default_auto() -> String {
+    "auto".into()
+}
+
+fn default_spur() -> String {
+    "auto".into()
+}
+
+/// Settings applied when a tinySA backend opens.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct TinySaSettings {
+    #[serde(default = "default_tinysa_points")]
+    pub points: u32,
+    #[serde(default = "default_auto")]
+    pub rbw: String,
+    #[serde(default = "default_auto")]
+    pub attenuation: String,
+    #[serde(default)]
+    pub lna: bool,
+    #[serde(default = "default_auto")]
+    pub lna2: String,
+    #[serde(default = "default_auto")]
+    pub agc: String,
+    #[serde(default = "default_spur")]
+    pub spur: String,
+    #[serde(default)]
+    pub ext_gain_db: i32,
+}
+
+impl Default for TinySaSettings {
+    fn default() -> Self {
+        Self {
+            points: default_tinysa_points(),
+            rbw: default_auto(),
+            attenuation: default_auto(),
+            lna: false,
+            lna2: default_auto(),
+            agc: default_auto(),
+            spur: default_spur(),
+            ext_gain_db: 0,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -171,6 +219,8 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub sweep: SweepSettings,
+    #[serde(default)]
+    pub tinysa: TinySaSettings,
     /// User-defined layout presets, merged into the built-in set at startup.
     /// A preset here with the same name as a built-in overrides it. Preserved
     /// verbatim across save so hand-written presets survive a quit.
@@ -258,7 +308,7 @@ pub enum Position {
     Body,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct PanelSpec {
     pub name: String,
     pub position: Position,
@@ -281,7 +331,7 @@ pub struct PanelSpec {
 /// `Default` is derived for the tests that care only about `panels`: they close
 /// their literals with `..Default::default()`, so the next field added here does
 /// not break them the way this one did.
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
 pub struct PresetConfig {
     pub panels: Vec<PanelSpec>,
 
@@ -763,6 +813,23 @@ panels = [
         cfg.radio.recall_hz = [92_800_000, 0, 446_006_000];
         let restored: AppConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(restored.radio.recall_hz, [92_800_000, 0, 446_006_000]);
+    }
+
+    #[test]
+    fn tinysa_settings_round_trip() {
+        let mut cfg = AppConfig::default();
+        cfg.tinysa.points = 900;
+        cfg.tinysa.rbw = "10".into();
+        cfg.tinysa.attenuation = "12".into();
+        cfg.tinysa.lna2 = "3".into();
+        cfg.tinysa.ext_gain_db = -7;
+
+        let restored: AppConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.tinysa.points, 900);
+        assert_eq!(restored.tinysa.rbw, "10");
+        assert_eq!(restored.tinysa.attenuation, "12");
+        assert_eq!(restored.tinysa.lna2, "3");
+        assert_eq!(restored.tinysa.ext_gain_db, -7);
     }
 
     #[test]

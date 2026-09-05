@@ -20,6 +20,7 @@
   <b>Tested on real hardware</b><br>
   <a href="https://greatscottgadgets.com/hackrf/one/"><img src="https://img.shields.io/badge/HackRF%20One-brightgreen" alt="HackRF One"></a>
   <a href="https://www.rtl-sdr.com/"><img src="https://img.shields.io/badge/RTL--SDR-green" alt="RTL-SDR"></a>
+  <a href="https://tinysa.org/"><img src="https://img.shields.io/badge/tinySA%20Ultra-brightgreen" alt="tinySA Ultra"></a>
   <a href="https://github.com/portapack-mayhem/mayhem-firmware"><img src="https://img.shields.io/badge/PortaPack%20H4M-blueviolet" alt="PortaPack H4M"></a>
 </p>
 
@@ -53,7 +54,7 @@ It's a hobby project built in my spare time, and honestly, I made it for *you* �
 > [!IMPORTANT]
 > **Project status: early development.** The TUI is feature-complete and the arc now is polish, sharper radio math and bug fixing, not more features.
 >
-> Two radios are **verified on hardware**: HackRF One and RTL-SDR. Anything with a **SoapySDR** driver also works, and that backend is **beta**: it was written from the API rather than from owning the radios, so treat it as "should work, nobody has confirmed it yet". [The docs say exactly which parts are confirmed](user_docs/hardware.md#soapysdr-the-honest-version). If you own one of those, an issue either way is worth a lot to me.
+> HackRF One, RTL-SDR and a tinySA Ultra ZS405 are **verified on hardware**. The backend also covers the basic tinySA and Ultra+ models from the firmware protocol. Anything with a **SoapySDR** driver also works, and that backend is **beta**: it was written from the API rather than from owning the radios, so treat it as "should work, nobody has confirmed it yet". [The docs say exactly which parts are confirmed](user_docs/hardware.md#soapysdr-the-honest-version). If you own one of those, an issue either way is worth a lot to me.
 >
 > Known issues: plenty 😄 If something looks broken, it's either a bug or an undocumented feature. Flip a coin, then open an issue.
 
@@ -130,7 +131,7 @@ Measured the awkward way rather than the easy way. Bandwidth about the carrier, 
 
 ## 📦 Install
 
-**Requirements:** Linux · a HackRF One, an RTL-SDR, or anything SoapySDR speaks to
+**Requirements:** Linux · a HackRF One, RTL-SDR, tinySA, or anything SoapySDR speaks to
 
 ### The one-liner
 
@@ -170,6 +171,7 @@ Piping a script into `sh` means running code you haven't read. You should read i
 sdrtop is on [crates.io](https://crates.io/crates/sdrtop). Cargo compiles it *on your machine*, so it links what your machine actually has and doesn't care about your architecture or distribution.
 
 ```sh
+# Add these only for the native HackRF and RTL-SDR backends.
 sudo apt install libhackrf-dev librtlsdr-dev pkg-config          # Debian / Ubuntu / Mint
 sudo pacman -S hackrf rtl-sdr pkgconf                            # Arch / Manjaro
 sudo dnf install hackrf-devel rtl-sdr-devel pkgconf-pkg-config   # Fedora
@@ -177,7 +179,10 @@ sudo dnf install hackrf-devel rtl-sdr-devel pkgconf-pkg-config   # Fedora
 cargo install sdrtop --locked
 ```
 
-You need both libraries at build time even if you only own one radio. Sorry. Wants **Rust 1.88+**, and your distro's Rust is quite possibly ancient (Debian 12 ships 1.63, bless it), which [rustup](https://rustup.rs) fixes in one line.
+You can skip the radio libraries for a tinySA-only build. sdrtop includes each
+native SDR backend whose development library is present. It wants **Rust 1.88+**,
+and your distro's Rust is quite possibly ancient (Debian 12 ships 1.63, bless
+it), which [rustup](https://rustup.rs) fixes in one line.
 
 Then go make coffee: a few minutes on a laptop, considerably more on a Raspberry Pi. It's not frozen, it's just Rust.
 
@@ -270,6 +275,7 @@ The whole story, in order: [What's new](user_docs/whats-new.md).
 |---|---|---|
 | HackRF One | ✅ Full support | All diagnostics, gain stages, ADC metrics |
 | RTL-SDR (R820T, E4000, R828D) | ✅ Full support | Single tuner gain + AGC; no VGA, no BB filter, no Friis NF |
+| tinySA / Ultra / Ultra+ | ✅ Spectrum support | ZS405 verified; calibrated dBm spectrum, waterfall and native band sweeps |
 | **Anything with a SoapySDR driver** | 🧪 **Beta** | Airspy, SDRplay, Pluto, Lime, bladeRF, USRP, SoapyRemote. Unconfirmed on anything but a HackRF |
 | PortaPack H4M (Mayhem) | ✅ Full support | HackRF mode: all HackRF diagnostics apply |
 | HackRF Pro | 🔲 Planned | Needs hardware |

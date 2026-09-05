@@ -12,6 +12,73 @@ use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
 
+/// How a backend acquires spectrum data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquisitionModel {
+    /// Complex time-domain samples feed sdrtop's FFT and diagnostic workers.
+    IqSamples,
+    /// The instrument returns calibrated power values at requested frequencies.
+    PowerSweep,
+}
+
+/// Unit carried by spectral levels from a backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelUnit {
+    Dbfs,
+    Dbm,
+}
+
+impl LevelUnit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dbfs => "dBFS",
+            Self::Dbm => "dBm",
+        }
+    }
+}
+
+/// Where a direct power trace should be published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerTraceTarget {
+    Spectrum,
+    Sweep,
+}
+
+/// One calibrated trace produced by a swept analyzer.
+#[derive(Debug)]
+pub struct PowerTrace {
+    pub target: PowerTraceTarget,
+    pub generation: u64,
+    pub frequencies_hz: Vec<u64>,
+    pub levels_dbm: Vec<f32>,
+    pub rbw_hz: Option<u32>,
+}
+
+/// A requested native band sweep. `dwell_ms` is the minimum accumulation time
+/// before a completed peak and mean frame is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectSweepConfig {
+    pub start_hz: u64,
+    pub stop_hz: u64,
+    pub dwell_ms: u64,
+    pub generation: u64,
+}
+
+/// One device-specific setting shown in the Options pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceOption {
+    pub id: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub selected: usize,
+}
+
+impl DeviceOption {
+    pub fn selected_value(&self) -> Option<&str> {
+        self.values.get(self.selected).map(String::as_str)
+    }
+}
+
 /// How raw USB bytes encode each I/Q component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleFormat {
@@ -616,6 +683,12 @@ pub enum DeliveryModel {
 /// truth for every clamp, default, and UI capability check. Built once at open.
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
+    pub acquisition: AcquisitionModel,
+    pub level_unit: LevelUnit,
+    pub level_min_db: f32,
+    pub level_max_db: f32,
+    /// Maximum age for a trace before spectrum-based panels mark it stale.
+    pub trace_stale_ms: u128,
     pub freq_min_hz: u64,
     pub freq_max_hz: u64,
     pub sample_rate_min_hz: f64,
@@ -715,6 +788,7 @@ pub struct RxContext {
     pub net_tx: crossbeam_channel::Sender<StreamBlock>,
     /// What the NET feed did with the blocks handed to it, for the poll task.
     pub net_feed: FeedHealth,
+    pub power_tx: crossbeam_channel::Sender<PowerTrace>,
     pub geometry: SampleGeometry,
 }
 
@@ -870,6 +944,20 @@ pub trait SdrDevice: Send + Sync {
     }
     fn set_tuner_agc(&self, _on: bool) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Switch a direct-power backend between the tuned spectrum and a native
+    /// wide sweep.
+    fn set_direct_sweep(&self, _config: Option<DirectSweepConfig>) -> anyhow::Result<()> {
+        anyhow::bail!("this backend does not support direct power sweeps")
+    }
+
+    fn options(&self) -> Vec<DeviceOption> {
+        Vec::new()
+    }
+
+    fn set_option(&self, _id: &str, _value: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this backend has no device options")
     }
 
     /// Set one stage by position, exactly.

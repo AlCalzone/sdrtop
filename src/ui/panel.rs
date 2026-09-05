@@ -40,14 +40,19 @@ pub const FFT_STALE_MS: u128 = 500;
 impl Staleness {
     /// Resolve the rule against a metrics snapshot.
     pub fn resolve(self, state: &SdrMetrics) -> bool {
-        self.decide(
-            state.radio.hw_streaming,
-            state
-                .waterfall
-                .last_fft
-                .as_ref()
-                .map(|fr| fr.timestamp.elapsed().as_millis()),
-        )
+        let age = state
+            .waterfall
+            .last_fft
+            .as_ref()
+            .map(|fr| fr.timestamp.elapsed().as_millis());
+        match self {
+            Staleness::FftAge => {
+                (state.caps.acquisition == crate::hardware::AcquisitionModel::PowerSweep
+                    && !state.radio.hw_streaming)
+                    || age.map(|ms| ms > state.caps.trace_stale_ms).unwrap_or(true)
+            }
+            _ => self.decide(state.radio.hw_streaming, age),
+        }
     }
 
     /// The rule itself, on plain inputs: `fft_age_ms` is `None` when no frame has

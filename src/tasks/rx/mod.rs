@@ -89,6 +89,7 @@ pub fn spawn_rx_task(
                 rate.reset();
                 throughput.reset();
             }
+
             rate.push(drained.last_block_at, drained.bytes);
 
             let computed = Computed {
@@ -138,6 +139,62 @@ pub fn spawn_rx_task(
             // running to put it back.
             control::advance_noise_sweep(&state, &device);
 
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    });
+}
+
+/// Control a backend that publishes complete power traces.
+pub fn spawn_power_rx_task(
+    state: Arc<Mutex<SdrMetrics>>,
+    device: Arc<dyn SdrDevice>,
+    rx_ctx: Arc<RxContext>,
+) {
+    tokio::spawn(async move {
+        let mut active = false;
+        loop {
+            let requested = state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .radio
+                .rx_enabled;
+            match (requested, active) {
+                (true, false) => match device.start_rx(Arc::clone(&rx_ctx)) {
+                    Ok(()) => {
+                        active = true;
+                        let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                        m.radio.rx_start_time = Some(Instant::now());
+                        m.radio.hw_streaming = true;
+                        m.push_log("Power sweep started");
+                    }
+                    Err(error) => {
+                        let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                        m.radio.rx_enabled = false;
+                        m.radio.hw_streaming = false;
+                        m.push_log(format!("Error starting power sweep: {error}"));
+                    }
+                },
+                (false, true) => {
+                    let result = device.stop_rx();
+                    active = false;
+                    let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                    m.radio.rx_start_time = None;
+                    m.radio.hw_streaming = false;
+                    match result {
+                        Ok(()) => m.push_log("Power sweep stopped"),
+                        Err(error) => m.push_log(format!("Error stopping power sweep: {error}")),
+                    }
+                }
+                (true, true) if !device.is_streaming() => {
+                    active = false;
+                    let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                    m.radio.rx_enabled = false;
+                    m.radio.hw_streaming = false;
+                    m.radio.rx_start_time = None;
+                    m.push_log("WARNING: Power sweep stopped unexpectedly");
+                }
+                _ => {}
+            }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });

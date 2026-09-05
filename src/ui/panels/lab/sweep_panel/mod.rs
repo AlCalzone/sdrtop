@@ -138,18 +138,22 @@ impl Panel for SweepPanel {
             return;
         }
 
-        let env = Envelope::project(frame, plot_w, sw.show_peak);
+        let y_min = state.spectrum.y_min;
+        let y_max = state.spectrum.y_max;
+        let env = Envelope::project(frame, plot_w, sw.show_peak, y_min, y_max);
         let cursor = sw
             .cursor_frac
             .map(|frac| (scale::cursor_x(frac, env.len()), theme.value_hi));
 
-        axes::draw_gutter(f, gutter, plot_h, theme);
+        axes::draw_gutter(f, gutter, plot_h, y_min, y_max, theme);
         trace::draw(
             f,
             canvas,
             env.body.clone(),
-            Gradient::new(plot_h, theme),
+            Gradient::new(plot_h, y_min, y_max, theme),
             cursor,
+            y_min,
+            y_max,
         );
         axes::draw_frequency(f, rows[1], frame.start_hz, frame.stop_hz, plot_w, theme);
         f.render_widget(

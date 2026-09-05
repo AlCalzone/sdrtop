@@ -492,6 +492,7 @@ mod tests {
         let (sample_tx, sample_rx) = crossbeam_channel::bounded(fft_cap);
         let (demod_tx, demod_rx) = crossbeam_channel::bounded(8);
         let (net_tx, net_rx) = crossbeam_channel::bounded(net_cap);
+        let (power_tx, _) = crossbeam_channel::bounded(1);
         let mut m = SdrMetrics::fixture();
         m.demod.enabled = true;
         m.ui.section = crate::signal::net::SECTION.to_string();
@@ -502,6 +503,7 @@ mod tests {
             demod_tx,
             net_tx,
             net_feed: crate::hardware::FeedHealth::default(),
+            power_tx,
             geometry: eight_bit(),
         };
         (Arc::new(ctx), sample_rx, demod_rx, net_rx)

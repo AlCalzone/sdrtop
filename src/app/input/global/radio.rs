@@ -87,16 +87,23 @@ pub(super) fn begin_frequency_input(ctx: &mut InputCtx<'_>) {
 /// `[S]` - type a sample rate, with the device's own legal range in the prompt.
 pub(super) fn begin_sample_rate_input(ctx: &mut InputCtx<'_>) {
     let Some(device) = ctx.device else { return };
-    let (lo, hi) = {
+    let (lo, hi, name) = {
         let c = device.capabilities();
-        (c.sample_rate_min_hz / 1e6, c.sample_rate_max_hz / 1e6)
+        (
+            c.sample_rate_min_hz / 1e6,
+            c.sample_rate_max_hz / 1e6,
+            if c.acquisition == crate::hardware::AcquisitionModel::PowerSweep {
+                "span"
+            } else {
+                "sample rate"
+            },
+        )
     };
     let mut m = metrics(ctx.state);
     m.ui.input_mode = InputMode::SampleRateInput;
     m.ui.input_buf.clear();
     m.push_log(format!(
-        "Enter sample rate in MHz ({:.1}\u{2013}{:.1}), then press Enter",
-        lo, hi
+        "Enter {name} in MHz ({lo:.1}\u{2013}{hi:.1}), then press Enter",
     ));
 }
 

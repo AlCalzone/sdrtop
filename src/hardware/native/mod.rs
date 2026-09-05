@@ -13,5 +13,14 @@
 //! Deciding between them, when the same radio is reachable two ways, is
 //! [`super::discovery`]'s job.
 
+#[cfg(has_hackrf)]
 pub mod hackrf;
+#[cfg(not(has_hackrf))]
+#[path = "hackrf/stub.rs"]
+pub mod hackrf;
+
+#[cfg(has_rtlsdr)]
+pub mod rtlsdr;
+#[cfg(not(has_rtlsdr))]
+#[path = "rtlsdr/stub.rs"]
 pub mod rtlsdr;

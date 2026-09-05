@@ -128,11 +128,18 @@ pub(super) fn sample_rate(
                         m.radio.bb_filter_hz = set.bb_filter_hz;
                         m.ui.input_mode = InputMode::Normal;
                         m.ui.input_buf.clear();
+                        let name = if m.caps.acquisition
+                            == crate::hardware::AcquisitionModel::PowerSweep
+                        {
+                            "Span"
+                        } else {
+                            "Sample rate"
+                        };
                         m.push_log(if set.rate_hz == hz {
-                            format!("Sample rate set to {:.3} MHz", hz / 1e6)
+                            format!("{name} set to {:.3} MHz", hz / 1e6)
                         } else {
                             format!(
-                                "Sample rate {:.3} MHz is not on this radio's grid; running at \
+                                "{name} {:.3} MHz is not on this device's grid; running at \
                                  {:.3} MHz",
                                 hz / 1e6,
                                 set.rate_hz / 1e6

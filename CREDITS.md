@@ -8,6 +8,11 @@ This project was developed with humans and AI working together.
   R828D / E4000), written against the `SdrDevice` abstraction and confirmed on
   real hardware in both normal RX and observer mode. It is the single change
   that took sdrtop from a one-device app to a two-device one.
+- **[Erik Kaashoek](https://github.com/erikkaashoek)**: the tinySA firmware and
+  its authoritative USB console protocol.
+- **[QtTinySA](https://github.com/g4ixt/QtTinySA)** and
+  **[Ho-Ro's nanoVNA tools](https://github.com/Ho-Ro/nanovna-tools)**: reference
+  clients used to cross-check tinySA discovery, framing and binary sweep data.
 
 Found a bug, tested a clone nobody else owns, or sent a patch? Open an issue or
 a pull request and your name belongs here too.

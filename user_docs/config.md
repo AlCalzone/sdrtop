@@ -27,8 +27,8 @@ The config is **device-agnostic**: the same file works for a HackRF or an
 RTL-SDR. Any value outside the active device's range is clamped into it at
 startup rather than rejected, so a config saved on a HackRF at 2.4 GHz and
 10 Msps still boots an RTL-SDR at a legal frequency and rate instead of failing.
-With more than one radio connected, pick one with
-`--device hackrf|rtlsdr|soapy`.
+With more than one device connected, pick one with
+`--device hackrf|rtlsdr|tinysa|soapy`.
 
 ---
 
@@ -59,6 +59,16 @@ base = "nord"                        # see themes.md for the six palettes
 start_hz = 400000000       # scanner band start
 stop_hz  = 500000000       # scanner band end
 dwell_ms = 200             # measure time per step (50–2000)
+
+[tinysa]
+points        = 450         # 64, 128, 290, 450, 900 or 1800
+rbw           = "auto"      # auto, or a supported value in kHz
+attenuation   = "auto"      # auto, or 0 through 31 dB
+lna           = false       # Ultra and Ultra+ only
+lna2          = "auto"      # Ultra and Ultra+: auto, or 0 through 7
+agc           = "auto"      # Ultra and Ultra+: auto, or 0 through 7
+spur          = "auto"      # basic: off/on; Ultra: off/on/auto
+ext_gain_db   = 0           # external gain correction, -100 through +100 dB
 ```
 
 Each waterfall cell shows two rows of history, so `waterfall_max_rows` is twice
@@ -127,9 +137,9 @@ spectrum focus, and both persist once you've picked one.
 
 ## Runtime input: frequency and sample rate
 
-While sdrtop is running, `f` prompts for a frequency and `s` for a sample rate,
-both **in MHz**, both as a plain number. No units, no suffixes: `92.8`, `433.92`,
-`1090`, `2400`.
+While sdrtop is running, `f` prompts for a frequency. `s` prompts for sample rate
+on an IQ radio and span on a tinySA. Both inputs use MHz as a plain number. No
+units or suffixes: `92.8`, `433.92`, `1090`, `2400`.
 
 A value outside your device's range is clamped into it rather than rejected, so
 typing `9000` on an RTL-SDR gets you its ceiling instead of an error. Something
@@ -174,6 +184,9 @@ frequency. Your last band and dwell are saved on quit.
 
 A sweep cycle takes a couple of seconds, so it's for *finding* signals rather than
 real-time monitoring. Once you spot one, `Enter` tunes to it.
+
+On a tinySA, the analyzer scans the requested band directly. `dwell_ms` is the
+minimum time used to accumulate each published peak and mean cycle.
 
 ---
 ## Custom layout presets

@@ -4,7 +4,7 @@ Welcome. This is the plain-language guide to using sdrtop.
 
 > **Status:** the interactive TUI is feature-complete (spectrum, waterfall, the
 > four lab benches, the sweep scanner and the micro field views), and both the
-> HackRF One and the RTL-SDR are fully supported. Anything with a **SoapySDR**
+> HackRF One, RTL-SDR and tinySA Ultra ZS405 are verified on hardware. Anything with a **SoapySDR**
 > driver now works too, written from the API rather than from owning the radio,
 > which is a different kind of "supported" and
 > [says so out loud](hardware.md#soapysdr-the-honest-version). The current arc is
@@ -37,7 +37,7 @@ Welcome. This is the plain-language guide to using sdrtop.
   your own
 - **[Themes](themes.md)**: the six palettes, per-field overrides, and writing
   your own
-- **[Supported hardware](hardware.md)**: what works today, and how the two
+- **[Supported hardware](hardware.md)**: what works today, and how the devices
   radios differ
 
 ## Updates

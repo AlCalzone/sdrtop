@@ -289,7 +289,8 @@ fn contents(
     let columns = Columns::new(row_bins, wf.hz_zoom, cols);
 
     cells::draw(
-        f, plot, &buf.rows, &columns, cursor_col, skip_data, wf.db_min, wf.palette, theme,
+        f, plot, &buf.rows, &columns, cursor_col, skip_data, wf.db_min, wf.db_max, wf.palette,
+        theme,
     );
 
     // Bonded, the spectrum above already carries the band plan; twice is noise.
@@ -305,6 +306,7 @@ fn contents(
             ..content
         },
         wf.db_min,
+        wf.db_max,
         wf.palette,
         theme,
     );

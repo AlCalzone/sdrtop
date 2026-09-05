@@ -23,10 +23,6 @@ use ratatui::{
 
 use crate::palette::{magnitude_to_color_palette, ColorDepth, WaterfallPalette};
 
-/// Top of the colour scale. The waterfall is always referenced to full scale;
-/// only the floor (`db_min`) moves, under `↑`/`↓`.
-pub(super) const DB_MAX: f32 = 0.0;
-
 /// Max dB over the bin range `[start, end)` of one waterfall row, clamped to the
 /// row's own length. Rows are normally all the (fixed) FFT bin count, but reading
 /// each row against its own length means a row that ever differs - e.g. if the FFT
@@ -88,12 +84,13 @@ pub(super) fn draw(
     cursor_col: Option<usize>,
     skip_data: usize,
     db_min: f32,
+    db_max: f32,
     palette: WaterfallPalette,
     theme: &crate::Theme,
 ) {
     let cols = area.width as usize;
     let depth = ColorDepth::detect();
-    let color = |db: f32| magnitude_to_color_palette(db, db_min, DB_MAX, depth, theme, palette);
+    let color = |db: f32| magnitude_to_color_palette(db, db_min, db_max, depth, theme, palette);
     let floor = color(f32::NEG_INFINITY);
 
     let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);

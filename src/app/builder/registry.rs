@@ -17,16 +17,33 @@ use crate::ui;
 use crate::app::App;
 
 impl App {
-    /// `net_admitted` comes from `signal::net::gate`: on a radio that cannot
-    /// reach the 2.4 GHz band, or cannot run even the cheapest mode there, the
-    /// presets in that section are dropped here and the section is **absent**
-    /// from the menu rather than present and empty. Rule 2, and the same
-    /// decision the RF bench makes about its noise-figure card.
+    #[cfg(test)]
     pub(super) fn build_ui(
         active_preset: &str,
         user_presets: &HashMap<String, crate::config::PresetConfig>,
         presets_dir: Option<&std::path::Path>,
         net_admitted: bool,
+    ) -> (ui::LayoutEngine, HashMap<char, &'static str>) {
+        Self::build_ui_for(
+            active_preset,
+            user_presets,
+            presets_dir,
+            net_admitted,
+            crate::hardware::AcquisitionModel::IqSamples,
+        )
+    }
+
+    /// `net_admitted` comes from `signal::net::gate`: on a radio that cannot
+    /// reach the 2.4 GHz band, or cannot run even the cheapest mode there, the
+    /// presets in that section are dropped here and the section is **absent**
+    /// from the menu rather than present and empty. Rule 2, and the same
+    /// decision the RF bench makes about its noise-figure card.
+    pub(super) fn build_ui_for(
+        active_preset: &str,
+        user_presets: &HashMap<String, crate::config::PresetConfig>,
+        presets_dir: Option<&std::path::Path>,
+        net_admitted: bool,
+        acquisition: crate::hardware::AcquisitionModel,
     ) -> (ui::LayoutEngine, HashMap<char, &'static str>) {
         let mut registry = ui::PanelRegistry::new();
         registry.register(ui::HeaderPanel);
@@ -81,10 +98,60 @@ impl App {
                 .presets
                 .retain(|_, p| p.section.as_deref() != Some(ui::menu::model::NET));
         }
-
+        if acquisition == crate::hardware::AcquisitionModel::PowerSweep {
+            Self::filter_power_sweep_layouts(&mut layout);
+        }
         let mut engine = ui::LayoutEngine::new(layout, registry);
         engine.set_preset(active_preset);
         (engine, focus_keys)
+    }
+
+    fn filter_power_sweep_layouts(config: &mut LayoutConfig) {
+        const UNSUPPORTED_BUILTINS: &[&str] = &[
+            "command_rail",
+            "main",
+            "lab_iq",
+            "lab_rf",
+            "lab_timing",
+            "lab_signal",
+            "micro_main",
+            "micro_signal",
+            "micro_gain",
+            "micro_health",
+            "observer",
+        ];
+        const COMMON: &[&str] = &[
+            "header",
+            "header_slim",
+            "spectrum",
+            "waterfall",
+            "sweep_panel",
+            "sweep_strip",
+            "micro_sweep_panel",
+            "log",
+            "footer",
+        ];
+        const INSTRUMENTS: &[&str] = &["spectrum", "waterfall", "sweep_panel", "micro_sweep_panel"];
+
+        let builtins = LayoutConfig::default_config().presets;
+        config.presets.retain(|name, preset| {
+            !UNSUPPORTED_BUILTINS.contains(&name.as_str())
+                || builtins.get(name).is_none_or(|builtin| builtin != preset)
+        });
+        for preset in config.presets.values_mut() {
+            preset
+                .panels
+                .retain(|panel| COMMON.contains(&panel.name.as_str()));
+        }
+        config.presets.retain(|_, preset| {
+            preset
+                .panels
+                .iter()
+                .any(|panel| INSTRUMENTS.contains(&panel.name.as_str()))
+        });
+        if !config.presets.contains_key(&config.active_preset) {
+            config.active_preset = "spectrum_waterfall".into();
+        }
     }
 }
 
@@ -363,6 +430,71 @@ mod tests {
         let (engine, _) = App::build_ui("my_layout", &user, None, true);
         assert_eq!(engine.active_preset(), "my_layout");
         assert!(engine.is_panel_visible("spectrum"));
+    }
+
+    #[test]
+    fn a_power_sweep_device_keeps_only_trace_layouts() {
+        let (engine, _) = App::build_ui_for(
+            "command_rail",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionModel::PowerSweep,
+        );
+        for available in [
+            "spectrum",
+            "waterfall",
+            "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
+        ] {
+            assert!(engine.has_preset(available), "{available} was hidden");
+        }
+        for unavailable in [
+            "command_rail",
+            "lab_iq",
+            "lab_rf",
+            "lab_timing",
+            "lab_signal",
+        ] {
+            assert!(!engine.has_preset(unavailable), "{unavailable} survived");
+        }
+        assert_eq!(engine.active_preset(), "spectrum_waterfall");
+    }
+
+    #[test]
+    fn a_trace_compatible_override_of_a_builtin_name_survives() {
+        let mut user = HashMap::new();
+        user.insert(
+            "main".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "header_slim".into(),
+                        position: crate::config::Position::Top,
+                        height: Some(4),
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "spectrum".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let (engine, _) = App::build_ui_for(
+            "main",
+            &user,
+            None,
+            false,
+            crate::hardware::AcquisitionModel::PowerSweep,
+        );
+        assert!(engine.has_preset("main"));
+        assert_eq!(engine.active_preset(), "main");
+        assert!(engine.is_panel_visible("header_slim"));
     }
 
     /// A full-height waterfall must reach its own bottom border.

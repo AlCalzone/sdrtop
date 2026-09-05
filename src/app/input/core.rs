@@ -100,14 +100,16 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
             let new_min = (m.spectrum.y_min + 10.0).min(m.spectrum.y_max - 20.0);
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
-            m.push_log(format!("Zoom: {:.0}…{:.0} dBFS", new_min, ymax));
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!("Zoom: {new_min:.0}\u{2026}{ymax:.0} {unit}"));
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.spectrum.y_min - 10.0).max(-120.0);
+            let new_min = (m.spectrum.y_min - 10.0).max(m.caps.level_min_db);
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
-            m.push_log(format!("Zoom: {:.0}…{:.0} dBFS", new_min, ymax));
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!("Zoom: {new_min:.0}\u{2026}{ymax:.0} {unit}"));
         }
         KeyCode::Char('j') => {
             let mut m = metrics(state);
@@ -138,7 +140,7 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                         .map(|(i, _)| i)
                         .unwrap_or(frame.bins_dbfs.len() / 2);
-                    let left_hz = m.radio.frequency as f64 - frame.sample_rate / 2.0;
+                    let left_hz = frame.center_freq_hz as f64 - frame.sample_rate / 2.0;
                     (left_hz + peak_bin as f64 / frame.bins_dbfs.len() as f64 * frame.sample_rate)
                         .round() as u64
                 } else {
@@ -215,15 +217,23 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
     match key.code {
         KeyCode::Up => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min + 10.0).min(-20.0);
+            let new_min = (m.waterfall.db_min + 10.0).min(m.waterfall.db_max - 20.0);
             m.waterfall.db_min = new_min;
-            m.push_log(format!("Waterfall zoom: {:.0}…0 dBFS", new_min));
+            let max = m.waterfall.db_max;
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!(
+                "Waterfall zoom: {new_min:.0}\u{2026}{max:.0} {unit}"
+            ));
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min - 10.0).max(-120.0);
+            let new_min = (m.waterfall.db_min - 10.0).max(m.caps.level_min_db);
             m.waterfall.db_min = new_min;
-            m.push_log(format!("Waterfall zoom: {:.0}…0 dBFS", new_min));
+            let max = m.waterfall.db_max;
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!(
+                "Waterfall zoom: {new_min:.0}\u{2026}{max:.0} {unit}"
+            ));
         }
         KeyCode::Char('[') => {
             let mut m = metrics(state);

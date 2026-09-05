@@ -42,6 +42,7 @@ pub enum OnSingle {
 /// to say so without pretending it is an RTL-SDR.
 pub enum Needs {
     Always,
+    Gain,
     SecondStage,
     Boost,
 }
@@ -50,6 +51,7 @@ impl Needs {
     fn met(&self, model: &GainModel) -> bool {
         match self {
             Needs::Always => true,
+            Needs::Gain => !model.stages().is_empty(),
             Needs::SecondStage => model.has_second_stage(),
             Needs::Boost => model.has_boost(),
         }
@@ -104,7 +106,7 @@ pub const GLOBAL: &[(&str, &[Binding])] = &[
                 ch: None,
                 what: "LNA gain, down and up",
                 single: OnSingle::Reword("tuner gain, down and up, in steps"),
-                needs: Needs::Always,
+                needs: Needs::Gain,
             },
             Binding {
                 key: "[",
@@ -279,8 +281,7 @@ mod tests {
         }
     }
 
-    /// A device with no automatic gain mode and no second stage is offered
-    /// neither, and the reference is three rows shorter than a HackRF's.
+    /// A device with no gain elements is offered no gain controls.
     ///
     /// This is not a hypothetical device: `SoapySDRUtil --probe="driver=hackrf"`
     /// reports `Supports AGC: NO`, so a HackRF reached through SoapySDR is
@@ -307,9 +308,12 @@ mod tests {
             text(&chain)
         );
         assert!(!text(&chain).contains("VGA"), "and no second stage either");
-        assert_eq!(chain.len(), hackrf.len() - 3, "two VGA rows and the boost");
-        // The group survives, because the primary gain key is still there.
-        assert!(text(&chain).contains("GAIN"), "{}", text(&chain));
+        assert_eq!(
+            chain.len(),
+            hackrf.len() - 6,
+            "the four gain rows and their group spacing"
+        );
+        assert!(!text(&chain).contains("GAIN"), "{}", text(&chain));
     }
 
     /// The RTL-SDR reference drops the VGA rows rather than describing a knob

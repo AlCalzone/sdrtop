@@ -293,6 +293,7 @@ pub fn list() -> Vec<DeviceListing> {
                     index: i,
                     label: format!("HackRF One · {}", serial),
                     args: None,
+                    path: None,
                     serial: Some(serial.clone()),
                 });
             }
@@ -332,6 +333,11 @@ pub fn gain_model() -> GainModel {
 /// HackRF One capability descriptor - also used as the observer-mode default.
 pub fn caps() -> DeviceCapabilities {
     DeviceCapabilities {
+        acquisition: crate::hardware::AcquisitionModel::IqSamples,
+        level_unit: crate::hardware::LevelUnit::Dbfs,
+        level_min_db: -120.0,
+        level_max_db: 0.0,
+        trace_stale_ms: 500,
         freq_min_hz: 1_000_000,
         freq_max_hz: 6_000_000_000,
         sample_rate_min_hz: 2_000_000.0,

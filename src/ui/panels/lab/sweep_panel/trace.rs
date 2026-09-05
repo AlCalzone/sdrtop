@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use super::scale::{Gradient, Y_MAX, Y_MIN};
+use super::scale::Gradient;
 
 pub(super) fn draw(
     f: &mut Frame,
@@ -19,12 +19,14 @@ pub(super) fn draw(
     body: Vec<f32>,
     gradient: Gradient,
     cursor: Option<(f64, Color)>,
+    y_min: f32,
+    y_max: f32,
 ) {
     let x_max = (body.len() as f64 - 1.0).max(0.0);
     f.render_widget(
         Canvas::default()
             .x_bounds([0.0, x_max])
-            .y_bounds([Y_MIN as f64, Y_MAX as f64])
+            .y_bounds([y_min as f64, y_max as f64])
             .paint(move |ctx| {
                 // 1. Filled body. One horizontal run per band step, so a plateau
                 // costs one line rather than one per column.
@@ -66,9 +68,9 @@ pub(super) fn draw(
                 if let Some((cx, color)) = cursor {
                     ctx.draw(&CanvasLine {
                         x1: cx,
-                        y1: Y_MIN as f64,
+                        y1: y_min as f64,
                         x2: cx,
-                        y2: Y_MAX as f64,
+                        y2: y_max as f64,
                         color,
                     });
                 }

@@ -23,6 +23,10 @@ const DWELL_POLL_MS: u64 = 10;
 const FRAME_FRESH_MS: u128 = 200;
 
 pub fn spawn_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice>) {
+    if device.capabilities().acquisition == crate::hardware::AcquisitionModel::PowerSweep {
+        spawn_direct_sweep_task(state, device);
+        return;
+    }
     tokio::spawn(async move {
         let mut was_active = false;
         let mut saved_rx_enabled = false;
@@ -85,6 +89,7 @@ pub fn spawn_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice
                         "Sweep stopped".to_string()
                     });
                 }
+
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -181,6 +186,89 @@ pub fn spawn_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice
                     }));
                 }
             }
+        }
+    });
+}
+
+fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice>) {
+    tokio::spawn(async move {
+        let mut was_active = false;
+        let mut applied: Option<crate::hardware::DirectSweepConfig> = None;
+        let mut saved_freq = 0;
+        let mut saved_rx_enabled = false;
+
+        loop {
+            let (active, config, mut generation) = {
+                let m = state.lock().unwrap_or_else(|e| e.into_inner());
+                (m.sweep.active, m.sweep.config.clone(), m.sweep.generation)
+            };
+
+            if active && !was_active {
+                was_active = true;
+                let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                saved_freq = m.radio.frequency;
+                saved_rx_enabled = m.radio.rx_enabled;
+                m.radio.rx_enabled = true;
+                m.sweep.cycle_count = 0;
+                m.sweep.generation = m.sweep.generation.wrapping_add(1);
+                generation = m.sweep.generation;
+                m.sweep.positions_done = 0;
+                m.sweep.positions_total = 0;
+                m.push_log(format!(
+                    "Sweep started: {:.1}\u{2013}{:.1} MHz",
+                    config.start_hz as f64 / 1e6,
+                    config.stop_hz as f64 / 1e6
+                ));
+            }
+
+            if active {
+                let requested = crate::hardware::DirectSweepConfig {
+                    start_hz: config.start_hz,
+                    stop_hz: config.stop_hz,
+                    dwell_ms: config.dwell_ms,
+                    generation,
+                };
+                if applied != Some(requested) {
+                    match device.set_direct_sweep(Some(requested)) {
+                        Ok(()) => applied = Some(requested),
+                        Err(error) => {
+                            applied = Some(requested);
+                            let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                            m.radio.rx_enabled = false;
+                            m.push_log(format!("Sweep error: {error}"));
+                        }
+                    }
+                }
+            } else if was_active {
+                was_active = false;
+                applied = None;
+                let target = {
+                    let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                    m.sweep.pending_tune.take().unwrap_or(saved_freq)
+                };
+                let sweep_result = device.set_direct_sweep(None);
+                let tune_result = device.set_frequency(target);
+                let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                m.radio.frequency = target;
+                m.radio.rx_enabled = if target != saved_freq {
+                    true
+                } else {
+                    saved_rx_enabled
+                };
+                m.sweep.cursor_frac = None;
+                for result in [sweep_result, tune_result] {
+                    if let Err(error) = result {
+                        m.push_log(format!("Sweep restore error: {error}"));
+                    }
+                }
+                m.push_log(if target != saved_freq {
+                    format!("Tuned to {:.3} MHz from sweep", target as f64 / 1e6)
+                } else {
+                    "Sweep stopped".to_string()
+                });
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 }

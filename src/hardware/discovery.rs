@@ -12,10 +12,11 @@
 //! Everything in this file is about identity and offering. Opening a device is
 //! the backend's job; [`open_device`] only dispatches to it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::native::{hackrf, rtlsdr};
-use super::{soapy, sysfs, DeviceCapabilities, SdrDevice};
+use super::{soapy, sysfs, tinysa, DeviceCapabilities, SdrDevice};
 
 /// Which backend a [`DeviceListing`] / open request targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub enum DeviceKind {
     HackRf,
     RtlSdr,
     Soapy,
+    TinySa,
 }
 
 /// What observer mode needs in order to describe a device it cannot open.
@@ -64,7 +66,7 @@ impl DeviceKind {
                 scan: sysfs::find_rtlsdr,
                 caps: rtlsdr::observer_caps,
             }),
-            DeviceKind::Soapy => None,
+            DeviceKind::Soapy | DeviceKind::TinySa => None,
         }
     }
 }
@@ -75,6 +77,7 @@ impl DeviceKind {
 #[derive(Clone, Debug)]
 pub struct DeviceListing {
     pub kind: DeviceKind,
+    #[cfg_attr(not(any(has_hackrf, has_rtlsdr)), allow(dead_code))]
     pub index: usize,
     pub label: String,
     /// The device's serial as its own backend spells it, when it has one.
@@ -89,6 +92,8 @@ pub struct DeviceListing {
     /// a race. The two native backends genuinely are index addressed, so they
     /// carry nothing here.
     pub args: Option<String>,
+    /// Character-device path for serial backends.
+    pub path: Option<PathBuf>,
 }
 
 /// Normalise a serial so two backends' spellings of the same radio compare
@@ -125,9 +130,10 @@ pub fn parse_device_arg(spec: &str) -> anyhow::Result<(DeviceKind, Option<String
         "hackrf" => DeviceKind::HackRf,
         "rtlsdr" | "rtl-sdr" | "rtl" => DeviceKind::RtlSdr,
         "soapy" | "soapysdr" => DeviceKind::Soapy,
+        "tinysa" | "tiny-sa" => DeviceKind::TinySa,
         other => anyhow::bail!(
-            "Unknown --device '{other}' (use 'hackrf', 'rtlsdr', or \
-             'soapy', optionally as 'soapy=driver=airspy')"
+            "Unknown --device '{other}' (use 'hackrf', 'rtlsdr', 'tinysa', or \
+             'soapy'; tinysa and soapy accept '=selector')"
         ),
     };
     Ok((kind, filter))
@@ -163,6 +169,22 @@ pub fn list_all_devices(
     let mut out = Vec::new();
     out.extend(hackrf::list());
     out.extend(rtlsdr::list());
+    let tinysa = if want == Some(DeviceKind::TinySa) {
+        match soapy_filter.filter(|value| !value.is_empty()) {
+            Some(path) => vec![DeviceListing {
+                kind: DeviceKind::TinySa,
+                index: 0,
+                label: format!("tinySA \u{00b7} {path}"),
+                serial: None,
+                args: None,
+                path: Some(PathBuf::from(path)),
+            }],
+            None => tinysa::list(),
+        }
+    } else {
+        tinysa::list()
+    };
+    out.extend(tinysa);
     // A radio the native backend also found is normally dropped. Not when the
     // user asked for SoapySDR by name: then the Soapy path is the thing they
     // wanted, and hiding it would leave `--device soapy` finding nothing at all
@@ -228,15 +250,42 @@ fn offer_soapy(
 }
 
 /// Opens the device a listing points at, as a trait object.
-pub fn open_device(listing: &DeviceListing) -> anyhow::Result<Arc<dyn SdrDevice>> {
+pub fn open_device(
+    listing: &DeviceListing,
+    tinysa_settings: &crate::config::TinySaSettings,
+) -> anyhow::Result<Arc<dyn SdrDevice>> {
     match listing.kind {
-        DeviceKind::HackRf => Ok(Arc::new(hackrf::HackRfDevice::open(listing.index)?)),
-        DeviceKind::RtlSdr => Ok(Arc::new(rtlsdr::RtlDevice::open(listing.index)?)),
+        DeviceKind::HackRf => {
+            #[cfg(has_hackrf)]
+            {
+                Ok(Arc::new(hackrf::HackRfDevice::open(listing.index)?))
+            }
+            #[cfg(not(has_hackrf))]
+            {
+                anyhow::bail!("HackRF support was not built; install libhackrf-dev and rebuild")
+            }
+        }
+        DeviceKind::RtlSdr => {
+            #[cfg(has_rtlsdr)]
+            {
+                Ok(Arc::new(rtlsdr::RtlDevice::open(listing.index)?))
+            }
+            #[cfg(not(has_rtlsdr))]
+            {
+                anyhow::bail!("RTL-SDR support was not built; install librtlsdr-dev and rebuild")
+            }
+        }
         DeviceKind::Soapy => {
             let Some(args) = listing.args.as_deref() else {
                 anyhow::bail!("a SoapySDR listing with no device arguments cannot be opened");
             };
             Ok(Arc::new(soapy::device::SoapyDevice::open(args)?))
+        }
+        DeviceKind::TinySa => {
+            let Some(path) = listing.path.as_deref() else {
+                anyhow::bail!("a tinySA listing with no serial port cannot be opened");
+            };
+            Ok(Arc::new(tinysa::TinySaDevice::open(path, tinysa_settings)?))
         }
     }
 }
@@ -257,6 +306,7 @@ mod tests {
             label: label.to_string(),
             serial: serial.map(str::to_string),
             args: args.map(str::to_string),
+            path: None,
         }
     }
 
@@ -449,6 +499,9 @@ mod tests {
         for s in ["soapy", "soapysdr", "SoapySDR"] {
             assert_eq!(parse_device_arg(s).unwrap().0, DeviceKind::Soapy, "{s}");
         }
+        for s in ["tinysa", "tiny-sa", "TinySA"] {
+            assert_eq!(parse_device_arg(s).unwrap().0, DeviceKind::TinySa, "{s}");
+        }
     }
 
     /// `--device soapy=` is a backend with an empty filter, and an empty filter
@@ -479,6 +532,7 @@ mod tests {
             DeviceKind::Soapy.observer_profile().is_none(),
             "there is no sysfs profile for whatever SoapySDR was talking to"
         );
+        assert!(DeviceKind::TinySa.observer_profile().is_none());
     }
 
     /// The failure the deleted assertion existed to prevent: a user staring at

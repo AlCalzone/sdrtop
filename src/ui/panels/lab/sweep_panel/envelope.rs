@@ -10,8 +10,6 @@
 
 use crate::state::SweepFrame;
 
-use super::scale::{Y_MAX, Y_MIN};
-
 /// Horizontal buckets per character cell.
 ///
 /// Two, because the canvas draws in braille and a single-bin peak projected at
@@ -27,16 +25,22 @@ pub(super) struct Envelope {
 }
 
 impl Envelope {
-    pub(super) fn project(frame: &SweepFrame, plot_w: usize, show_peak: bool) -> Self {
+    pub(super) fn project(
+        frame: &SweepFrame,
+        plot_w: usize,
+        show_peak: bool,
+        y_min: f32,
+        y_max: f32,
+    ) -> Self {
         let n = (plot_w * BUCKETS_PER_CELL).max(2);
         let raw = frame.project(n, show_peak);
         let body = raw
             .iter()
             .map(|&v| {
                 if v.is_finite() {
-                    v.clamp(Y_MIN, Y_MAX)
+                    v.clamp(y_min, y_max)
                 } else {
-                    Y_MIN
+                    y_min
                 }
             })
             .collect();
@@ -58,6 +62,13 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    const Y_MIN: f32 = -100.0;
+    const Y_MAX: f32 = 0.0;
+
+    fn project(frame: &SweepFrame, width: usize, peak: bool) -> Envelope {
+        Envelope::project(frame, width, peak, Y_MIN, Y_MAX)
+    }
+
     fn frame(peaks: &[f32]) -> SweepFrame {
         let n = peaks.len() as u64;
         SweepFrame {
@@ -74,7 +85,7 @@ mod tests {
 
     #[test]
     fn the_plot_is_projected_at_two_buckets_per_cell() {
-        let e = Envelope::project(&frame(&[-50.0; 8]), 20, true);
+        let e = project(&frame(&[-50.0; 8]), 20, true);
         assert_eq!(e.len(), 40);
     }
 
@@ -82,7 +93,7 @@ mod tests {
     /// than an empty one that panics on `len() - 1`.
     #[test]
     fn a_zero_width_plot_still_has_two_buckets() {
-        assert_eq!(Envelope::project(&frame(&[-50.0]), 0, true).len(), 2);
+        assert_eq!(project(&frame(&[-50.0]), 0, true).len(), 2);
     }
 
     /// An unvisited bucket must stay unknown in `raw` and be floored in `body`.
@@ -93,7 +104,7 @@ mod tests {
         // Only two positions across a band wide enough for many buckets.
         let mut f = frame(&[-30.0, -40.0]);
         f.stop_hz = f.start_hz + 100_000_000;
-        let e = Envelope::project(&f, 20, true);
+        let e = project(&f, 20, true);
         let empty = e
             .raw
             .iter()
@@ -107,7 +118,7 @@ mod tests {
     /// Levels above the window are clamped, not drawn off the top of the canvas.
     #[test]
     fn levels_outside_the_window_are_clamped_for_drawing() {
-        let e = Envelope::project(&frame(&[20.0, -250.0]), 4, true);
+        let e = project(&frame(&[20.0, -250.0]), 4, true);
         assert!(e.body.iter().all(|&v| (Y_MIN..=Y_MAX).contains(&v)));
         // …but `raw` keeps what was measured, so the readout is honest.
         assert!(e.raw.iter().any(|&v| v > Y_MAX));
@@ -116,8 +127,8 @@ mod tests {
     #[test]
     fn peak_and_mean_select_different_curves() {
         let f = frame(&[-30.0, -30.0, -30.0, -30.0]);
-        let peak = Envelope::project(&f, 4, true);
-        let mean = Envelope::project(&f, 4, false);
+        let peak = project(&f, 4, true);
+        let mean = project(&f, 4, false);
         let hi = peak.raw.iter().cloned().fold(f32::MIN, f32::max);
         let lo = mean.raw.iter().cloned().fold(f32::MIN, f32::max);
         assert!(hi > lo, "peak {hi} should sit above mean {lo}");

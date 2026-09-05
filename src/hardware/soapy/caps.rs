@@ -163,6 +163,11 @@ pub fn capabilities(a: &DriverAnswers) -> Result<Built, Unsupported> {
     let boost = element_boost.or(a.has_gain_mode.then_some(Boost::GainMode));
 
     let caps = DeviceCapabilities {
+        acquisition: crate::hardware::AcquisitionModel::IqSamples,
+        level_unit: crate::hardware::LevelUnit::Dbfs,
+        level_min_db: -120.0,
+        level_max_db: 0.0,
+        trace_stale_ms: 500,
         freq_min_hz: freq_min.max(0.0) as u64,
         freq_max_hz: freq_max.max(0.0) as u64,
         sample_rate_min_hz: rate_min,

@@ -152,7 +152,7 @@ impl Panel for MicroSweepPanel {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("  {:>6.1} dBFS", db),
+                        format!("  {:>6.1} {}", db, state.caps.level_unit.label()),
                         Style::default().fg(theme.value),
                     ),
                     Span::styled(band, Style::default().fg(theme.status_ok)),

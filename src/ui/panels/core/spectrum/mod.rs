@@ -367,6 +367,7 @@ fn draw_instrument(
             state.radio.frequency,
             state.spectrum.step_hz,
             cursor,
+            state.caps.level_unit.label(),
             theme,
         );
     }

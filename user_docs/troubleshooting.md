@@ -393,8 +393,9 @@ which doesn't need it.
 
 ### `cargo install sdrtop` fails on libhackrf
 
-Same cause as the build failure below: both libraries have to be present at
-build time. See [The build fails looking for libhackrf](#the-build-fails-looking-for-libhackrf).
+Current releases omit the HackRF backend when `libhackrf` is unavailable. If an
+older release fails here, install the matching development package or update
+sdrtop.
 
 ### Which build am I actually running?
 
@@ -427,10 +428,9 @@ the fix is the same command above: `rustup update stable`.
 
 ### The build fails looking for libhackrf
 
-sdrtop links **both** backends at build time, so you need `libhackrf` and
-`librtlsdr` present even if you only own one radio. At runtime it's happy with
-whichever you plug in. Package names per distribution are in
-[Getting Started](getting-started.md).
+sdrtop now omits a native backend when its development library is unavailable.
+Package names for enabling HackRF and RTL-SDR are in
+[Getting Started](getting-started.md). A tinySA build needs neither library.
 
 libhackrf must be **2023.01.1 or newer**. That's what ships in Raspberry Pi OS
 Bookworm and Ubuntu 24.04; older distributions need it built from source.

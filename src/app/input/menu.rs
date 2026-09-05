@@ -29,6 +29,8 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         KeyCode::Esc => close(ctx),
         KeyCode::Char('q') => return KeyAction::Quit,
 
+        KeyCode::Right if state.pane == MenuPane::Options => adjust_option(ctx, state, 1),
+        KeyCode::Left if state.pane == MenuPane::Options => adjust_option(ctx, state, -1),
         KeyCode::Tab | KeyCode::Right => move_row(ctx, state, 1),
         KeyCode::BackTab | KeyCode::Left => move_row(ctx, state, -1),
         KeyCode::Down => move_down(ctx, state, 1),
@@ -62,6 +64,7 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                 return open(ctx, &name);
             }
         }
+        KeyCode::Enter if state.pane == MenuPane::Options => adjust_option(ctx, state, 1),
         _ => {}
     }
     KeyAction::Continue
@@ -158,10 +161,52 @@ fn move_down(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
                 ..state
             });
         }
-        // Nothing to move through yet. When the first setting lands this grows a
-        // cursor of its own; until then the arrows are quiet rather than moving
-        // something the reader cannot see.
-        MenuPane::Options => {}
+        MenuPane::Options => {
+            let count = metrics(ctx.state).device_options.len();
+            if count == 0 {
+                return;
+            }
+            metrics(ctx.state).ui.menu = Some(MenuState {
+                scroll: wrap(state.scroll.min(count - 1), step, count),
+                ..state
+            });
+        }
+    }
+}
+
+fn adjust_option(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
+    let Some(device) = ctx.device else { return };
+    let requested = {
+        let m = metrics(ctx.state);
+        let Some(option) = m.device_options.get(state.scroll) else {
+            return;
+        };
+        if option.values.is_empty() {
+            return;
+        }
+        let selected = wrap(
+            option.selected.min(option.values.len() - 1),
+            step,
+            option.values.len(),
+        );
+        (
+            option.id.clone(),
+            option.label.clone(),
+            option.values[selected].clone(),
+        )
+    };
+
+    let result = device.set_option(&requested.0, &requested.2);
+    let refreshed = result.as_ref().ok().map(|_| device.options());
+    let mut m = metrics(ctx.state);
+    match result {
+        Ok(()) => {
+            if let Some(options) = refreshed {
+                m.device_options = options;
+            }
+            m.push_log(format!("{} set to {}", requested.1, requested.2));
+        }
+        Err(error) => m.push_log(format!("{} error: {error}", requested.1)),
     }
 }
 

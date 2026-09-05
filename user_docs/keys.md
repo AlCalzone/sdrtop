@@ -26,8 +26,8 @@ selected.
 | Key | In the menu |
 |-----|-------------|
 | `Tab` / `Shift+Tab` | Next or previous row in the left column: the sections, then Keys, then Options |
-| `←` / `→` | The same thing |
-| `↑` / `↓` | Move through the layouts on the right, or scroll the Keys reference |
+| `←` / `→` | Move between menu rows. In Options, change the selected value |
+| `↑` / `↓` | Move through layouts and device options, or scroll the Keys reference |
 | `1` to `9` | Open the layout with that number, in this section |
 | `Enter` | Open the highlighted layout |
 | `Esc` | Close the menu and go back to what you were looking at |
@@ -62,7 +62,7 @@ each layout, and the footer shows the numbers for the section you are in.
 |-----|-------------|
 | `Space` | Start or stop receiving |
 | `f` | Type a new center frequency (in MHz) |
-| `s` | Type a new sample rate (HackRF 2–20 MHz · RTL-SDR 0.9–3.2 MHz) |
+| `s` | Type a new sample rate. On a tinySA, type the displayed span |
 | `r` | Reset all settings to defaults |
 | `a` | Toggle the front end boost: RF amplifier (HackRF) / tuner AGC (RTL-SDR). Absent on a device that reports neither |
 | `w` | Pause or resume the waterfall |
@@ -152,7 +152,7 @@ Press `e`.
 |-----|-------------|
 | `←` / `→` | Tune the center frequency by one step |
 | `[` / `]` | Change the tuning step size (1 kHz, 5, 10, 25, 100, 500 kHz, 1, 5, 10 MHz) |
-| `↑` / `↓` | Zoom the dBFS axis (expand or compress the signal range shown) |
+| `↑` / `↓` | Zoom the level axis. IQ radios use dBFS and tinySA uses dBm |
 | `+` / `-` | Frequency zoom, magnifying the centre of the band (`=` also zooms in) |
 | `j` / `k` | Move the cursor left or right across the spectrum |
 | `m` | Place a named marker at the cursor position |

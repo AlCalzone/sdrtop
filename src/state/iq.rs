@@ -7,10 +7,18 @@ pub const CONSTELLATION_CAP: usize = 1024;
 
 /// Lab IQ correction state - the live DSP behind the `[D]` DC-block / `[C]`
 /// auto-cal chips and `[F]` freeze. Coefficients are applied in the RX hot path
-/// ([`process_block`](crate::hardware::process::process_block)) to the samples that feed
-/// the FFT and the constellation, so the spectrum/scope DC spike and the cloud
-/// actually clean up. The *metrics* stay measured on the raw stream, so the
-/// diagnostics keep reporting the true hardware impairment being compensated.
+/// ([`process_block`](crate::hardware::process::process_block)) to the samples
+/// that feed the FFT, the demod and the constellation, so the spectrum/scope DC
+/// spike and the cloud actually clean up.
+///
+/// **The accumulators stay on the raw stream; the readings do not.** Those are
+/// two different things and this comment used to run them together. The
+/// per-sample sums are taken before any correction, because a correction has to
+/// be built from what the front end actually did. What the IQ bench then prints
+/// is the *residual* after the active correction, so a lit `[C]` beside a
+/// still-bad number means the correction is not keeping up, rather than the
+/// panel reporting a fault the app is already cancelling. The split is made in
+/// `tasks::rx::metrics::iq_metrics`, whose header is the one account of it.
 #[derive(Clone, Copy)]
 pub struct IqCalState {
     /// `[D]` - subtract the live DC estimate from the stream.
@@ -48,8 +56,14 @@ impl Default for IqCalState {
 }
 
 impl IqCalState {
-    /// Apply the active correction to one raw sample (display path only): remove DC
-    /// when blocking or calibrating, then the Q-row matrix when calibrated.
+    /// Apply the active correction to one raw sample: remove DC when blocking or
+    /// calibrating, then the Q-row matrix when calibrated.
+    ///
+    /// **Not a display path**, whatever this used to say. The corrected samples
+    /// are re-encoded and sent to the FFT worker, and every spectrum measurement
+    /// the app makes is derived from there: the noise floor, channel power,
+    /// occupied bandwidth, ACPR. The demod gets the same stream. Only the
+    /// accumulators in `process_block` are left on the raw one.
     pub fn apply(&self, i: f32, q: f32) -> (f32, f32) {
         let (mut ip, mut qp) = (i, q);
         if self.dc_block_on || self.cal_applied {
@@ -115,7 +129,11 @@ pub struct IqState {
     pub jitter_history: std::collections::VecDeque<u64>,
     pub iq_amplitude_hist: [u64; 32],
     /// Signed ADC sample histogram (I and Q binned together) for the Lab RF
-    /// ADC-loading bell: bin `((v + 128) / 8)`, bin 16 = mid-scale, 0/31 = the rails.
+    /// ADC-loading bell: the device's own -FS..+FS span cut into 32, so bin 16 is
+    /// mid-scale and 0/31 are the rails. `(v + 128) / 8` on an 8-bit radio, which
+    /// is what this used to say as though it were the rule; the bin width comes
+    /// from the declared full scale, so a 12-bit converter's bell fills the same
+    /// 32 buckets instead of huddling in the middle four.
     /// Snapshotted from the accumulator each ~200 ms window, like `iq_amplitude_hist`.
     pub adc_signed_hist: [u64; 32],
     /// How full the FFT feed's queue got, as a percentage of its depth.
@@ -145,8 +163,10 @@ pub struct IqState {
     /// as the command-rail SIGNAL traces so a full panel-width sweep ≈ 60 s.
     pub irr_history: std::collections::VecDeque<f32>,
     /// Decimated I/Q sample ring buffer for the 2-D constellation display.
-    /// Values are normalised to [-1, 1] (divided by 128). Written in the RX
-    /// hot-path at a 1 : [`CONST_DECIMATE`] decimation; oldest pairs are
-    /// evicted once the buffer reaches [`CONSTELLATION_CAP`].
+    /// Values are normalised to [-1, 1] by the device's own full scale, which is
+    /// 128 on both shipped radios and was written here as a literal back when
+    /// those were the only two. Written in the RX hot-path at a
+    /// 1 : [`CONST_DECIMATE`] decimation; oldest pairs are evicted once the
+    /// buffer reaches [`CONSTELLATION_CAP`].
     pub constellation: std::collections::VecDeque<(f32, f32)>,
 }

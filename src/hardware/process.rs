@@ -74,9 +74,12 @@ pub fn process_block(
     };
 
     // Snapshot the live correction state once (cheap Copy). The accumulators below
-    // stay on the RAW samples - the diagnostics measure the true hardware
-    // impairment - while a corrected copy of the stream feeds the FFT and the
-    // constellation so the [D] DC-block / [C] auto-cal cleanup is visible.
+    // stay on the RAW samples, because a correction has to be built from what the
+    // front end actually did, while a corrected copy of the stream feeds the FFT,
+    // the demod and the constellation so the [D] DC-block / [C] auto-cal cleanup
+    // is visible. What the bench *prints* is the residual after that correction
+    // and not the raw impairment: this comment used to say otherwise, and the
+    // split it was describing lives in `tasks::rx::metrics::iq_metrics`.
     // Read the demod gate in the same lock as the correction state - the demod
     // costs an extra block copy, so it must be free when switched off.
     let (cal, demod_enabled) = {
@@ -474,6 +477,75 @@ mod tests {
         let (depth, dropped) = ctx.fft_feed.take();
         assert_eq!(dropped, 1, "a block the spectrum never saw");
         assert_eq!(depth, 1, "and the queue was full when it happened");
+    }
+
+    /// The two halves of the correction split, which prose alone used to assert
+    /// and two comments used to assert wrongly.
+    ///
+    /// A correction has to be built from what the front end actually did, so the
+    /// per-sample sums are taken before it. If they ever moved onto the corrected
+    /// stream the bench would measure the app's own arithmetic, report a
+    /// perfectly balanced radio, and have nothing left to build the next
+    /// correction from.
+    #[test]
+    fn the_accumulators_stay_on_the_raw_stream_while_a_correction_runs() {
+        let (ctx, _fft_rx, _demod_rx) = rx_ctx();
+        {
+            let mut m = ctx.metrics.lock().unwrap();
+            m.iq.cal = crate::state::IqCalState {
+                dc_block_on: true,
+                dc_i_raw: 10.0,
+                dc_q_raw: -5.0,
+                ..crate::state::IqCalState::default()
+            };
+        }
+        // Four pairs of (i = 20, q = -30). The correction would make them
+        // (10, -25), which is what the sums must *not* say.
+        let block: Vec<u8> = std::iter::repeat_n([20u8, (-30i8) as u8], 4)
+            .flatten()
+            .collect();
+
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+
+        let m = ctx.metrics.lock().unwrap();
+        assert_eq!(m.acc.i_sum, 80, "four raw 20s, not four corrected 10s");
+        assert_eq!(m.acc.q_sum, -120, "four raw -30s, not four corrected -25s");
+    }
+
+    /// And the other half: the corrected stream is what leaves for the FFT, and
+    /// the demod gets the same one rather than the raw bytes.
+    ///
+    /// The FFT is not a display. Every spectrum measurement the app makes is
+    /// derived from it, and a residual DC offset would land straight on the
+    /// demod's carrier-offset reading, since a centre-tuned channel sits exactly
+    /// on the DC spike.
+    #[test]
+    fn the_corrected_stream_is_what_the_fft_and_the_demod_receive() {
+        let (ctx, fft_rx, demod_rx) = rx_ctx();
+        {
+            let mut m = ctx.metrics.lock().unwrap();
+            m.iq.cal = crate::state::IqCalState {
+                dc_block_on: true,
+                dc_i_raw: 10.0,
+                dc_q_raw: -5.0,
+                ..crate::state::IqCalState::default()
+            };
+        }
+        let block: Vec<u8> = std::iter::repeat_n([20u8, (-30i8) as u8], 4)
+            .flatten()
+            .collect();
+        let corrected: Vec<u8> = std::iter::repeat_n([10u8, (-25i8) as u8], 4)
+            .flatten()
+            .collect();
+
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+
+        assert_eq!(fft_rx.recv().expect("no FFT block"), corrected);
+        assert_eq!(
+            demod_rx.recv().expect("no demod block").bytes,
+            corrected,
+            "the demod must see the same stream the FFT does"
+        );
     }
 
     /// The block a driver-side loss precedes is marked as such.

@@ -126,61 +126,104 @@ pub(super) fn publish(
 }
 
 /// Per-marker occupied bandwidth, within each marker's own channel window.
+///
+/// **Every marker leaves this pass carrying this frame's answer or nothing.**
+/// That is why the measurement is its own function: the loop assigns whatever it
+/// returns, unconditionally, so no later edit can add a way out that forgets and
+/// leaves the previous frame's figure standing beside a live spectrum. A marker
+/// with no channel window is one of those ways out, and it clears too.
 fn update_marker_bandwidths(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
     let n = snap.linear.len();
-    if snap.sample_rate <= 0.0 || n == 0 {
-        return;
-    }
-    let bin_hz = snap.sample_rate / n as f64;
+    let bin_hz = if n > 0 {
+        snap.sample_rate / n as f64
+    } else {
+        0.0
+    };
     let left_hz = snap.center_freq_hz as f64 - snap.sample_rate / 2.0;
-    let right_hz = left_hz + snap.sample_rate;
 
     for mk in m.spectrum.markers.iter_mut() {
-        let Some(ch_bw) = mk.channel_bw_hz else {
-            continue;
-        };
-        let mf = mk.freq_hz as f64;
-        // A marker outside the current band has no measurement, not a stale one.
-        if mf < left_hz || mf > right_hz {
-            mk.measured_bw_hz = None;
-            continue;
-        }
-        let lo_bin = ((mf - ch_bw as f64 / 2.0 - left_hz) / bin_hz)
-            .floor()
-            .max(0.0) as usize;
-        let hi_bin = ((mf + ch_bw as f64 / 2.0 - left_hz) / bin_hz)
-            .ceil()
-            .min((n - 1) as f64) as usize;
-        if lo_bin > hi_bin || hi_bin >= n {
-            mk.measured_bw_hz = None;
-            continue;
-        }
-        let slice = &snap.linear[lo_bin..=hi_bin];
-        let total: f32 = slice.iter().sum();
-        if total <= 0.0 {
-            continue;
-        }
-        let (lo_t, hi_t) = (total * MARKER_BW_LOW, total * MARKER_BW_HIGH);
-        let mut acc = 0f32;
-        let mut lo_b = 0usize;
-        let mut hi_b = slice.len() - 1;
-        for (i, &lin) in slice.iter().enumerate() {
-            acc += lin;
-            if acc < lo_t {
-                lo_b = i;
-            }
-            if acc < hi_t {
-                hi_b = i;
-            }
-        }
-        mk.measured_bw_hz = Some(((hi_b.saturating_sub(lo_b) + 1) as f64 * bin_hz) as u64);
+        mk.measured_bw_hz = mk.channel_bw_hz.and_then(|ch_bw| {
+            marker_bandwidth_hz(snap.linear, bin_hz, left_hz, mk.freq_hz as f64, ch_bw)
+        });
     }
 }
 
-/// Replace the drawn spectrum frame, reusing the previous one's allocations.
+/// The occupied bandwidth inside one marker's channel window, or `None` when
+/// this frame cannot measure it.
 ///
-/// We hold the mutex, so the refcount is 1 and `try_unwrap` is guaranteed to
-/// succeed - the frame is rebuilt with no heap traffic at all.
+/// The span between the points where the cumulative power in the window crosses
+/// [`MARKER_BW_LOW`] and [`MARKER_BW_HIGH`], which is the occupied-bandwidth
+/// definition the whole app uses.
+///
+/// Pure, and taking numbers rather than a `Snapshot`, so the four ways a frame
+/// can fail to answer are visible together: no spectrum at all, a marker outside
+/// the band, a channel window that lands off the end of it, and a window with no
+/// power in it.
+fn marker_bandwidth_hz(
+    linear: &[f32],
+    bin_hz: f64,
+    left_hz: f64,
+    marker_hz: f64,
+    channel_bw_hz: u64,
+) -> Option<u64> {
+    let n = linear.len();
+    // A bin width has to be a positive, finite number: a NaN sample rate would
+    // otherwise walk straight through the comparisons below and index nothing.
+    if n == 0 || !bin_hz.is_finite() || bin_hz <= 0.0 {
+        return None;
+    }
+    let right_hz = left_hz + bin_hz * n as f64;
+    if marker_hz < left_hz || marker_hz > right_hz {
+        return None;
+    }
+    let half_bw = channel_bw_hz as f64 / 2.0;
+    let lo_bin = ((marker_hz - half_bw - left_hz) / bin_hz).floor().max(0.0) as usize;
+    // `min` bounds this to the last bin, so the slice below cannot run off the
+    // end; the only ordering left to rule out is a window entirely past it.
+    let hi_bin = ((marker_hz + half_bw - left_hz) / bin_hz)
+        .ceil()
+        .min((n - 1) as f64) as usize;
+    if lo_bin > hi_bin {
+        return None;
+    }
+    let slice = &linear[lo_bin..=hi_bin];
+    let total: f32 = slice.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let (lo_t, hi_t) = (total * MARKER_BW_LOW, total * MARKER_BW_HIGH);
+    let mut acc = 0f32;
+    let mut lo_b = 0usize;
+    let mut hi_b = slice.len() - 1;
+    for (i, &lin) in slice.iter().enumerate() {
+        acc += lin;
+        if acc < lo_t {
+            lo_b = i;
+        }
+        if acc < hi_t {
+            hi_b = i;
+        }
+    }
+    Some(((hi_b.saturating_sub(lo_b) + 1) as f64 * bin_hz) as u64)
+}
+
+/// Replace the drawn spectrum frame, reusing the previous one's buffers when
+/// they can be had.
+///
+/// **Usually they cannot, and that is not a fault.** `App::draw` clones the
+/// whole `SdrMetrics` under the lock and then renders from the clone with the
+/// lock released, so the UI thread holds the previous frame's `Arc`s for most of
+/// the interval between publishes and `try_unwrap` gives them back rather than
+/// yielding the vector. Holding the mutex says nothing about the refcount: the
+/// clone outlives the guard that made it. The comment here used to claim the
+/// unwrap was guaranteed, which would make the fallback beside it unreachable
+/// and invite someone to replace it with an `unwrap` that panics on the UI
+/// thread's timing.
+///
+/// Both branches produce a buffer of exactly `n`, which is what the
+/// `copy_from_slice` below requires. The reused one is that long because the
+/// worker's FFT size is fixed for the life of the worker, so every frame it has
+/// ever published is the same size.
 fn refresh_spectrum(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
     let n = snap.smoothed.len();
     let (mut bins_vec, mut peak_vec) = match m.waterfall.last_fft.take() {
@@ -206,4 +249,162 @@ fn refresh_spectrum(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
         occupied_bw_hz: r.occupied_bw_hz,
         enbw_hz: snap.enbw_hz,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SpectrumMarker;
+
+    fn marker(freq_hz: u64, channel_bw_hz: u64, measured_bw_hz: Option<u64>) -> SpectrumMarker {
+        SpectrumMarker {
+            freq_hz,
+            label: "M1".to_string(),
+            channel_bw_hz: Some(channel_bw_hz),
+            measured_bw_hz,
+        }
+    }
+
+    /// A `Reading` to hang a `Snapshot` on. Nothing in the marker pass reads it,
+    /// but it is not a type that can be conjured, so it is measured for real off
+    /// a flat spectrum.
+    fn flat_reading(smoothed: &[f32]) -> Reading {
+        let mut linear = vec![0.0f32; smoothed.len()];
+        let mut scratch = vec![0.0f32; smoothed.len()];
+        super::super::analysis::measure(smoothed, &mut linear, &mut scratch, 1_000_000.0)
+    }
+
+    /// Every other way out of the marker pass says "no measurement" by writing
+    /// `None`. A channel window with no power in it took the fourth way out and
+    /// left the previous frame's figure on screen, beside a live spectrum, with
+    /// nothing to say it was old.
+    #[test]
+    fn a_channel_with_no_power_in_it_clears_the_marker_rather_than_keeping_the_last_one() {
+        let smoothed = vec![-160.0f32; 64];
+        let reading = flat_reading(&smoothed);
+        let linear = vec![0.0f32; 64];
+        let snap = Snapshot {
+            reading: &reading,
+            smoothed: &smoothed,
+            peak: &smoothed,
+            linear: &linear,
+            center_freq_hz: 100_000_000,
+            sample_rate: 1_000_000.0,
+            enbw_hz: 1.0,
+        };
+        let mut m = SdrMetrics::fixture();
+        m.spectrum.markers = vec![marker(100_000_000, 100_000, Some(37_000))];
+
+        update_marker_bandwidths(&mut m, &snap);
+
+        assert_eq!(m.spectrum.markers[0].measured_bw_hz, None);
+    }
+
+    /// A marker the current band does not contain has no measurement, not the
+    /// one it had when the radio was tuned somewhere else.
+    #[test]
+    fn a_marker_outside_the_band_measures_nothing() {
+        let linear = vec![1.0f32; 100];
+        assert_eq!(
+            marker_bandwidth_hz(&linear, 1_000.0, 0.0, -1.0, 20_000),
+            None
+        );
+        assert_eq!(
+            marker_bandwidth_hz(&linear, 1_000.0, 0.0, 100_001.0, 20_000),
+            None
+        );
+    }
+
+    /// No spectrum, and a sample rate that gives no bin width, are both "this
+    /// frame cannot answer" rather than a width of nothing.
+    #[test]
+    fn a_frame_with_nothing_in_it_measures_nothing() {
+        assert_eq!(
+            marker_bandwidth_hz(&[], 1_000.0, 0.0, 50_000.0, 20_000),
+            None
+        );
+        let linear = vec![1.0f32; 100];
+        assert_eq!(
+            marker_bandwidth_hz(&linear, 0.0, 0.0, 50_000.0, 20_000),
+            None
+        );
+    }
+
+    /// A channel window whose bins are all empty. Unreachable while the trace is
+    /// floored at -160 dBFS, which is a positive linear value; pinned because
+    /// the branch that handles it is the one that used to leave a stale reading.
+    #[test]
+    fn a_channel_window_with_no_power_measures_nothing() {
+        let linear = vec![0.0f32; 100];
+        assert_eq!(
+            marker_bandwidth_hz(&linear, 1_000.0, 0.0, 50_000.0, 20_000),
+            None
+        );
+    }
+
+    /// The measurement itself. Five bins of equal power inside a twenty-bin
+    /// channel window: the 0.5 % / 99.5 % crossings sit either side of exactly
+    /// those five, so the answer is five bin widths.
+    #[test]
+    fn a_tone_measures_its_own_width_and_not_the_windows() {
+        let mut linear = vec![0.0f32; 100];
+        for l in linear.iter_mut().take(53).skip(48) {
+            *l = 1.0;
+        }
+        assert_eq!(
+            marker_bandwidth_hz(&linear, 1_000.0, 0.0, 50_000.0, 20_000),
+            Some(5_000)
+        );
+    }
+
+    /// The path that actually runs, pinned because the comment above
+    /// `refresh_spectrum` used to say it could not.
+    ///
+    /// `App::draw` clones the state and renders from the clone, so the frame the
+    /// UI is drawing is still alive when the next one is published. The new frame
+    /// must carry the new trace, and the one the UI is holding must not be
+    /// written through underneath it.
+    #[test]
+    fn a_frame_the_ui_is_still_holding_is_rebuilt_rather_than_written_over() {
+        let first = vec![-40.0f32; 64];
+        let second = vec![-70.0f32; 64];
+        let linear = vec![1.0f32; 64];
+        let r1 = flat_reading(&first);
+        let mut m = SdrMetrics::fixture();
+        refresh_spectrum(
+            &mut m,
+            &Snapshot {
+                reading: &r1,
+                smoothed: &first,
+                peak: &first,
+                linear: &linear,
+                center_freq_hz: 100_000_000,
+                sample_rate: 1_000_000.0,
+                enbw_hz: 1.0,
+            },
+        );
+
+        // What the UI thread does every frame: take the whole state away and
+        // draw from it while the worker carries on publishing.
+        let being_drawn = m.clone();
+
+        let r2 = flat_reading(&second);
+        refresh_spectrum(
+            &mut m,
+            &Snapshot {
+                reading: &r2,
+                smoothed: &second,
+                peak: &second,
+                linear: &linear,
+                center_freq_hz: 100_000_000,
+                sample_rate: 1_000_000.0,
+                enbw_hz: 1.0,
+            },
+        );
+
+        let published = m.waterfall.last_fft.expect("a frame was published");
+        assert_eq!(published.bins_dbfs[0], -70.0, "the new trace");
+        let held = being_drawn.waterfall.last_fft.expect("the UI's copy");
+        assert_eq!(held.bins_dbfs[0], -40.0, "still the frame it was drawing");
+    }
 }

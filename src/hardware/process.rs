@@ -21,10 +21,34 @@ use super::traits::{RxContext, SampleFormat, SampleGeometry};
 /// from `buffer_length − valid_length`; RTL-SDR has no equivalent and passes 0).
 /// `now` is captured by the *caller* so jitter measures the true inter-callback
 /// interval, not callback-entry-plus-processing time.
-/// Take one constellation sample per this many I/Q pairs.
+/// Closest two constellation samples may be taken, in I/Q pairs.
+///
+/// A floor, not the stride: see [`const_stride`]. Adjacent samples of a band-
+/// limited stream are correlated, and a scope wants points that are not.
 const CONST_DECIMATE: usize = 1024;
-/// Hard cap on constellation points collected per block (bounds lock time).
+/// Constellation points one block may contribute.
+///
+/// A budget spread over the whole block rather than a cap that stops partway.
+/// It bounds the per-block vector and the drain-and-extend the lock below pays
+/// for, and it sets how fast the [`crate::state::CONSTELLATION_CAP`]-deep ring
+/// turns over: sixteen blocks, which is about 210 ms of a 10 Msps HackRF.
 const CONST_MAX_PER_BLOCK: usize = 64;
+
+/// Pairs between constellation samples, for a block of this many pairs.
+///
+/// At least [`CONST_DECIMATE`], and otherwise wide enough that the budget
+/// reaches the end of the block.
+///
+/// **The budget used to truncate instead.** A HackRF transfer is 131072 pairs,
+/// which offers 128 candidates at a fixed stride of 1024, and the 64-point
+/// budget ran out halfway: every point in the cloud came from the first half of
+/// every transfer, and so did the ellipse, the EVM and the MER fitted to it. A
+/// burst landing in the second half was in none of them. The smaller blocks the
+/// other two backends deliver never reached the budget, so nothing there
+/// changes.
+fn const_stride(pairs: usize) -> usize {
+    CONST_DECIMATE.max(pairs.div_ceil(CONST_MAX_PER_BLOCK))
+}
 
 /// Bin a centered signed sample into the 32-bucket signed ADC histogram:
 /// bin 0 = −FS rail, 16 = mid-scale, 31 = +FS rail.
@@ -65,11 +89,13 @@ pub fn process_block(
     let full_scale = geometry.full_scale;
     let fs_counts = full_scale as i64;
     let amp_width = amp_bin_width(fs_counts);
+    let pairs = buf.len() / geometry.bytes_per_pair();
     // Per-sample math runs entirely without the mutex.
     let mut acc = Accumulators {
         geometry,
         amp_width,
         full_scale,
+        const_stride: const_stride(pairs),
         ..Accumulators::default()
     };
 
@@ -132,7 +158,6 @@ pub fn process_block(
         ..
     } = acc;
 
-    let pairs = (buf.len() / geometry.bytes_per_pair()) as u64;
     let block_seq: u64;
 
     // Single brief lock to flush accumulated results - O(1), no loops inside.
@@ -156,7 +181,7 @@ pub fn process_block(
         m.acc.i_sq_sum += i_sq as u64;
         m.acc.q_sq_sum += q_sq as u64;
         m.acc.iq_cross_sum += iq_cross;
-        m.acc.sample_count += pairs;
+        m.acc.sample_count += pairs as u64;
 
         for (acc, &local) in m.acc.iq_hist.iter_mut().zip(local_hist.iter()) {
             *acc += local;
@@ -238,6 +263,8 @@ struct Accumulators {
     geometry: SampleGeometry,
     /// Counts per bucket of the amplitude histogram, precomputed once.
     amp_width: u64,
+    /// Pairs between constellation samples, from this block's own length.
+    const_stride: usize,
     full_scale: f32,
     cal: crate::state::IqCalState,
     correcting: bool,
@@ -296,12 +323,11 @@ impl Accumulators {
         if self.correcting {
             encode_into(&mut self.out, ci, cq, &self.geometry);
         }
-        // Constellation decimation: one normalised (I, Q) pair per CONST_DECIMATE.
-        // Frozen ([F]) → stop collecting so the cloud holds its last shape.
-        if !self.cal.frozen
-            && idx.is_multiple_of(CONST_DECIMATE)
-            && self.consts.len() < CONST_MAX_PER_BLOCK
-        {
+        // Constellation decimation: one normalised (I, Q) pair per stride, and
+        // the stride is chosen so the budget lands evenly across the whole
+        // block rather than running out inside it. Frozen ([F]) → stop
+        // collecting so the cloud holds its last shape.
+        if !self.cal.frozen && idx.is_multiple_of(self.const_stride) {
             self.consts
                 .push((ci / self.full_scale, cq / self.full_scale));
         }
@@ -477,6 +503,63 @@ mod tests {
         let (depth, dropped) = ctx.fft_feed.take();
         assert_eq!(dropped, 1, "a block the spectrum never saw");
         assert_eq!(depth, 1, "and the queue was full when it happened");
+    }
+
+    /// The stride follows the block, so the budget reaches the end of it.
+    ///
+    /// The two smaller backends never spent the budget and must not move; the
+    /// HackRF's transfer is the one that did.
+    #[test]
+    fn the_stride_spreads_the_budget_over_whatever_block_arrives() {
+        assert_eq!(super::const_stride(16_384), 1_024, "a SoapySDR read");
+        assert_eq!(super::const_stride(32_768), 1_024, "an RTL-SDR transfer");
+        assert_eq!(super::const_stride(131_072), 2_048, "a HackRF transfer");
+        assert_eq!(super::const_stride(0), 1_024, "an empty overflow block");
+    }
+
+    /// Whatever the block, the budget is spent and not overspent: every point
+    /// costs the lock a copy, and the last one has to be inside the block.
+    #[test]
+    fn every_block_size_lands_inside_its_budget() {
+        for pairs in [
+            1_usize, 1_024, 16_384, 32_768, 65_536, 131_072, 262_144, 131_073,
+        ] {
+            let stride = super::const_stride(pairs);
+            let taken = (0..pairs).filter(|i| i.is_multiple_of(stride)).count();
+            assert!(
+                taken <= super::CONST_MAX_PER_BLOCK,
+                "{pairs} pairs took {taken} points"
+            );
+            assert!(stride >= super::CONST_DECIMATE, "{pairs} pairs: {stride}");
+        }
+    }
+
+    /// End to end: the cloud is drawn from the whole transfer.
+    ///
+    /// The two halves of the block tell themselves apart by amplitude, so what
+    /// lands in the ring says which part of the transfer it came from. With a
+    /// fixed stride and a budget that stopped at 64, the answer was always "the
+    /// first half" - and the ellipse, EVM and MER fitted to the cloud inherited
+    /// that blind spot.
+    #[test]
+    fn the_cloud_is_drawn_from_the_whole_transfer_and_not_just_its_start() {
+        let (ctx, _fft_rx, _demod_rx) = rx_ctx();
+        const PAIRS: usize = 131_072; // one HackRF transfer
+        let mut block = vec![0u8; PAIRS * 2];
+        for (idx, pair) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            pair[0] = if idx < PAIRS / 2 { 10 } else { 100 };
+        }
+
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+
+        let m = ctx.metrics.lock().unwrap();
+        let cloud = &m.iq.constellation;
+        assert_eq!(cloud.len(), 64, "the budget is spent, not overspent");
+        let late = cloud.iter().filter(|(i, _)| *i > 0.5).count();
+        assert_eq!(
+            late, 32,
+            "half the points belong to the second half of the transfer"
+        );
     }
 
     /// The two halves of the correction split, which prose alone used to assert

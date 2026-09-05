@@ -154,6 +154,7 @@ pub struct SoapyApi {
         *const SoapySDRKwargs,
     ) -> c_int,
     set_sample_rate: unsafe extern "C" fn(*mut SoapySDRDevice, c_int, usize, f64) -> c_int,
+    get_sample_rate: unsafe extern "C" fn(*const SoapySDRDevice, c_int, usize) -> f64,
     set_bandwidth: unsafe extern "C" fn(*mut SoapySDRDevice, c_int, usize, f64) -> c_int,
     set_gain: unsafe extern "C" fn(*mut SoapySDRDevice, c_int, usize, f64) -> c_int,
     // Device.h:828, 847, 866. The trailing `name` is what separates these from
@@ -355,6 +356,18 @@ impl SoapyApi {
     /// See [`Self::driver_key`].
     pub unsafe fn set_sample_rate(&self, dev: *mut SoapySDRDevice, hz: f64) -> Result<(), String> {
         self.check(unsafe { (self.set_sample_rate)(dev, RX, CHAN, hz) })
+    }
+
+    /// The rate the driver says it is running at.
+    ///
+    /// `Device.h:669`. Returns a rate, with no error code beside it: a driver
+    /// that cannot answer returns zero or a negative, which is why the caller
+    /// hands the figure to `RateSet::new` rather than believing it.
+    ///
+    /// # Safety
+    /// See [`Self::driver_key`].
+    pub unsafe fn get_sample_rate(&self, dev: *const SoapySDRDevice) -> f64 {
+        unsafe { (self.get_sample_rate)(dev, RX, CHAN) }
     }
 
     /// # Safety
@@ -688,6 +701,7 @@ fn resolve(lib: libloading::Library) -> Result<SoapyApi, &'static str> {
         get_native_stream_format: sym!("SoapySDRDevice_getNativeStreamFormat"),
         set_frequency: sym!("SoapySDRDevice_setFrequency"),
         set_sample_rate: sym!("SoapySDRDevice_setSampleRate"),
+        get_sample_rate: sym!("SoapySDRDevice_getSampleRate"),
         set_bandwidth: sym!("SoapySDRDevice_setBandwidth"),
         set_gain: sym!("SoapySDRDevice_setGain"),
         set_gain_mode: sym!("SoapySDRDevice_setGainMode"),

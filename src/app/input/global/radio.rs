@@ -35,10 +35,14 @@ pub(super) fn reset_defaults(ctx: &mut InputCtx<'_>) {
     let def_sr = caps.default_sample_rate_hz;
     let (lna_def, vga_def) = caps.gain.clamp_gains(DEFAULT_LNA_GAIN, DEFAULT_VGA_GAIN);
 
-    let (sr_result, bb_bw) = match device.set_sample_rate(def_sr) {
-        Ok(bw) => (Ok(()), bw),
+    // The rate is the device's own default, so a driver has no reason to round
+    // it; taking what it reports anyway costs nothing and keeps one account of
+    // where the recorded rate comes from.
+    let (sr_result, settled_sr, bb_bw) = match device.set_sample_rate(def_sr) {
+        Ok(set) => (Ok(()), set.rate_hz, set.bb_filter_hz),
         Err(e) => (
             Err(e),
+            def_sr,
             crate::hardware::native::hackrf::compute_bb_filter_bw(def_sr),
         ),
     };
@@ -57,7 +61,7 @@ pub(super) fn reset_defaults(ctx: &mut InputCtx<'_>) {
         m.radio.amp_enabled = false;
         m.lab.rf_autotrack = false;
         m.radio.frequency = def_freq;
-        m.radio.config_sample_rate = def_sr;
+        m.radio.config_sample_rate = settled_sr;
         m.radio.bb_filter_hz = bb_bw;
         m.push_log("Settings reset to defaults");
     } else {

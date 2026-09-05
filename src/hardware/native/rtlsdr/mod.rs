@@ -21,6 +21,9 @@ use crate::hardware::{
     Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceKind, DeviceListing, GainModel,
     RxContext, SampleFormat, SampleGeometry, SdrDevice, StageSpec,
 };
+// Not re-exported from `hardware`: what a backend answers a rate change with is
+// between the backend and the trait, and no call site outside names the type.
+use crate::hardware::traits::RateSet;
 use ffi::*;
 
 /// Bytes per async transfer (must be a multiple of 512). 64 KiB ≈ 32 768 IQ
@@ -166,12 +169,22 @@ impl SdrDevice for RtlDevice {
 
     /// RTL-SDR has no programmable baseband filter, so this only sets the rate
     /// and returns 0 (no filter bandwidth).
-    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<u32> {
+    /// Sets the rate, then asks what it became.
+    ///
+    /// The R820T's clock is 28.8 MHz over an integer divider, so a request is a
+    /// wish: 2.5 Msps is not on the grid and librtlsdr rounds it without
+    /// comment. `rtlsdr_get_sample_rate` is the only place that rounding is
+    /// visible, and every frequency the app prints is derived from it.
+    ///
+    /// No baseband filter on this radio, so the width is zero rather than a
+    /// number that would have to mean something.
+    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<RateSet> {
         let res = with_stderr_silenced(|| unsafe { rtlsdr_set_sample_rate(self.ptr, hz as u32) });
         if res != 0 {
             anyhow::bail!("Failed to set RTL-SDR sample rate");
         }
-        Ok(0)
+        let got = with_stderr_silenced(|| unsafe { rtlsdr_get_sample_rate(self.ptr) });
+        Ok(RateSet::new(hz, Some(got as f64), 0))
     }
 
     /// The single tuner gain. Forces manual gain mode, then snaps `db` to the

@@ -119,12 +119,25 @@ pub(super) fn sample_rate(
                 let result = rate_hz.map(|hz| device.set_sample_rate(hz));
                 let mut m = metrics(state);
                 match (rate_hz, result) {
-                    (Some(hz), Some(Ok(bw))) => {
-                        m.radio.config_sample_rate = hz;
-                        m.radio.bb_filter_hz = bw;
+                    // The rate recorded is the one the device came back with,
+                    // not the one that was typed: a driver is free to round onto
+                    // its own grid, and every frequency on screen is derived from
+                    // this figure.
+                    (Some(hz), Some(Ok(set))) => {
+                        m.radio.config_sample_rate = set.rate_hz;
+                        m.radio.bb_filter_hz = set.bb_filter_hz;
                         m.ui.input_mode = InputMode::Normal;
                         m.ui.input_buf.clear();
-                        m.push_log(format!("Sample rate set to {:.1} MHz", hz / 1_000_000.0));
+                        m.push_log(if set.rate_hz == hz {
+                            format!("Sample rate set to {:.3} MHz", hz / 1e6)
+                        } else {
+                            format!(
+                                "Sample rate {:.3} MHz is not on this radio's grid; running at \
+                                 {:.3} MHz",
+                                hz / 1e6,
+                                set.rate_hz / 1e6
+                            )
+                        });
                     }
                     (Some(_), Some(Err(e))) => m.push_log(format!("Sample rate error: {}", e)),
                     _ => {

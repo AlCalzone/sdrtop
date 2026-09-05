@@ -46,12 +46,26 @@ impl App {
         let mut tuning = resolve_tuning(&cfg.radio, &caps);
         // Taken out before `tuning` is moved into `Boot`, rather than cloning
         // the whole thing to keep them.
-        let gain_notes = std::mem::take(&mut tuning.notes);
-        let sr_result = match device.set_sample_rate(tuning.sample_rate) {
-            // The device is the authority on the baseband width it actually
-            // selected; the computed value stands in only when the call failed.
-            Ok(bw) => {
-                tuning.bb_filter_hz = bw;
+        let mut boot_notes = std::mem::take(&mut tuning.notes);
+        let asked_rate = tuning.sample_rate;
+        let sr_result = match device.set_sample_rate(asked_rate) {
+            // The device is the authority on both figures: the baseband width it
+            // actually selected, and the rate it actually landed on. The computed
+            // width and the requested rate stand in only when the call failed.
+            Ok(set) => {
+                tuning.sample_rate = set.rate_hz;
+                tuning.bb_filter_hz = set.bb_filter_hz;
+                // A driver that rounded the configured rate onto its own grid
+                // would otherwise change it silently, and the config is rewritten
+                // on quit, so the user's own figure would disappear without ever
+                // having been contradicted.
+                if set.rate_hz != asked_rate {
+                    boot_notes.push(format!(
+                        "Sample rate {:.6} MHz is not on this radio's grid; running at {:.6} MHz",
+                        asked_rate / 1e6,
+                        set.rate_hz / 1e6
+                    ));
+                }
                 Ok(())
             }
             Err(e) => Err(e),
@@ -108,11 +122,12 @@ impl App {
             for note in device.open_notes() {
                 m.push_log(note.clone());
             }
-            // Anything the configured `gain` string asked for and did not get:
-            // a stage name this radio does not have, or an entry that is not
-            // `NAME=value` at all. Computed by `resolve_tuning`, which is pure,
-            // and surfaced here.
-            for note in &gain_notes {
+            // Anything the configured tuning asked for and did not get: a gain
+            // stage name this radio does not have, an entry that is not
+            // `NAME=value` at all, or a sample rate the driver rounded. The gain
+            // ones are computed by `resolve_tuning`, which is pure, and surfaced
+            // here.
+            for note in &boot_notes {
                 m.push_log(note.clone());
             }
             let names = [

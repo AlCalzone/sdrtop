@@ -697,6 +697,54 @@ pub struct DemodBlock {
     pub bytes: Vec<u8>,
 }
 
+/// What a radio settled on after a rate change.
+///
+/// Two answers to one call, because they are two facts about the same act and
+/// two trait methods would let a call site record one and forget the other.
+///
+/// Not re-exported from `hardware`: it exists to be returned and destructured,
+/// and no call site has to name it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RateSet {
+    /// The rate the radio is running at.
+    ///
+    /// **Read back from the driver wherever there is a getter to read.** A
+    /// driver is free to round a request onto its own clock grid and say
+    /// nothing about it: an RTL-SDR's rate is 28.8 MHz over an integer divider,
+    /// and a SoapySDR device may only offer a fixed list. Every frequency on
+    /// screen is derived from this figure, so recording the request as if it
+    /// were the fact mislabels every bin, every marker and every demod offset
+    /// by the ratio between them.
+    ///
+    /// libhackrf has no getter, so on a HackRF this is still what was asked
+    /// for, and [`RateSet::new`] is told so.
+    pub rate_hz: f64,
+    /// Baseband filter bandwidth applied (Hz), or 0 where the device has none.
+    pub bb_filter_hz: u32,
+}
+
+impl RateSet {
+    /// What to record, given what was asked for and whatever the driver said
+    /// when it was asked back.
+    ///
+    /// `None` is a backend whose driver has no getter at all. A `Some` that is
+    /// not a rate - zero, negative, or not a number - is a driver that was asked
+    /// and did not answer, which is librtlsdr's shape for a failure and the
+    /// shape a SoapySDR driver's unimplemented `getSampleRate` returns. Both
+    /// leave the request standing, because the alternative is a sample rate of
+    /// zero dividing every frequency axis in the app.
+    pub fn new(requested: f64, readback: Option<f64>, bb_filter_hz: u32) -> Self {
+        let rate_hz = match readback {
+            Some(hz) if hz.is_finite() && hz > 0.0 => hz,
+            _ => requested,
+        };
+        Self {
+            rate_hz,
+            bb_filter_hz,
+        }
+    }
+}
+
 /// A tuned SDR receiver. Object-safe so it can be stored as `Arc<dyn SdrDevice>`
 /// and shared across the input handler, the RX task, and the sweep task.
 pub trait SdrDevice: Send + Sync {
@@ -711,9 +759,13 @@ pub trait SdrDevice: Send + Sync {
     fn is_streaming(&self) -> bool;
 
     fn set_frequency(&self, hz: u64) -> anyhow::Result<()>;
-    /// Returns the baseband-filter bandwidth applied (Hz), or 0 when the device
-    /// has none.
-    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<u32>;
+    /// Set the sample rate and report what the radio settled on.
+    ///
+    /// An implementation asks the driver back where the driver can be asked,
+    /// and builds its answer through [`RateSet::new`] so that a getter which
+    /// declines is handled the same way everywhere. What comes back is what the
+    /// app records as the rate, not what was passed in.
+    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<RateSet>;
 
     /// Primary front-end gain - HackRF's LNA, RTL-SDR's tuner gain. The other
     /// stages default to no-ops so call sites stay unconditional; capability
@@ -794,6 +846,39 @@ pub trait SdrDevice: Send + Sync {
 mod tests {
     use super::*;
     use crate::hardware::native::{hackrf, rtlsdr};
+
+    // ── The rate a radio settled on ─────────────────────────────────────────
+
+    /// A driver that rounds a request onto its own grid is the authority on
+    /// what it did. Asking for 2.5 Msps on an RTL-SDR gets a divider, and the
+    /// divider is the rate every bin frequency is computed from.
+    #[test]
+    fn a_driver_that_reports_its_own_rate_is_believed_over_the_request() {
+        let set = RateSet::new(2_500_000.0, Some(2_400_000.0), 0);
+        assert_eq!(set.rate_hz, 2_400_000.0);
+        assert_eq!(set.bb_filter_hz, 0);
+    }
+
+    /// libhackrf has no getter. Nothing was asked, so nothing overrides the
+    /// request, and the baseband width the device did report still comes back.
+    #[test]
+    fn a_driver_with_no_getter_leaves_the_request_standing() {
+        let set = RateSet::new(10_000_000.0, None, 8_000_000);
+        assert_eq!(set.rate_hz, 10_000_000.0);
+        assert_eq!(set.bb_filter_hz, 8_000_000);
+    }
+
+    /// The one that matters. `rtlsdr_get_sample_rate` returns 0 when it fails,
+    /// and a driver is free to return anything at all. A rate of zero divides
+    /// the FFT span, the markers and the demod offsets, so a non-answer must
+    /// read as a non-answer rather than as a rate of nothing.
+    #[test]
+    fn a_readback_that_is_not_a_rate_is_not_an_answer() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let set = RateSet::new(2_400_000.0, Some(bad), 0);
+            assert_eq!(set.rate_hz, 2_400_000.0, "readback {bad}");
+        }
+    }
 
     // ── The native stage lists ──────────────────────────────────────────────
 

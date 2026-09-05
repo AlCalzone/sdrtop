@@ -22,6 +22,10 @@ extern "C" {
 
     pub fn rtlsdr_set_center_freq(dev: *mut c_void, freq: u32) -> c_int;
     pub fn rtlsdr_set_sample_rate(dev: *mut c_void, rate: u32) -> c_int;
+    /// The rate the device is actually running at: 28.8 MHz over an integer
+    /// divider, which is rarely the rate that was asked for. Returns 0 on
+    /// failure.
+    pub fn rtlsdr_get_sample_rate(dev: *mut c_void) -> u32;
 
     /// tuner type: 0 unknown, 1 E4000, 2 FC0012, 3 FC0013, 4 FC2580, 5 R820T, 6 R828D.
     pub fn rtlsdr_get_tuner_type(dev: *mut c_void) -> c_int;

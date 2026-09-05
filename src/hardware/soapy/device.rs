@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 use super::api::{self, SoapyApi, SoapySDRDevice};
 use super::{args, caps};
+// `RateSet` is not re-exported from `hardware`: what a backend answers a rate
+// change with is between the backend and the trait.
+use crate::hardware::traits::RateSet;
 use crate::hardware::{
     DeviceCapabilities, DeviceInfo, DeviceKind, DeviceListing, RxContext, SdrDevice,
 };
@@ -151,26 +154,34 @@ impl SdrDevice for SoapyDevice {
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.args))
     }
 
-    /// Sets the rate, then matches the baseband filter to it where the device
-    /// has one, and returns the bandwidth actually asked for.
+    /// Sets the rate, asks what it became, then matches the baseband filter to
+    /// the answer where the device has one.
+    ///
+    /// **Asked back rather than assumed.** A SoapySDR driver takes any rate and
+    /// quietly gives the nearest one it can produce; some offer a fixed list and
+    /// nothing between. `getSampleRate` is the only place that lands, and the
+    /// filter below has to follow the rate the device settled on rather than the
+    /// one that was asked for, or the window and its filter disagree.
     ///
     /// The filter follows the rate rather than being left where it was, because
     /// a filter wider than the sample rate aliases everything outside the window
     /// back into it, and a filter far narrower throws away signal the user can
     /// see on screen.
-    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<u32> {
+    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<RateSet> {
         unsafe { self.api.set_sample_rate(self.dev, hz) }
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.args))?;
+        let mut settled = RateSet::new(hz, Some(unsafe { self.api.get_sample_rate(self.dev) }), 0);
         if !self.caps.has_bb_filter {
-            return Ok(0);
+            return Ok(settled);
         }
-        match unsafe { self.api.set_bandwidth(self.dev, hz) } {
-            Ok(()) => Ok(hz as u32),
+        settled.bb_filter_hz = match unsafe { self.api.set_bandwidth(self.dev, settled.rate_hz) } {
+            Ok(()) => settled.rate_hz as u32,
             // A device with a bandwidth range that refuses this particular one
             // is still a working receiver. Say so and carry on rather than
             // failing a retune over the filter.
-            Err(_) => Ok(0),
-        }
+            Err(_) => 0,
+        };
+        Ok(settled)
     }
 
     fn set_lna_gain(&self, db: u32) -> anyhow::Result<()> {

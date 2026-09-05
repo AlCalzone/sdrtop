@@ -18,6 +18,9 @@ use crate::hardware::{
     Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceKind, DeviceListing, GainModel,
     RxContext, SampleFormat, SampleGeometry, SdrDevice, StageSpec,
 };
+// Not re-exported from `hardware`: what a backend answers a rate change with is
+// between the backend and the trait, and no call site outside names the type.
+use crate::hardware::traits::RateSet;
 use ffi::*;
 
 pub struct HackRfDevice {
@@ -135,7 +138,10 @@ impl SdrDevice for HackRfDevice {
 
     /// Sets the sample rate and programs the nearest valid BB filter BW,
     /// returning the bandwidth applied.
-    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<u32> {
+    /// libhackrf has no `get_sample_rate`, so there is nothing to ask back and
+    /// the requested rate stands. The baseband width is a different matter: the
+    /// value below is the one that was programmed, not a guess about it.
+    fn set_sample_rate(&self, hz: f64) -> anyhow::Result<RateSet> {
         let bw = compute_bb_filter_bw(hz);
         unsafe {
             if hackrf_set_sample_rate(self.ptr, hz) != 0 {
@@ -145,7 +151,7 @@ impl SdrDevice for HackRfDevice {
                 anyhow::bail!("Failed to set baseband filter bandwidth");
             }
         }
-        Ok(bw)
+        Ok(RateSet::new(hz, None, bw))
     }
 
     fn set_lna_gain(&self, db: u32) -> anyhow::Result<()> {

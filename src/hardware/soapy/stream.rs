@@ -134,6 +134,8 @@ pub struct Streaming {
     pub active: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
     clock: Arc<ReadLoopClock>,
+    /// Pairs in one read of the running stream, or zero when none is running.
+    block: AtomicU64,
 }
 
 impl Streaming {
@@ -144,6 +146,25 @@ impl Streaming {
     /// Where the read loop's time has gone, for the timing bench.
     pub fn clock(&self) -> &ReadLoopClock {
         &self.clock
+    }
+
+    /// Remember the block this stream settled on, once the driver's own limit
+    /// is known.
+    fn note_block(&self, pairs: usize) {
+        self.block.store(pairs as u64, Ordering::Relaxed);
+    }
+
+    /// IQ pairs in one read, while a stream is running.
+    ///
+    /// `None` before one is set up, because the driver's MTU cannot be asked for
+    /// without a stream to ask about: what the timing bench should use until then
+    /// is the block this backend intends to read, which is what
+    /// `DeviceCapabilities` already carries.
+    pub fn block_pairs(&self) -> Option<u64> {
+        match self.block.load(Ordering::Relaxed) {
+            0 => None,
+            pairs => Some(pairs),
+        }
     }
 
     /// Set the stream up, activate it, and hand it to an owned thread.
@@ -210,6 +231,15 @@ impl Streaming {
                 ),
             );
         }
+        // Which they only do because of this line. `DeviceCapabilities` was built
+        // at `open`, before any stream existed to ask about an MTU, so the block
+        // it declares is the one we intend to read and not always the one we get.
+        // Every figure on the timing bench is measured against the expected
+        // period, and the expected period is this block over the sample rate: a
+        // driver with a smaller MTU had its callbacks graded against a period
+        // four times too long, and the bench called a healthy stream permanently
+        // late.
+        self.note_block(pairs_per_read);
 
         let active = Arc::clone(&self.active);
         let clock = Arc::clone(&self.clock);
@@ -244,6 +274,9 @@ impl Streaming {
     /// Stop and **join**, so no block can land after this returns.
     pub fn stop(&self) {
         self.active.store(false, Ordering::SeqCst);
+        // The MTU belonged to that stream. Without one there is nothing to
+        // report, which is not the same as reporting a block of zero.
+        self.block.store(0, Ordering::Relaxed);
         if let Some(h) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = h.join();
         }
@@ -316,8 +349,10 @@ fn run(
                 // no way to ask. One read's worth is the smallest number that is
                 // certainly not an overstatement, and it is far better than
                 // zero: zero would leave the STREAM panel calling a dropping
-                // link healthy.
-                process_block(&[], ctx.geometry, READ_PAIRS, ctx, now);
+                // link healthy. `pairs_per_read` rather than `READ_PAIRS`,
+                // because on a driver whose MTU clamped us the two differ and
+                // only the first one is a read.
+                process_block(&[], ctx.geometry, pairs_per_read as u64, ctx, now);
             }
             Outcome::Error(code) => {
                 log(
@@ -389,6 +424,24 @@ mod tests {
     #[test]
     fn a_nonsense_pair_count_saturates_rather_than_wrapping() {
         assert_eq!(byte_len(usize::MAX, 4), usize::MAX);
+    }
+
+    /// The block a stream reads is not always the block we asked for, and every
+    /// figure on the timing bench is measured against it. A stream that has
+    /// never run has not been able to ask the driver anything, and says so
+    /// rather than answering with the block we merely intend to read.
+    #[test]
+    fn a_stream_reports_the_block_it_was_clamped_to() {
+        let s = Streaming::default();
+        assert_eq!(s.block_pairs(), None, "no stream, nothing to report");
+        s.note_block(4_096);
+        assert_eq!(s.block_pairs(), Some(4_096));
+        s.stop();
+        assert_eq!(
+            s.block_pairs(),
+            None,
+            "the driver's limit went with the stream it belonged to"
+        );
     }
 
     /// The block size against the driver's own limit. The zero case is the one

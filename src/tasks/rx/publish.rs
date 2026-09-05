@@ -172,7 +172,7 @@ pub(super) fn write_back(
     m.timing = crate::state::TimingState::compute(
         m.iq.cb_period_us,
         m.radio.config_sample_rate,
-        device.capabilities().samples_per_transfer,
+        device.samples_per_transfer(),
         &jitter_snapshot,
         &gaps_snapshot,
         m.iq.cb_jitter_us,

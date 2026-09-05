@@ -604,8 +604,11 @@ pub struct DeviceCapabilities {
     pub default_sample_rate_hz: f64,
     pub sample_geometry: SampleGeometry,
     pub gain: GainModel,
-    /// IQ pairs per USB transfer - feeds the expected callback-period math in
-    /// [`crate::state::TimingState`].
+    /// IQ pairs per USB transfer, as declared at open.
+    ///
+    /// Read through [`SdrDevice::samples_per_transfer`] rather than from here:
+    /// a backend that only learns its real block size once a stream is running
+    /// overrides that method, and this field is what it falls back to.
     pub samples_per_transfer: u64,
     /// Programmable baseband filter (HackRF yes, RTL-SDR no). Part of the device
     /// capability contract and asserted in the device tests; the live panels key off
@@ -768,6 +771,22 @@ pub trait SdrDevice: Send + Sync {
     /// that stops and restarts does not step the counters backwards.
     fn read_loop_us(&self) -> Option<(u64, u64)> {
         None
+    }
+
+    /// IQ pairs in one delivery, feeding the expected callback period in
+    /// [`crate::state::TimingState`].
+    ///
+    /// The default is the figure [`DeviceCapabilities`] declares, which is the
+    /// whole answer for a backend that chose its own transfer size and knew it
+    /// at open. A pull backend overrides it, because the block it reads is not
+    /// settled until a stream exists: the driver's MTU may be smaller than the
+    /// one we ask for, and every figure on the timing bench is measured against
+    /// this number.
+    ///
+    /// One accessor rather than a field the caller may or may not remember to
+    /// correct, so there is one account of how big a block is.
+    fn samples_per_transfer(&self) -> u64 {
+        self.capabilities().samples_per_transfer
     }
 }
 

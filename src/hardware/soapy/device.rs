@@ -138,6 +138,14 @@ impl SdrDevice for SoapyDevice {
         Some(self.streaming.clock().read())
     }
 
+    /// The block the running stream settled on, or the one this backend intends
+    /// to read when none is running. See [`super::stream::Streaming::block_pairs`].
+    fn samples_per_transfer(&self) -> u64 {
+        self.streaming
+            .block_pairs()
+            .unwrap_or(self.caps.samples_per_transfer)
+    }
+
     fn set_frequency(&self, hz: u64) -> anyhow::Result<()> {
         unsafe { self.api.set_frequency(self.dev, hz as f64) }
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.args))

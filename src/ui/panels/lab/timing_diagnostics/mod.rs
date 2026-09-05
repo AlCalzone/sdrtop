@@ -274,11 +274,11 @@ mod vocabulary {
             .pulling(0.65);
         let push = SdrMetrics::fixture().streaming().with_timing(4.7);
 
-        // Push-only mechanisms, and nothing else. "Overrun" and "dropped" are
-        // deliberately absent: a pull backend loses samples too (SoapySDR
-        // returns SOAPY_SDR_OVERFLOW), so a ring buffer's overrun margin is a
-        // real reading on both. The list is about mechanisms the device does
-        // not have, not about alarming words.
+        // Push-only mechanisms, and nothing else. "Dropped" is deliberately
+        // absent: a pull backend loses samples too (SoapySDR returns
+        // SOAPY_SDR_OVERFLOW), and it queues blocks for the FFT the same way, so
+        // both readings are real on either. The list is about mechanisms the
+        // device does not have, not about alarming words.
         let words = ["callback", "deadline", "budget", "late"];
         let render = |m: &SdrMetrics| {
             vec![

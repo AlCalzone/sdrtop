@@ -63,6 +63,8 @@ impl SdrMetrics {
                 iq_amplitude_hist: [0u64; 32],
                 adc_signed_hist: [0u64; 32],
                 buf_fill_pct: 0.0,
+                fft_drops: 0,
+                fft_drops_session: 0,
                 buf_fill_history: VecDeque::new(),
                 phase_imbalance_deg: 0.0,
                 cal: IqCalState::default(),

@@ -122,11 +122,30 @@ mod tests {
         let sat = out.find("ADC saturation").expect("no saturation zone");
         let cpu = out.find("CPU load").expect("no cpu zone");
         let usb = out.find("USB LINK").expect("no usb zone");
-        let ring = out.find("RING BUFFER").expect("no ring zone");
+        let feed = out.find("FFT FEED").expect("no feed zone");
         assert!(
-            drops < sat && sat < cpu && cpu < usb && usb < ring,
+            drops < sat && sat < cpu && cpu < usb && usb < feed,
             "zones out of order:\n{out}"
         );
+    }
+
+    /// A block the FFT feed refused is a frame the spectrum never drew, and it
+    /// is the only record that the block existed. The whole point of counting it
+    /// is that it reaches a panel, so the path is pinned end to end here.
+    #[test]
+    fn a_block_the_spectrum_lost_is_shown_and_not_only_counted() {
+        let quiet = draw(TimingVitalsPanel, W, H, &live()).join("\n");
+        assert!(quiet.contains("Blocks dropped"), "{quiet}");
+        assert!(
+            quiet.contains("session 0"),
+            "a clean feed says so:\n{quiet}"
+        );
+
+        let mut lossy = live();
+        lossy.iq.fft_drops = 3;
+        lossy.iq.fft_drops_session = 47;
+        let out = draw(TimingVitalsPanel, W, H, &lossy).join("\n");
+        assert!(out.contains("session 47"), "{out}");
     }
 
     /// The verdict follows the timing quality, and the three bands are reachable.

@@ -135,7 +135,8 @@ pub fn process_block(
     // Single brief lock to flush accumulated results - O(1), no loops inside.
     {
         let Ok(mut m) = ctx.metrics.lock() else {
-            ctx.sample_tx.try_send(buf.to_vec()).ok();
+            let taken = ctx.sample_tx.try_send(buf.to_vec()).is_ok();
+            ctx.fft_feed.record(ctx.sample_tx.len(), taken);
             return;
         };
 
@@ -211,7 +212,14 @@ pub fn process_block(
             })
             .ok();
     }
-    ctx.sample_tx.try_send(forward).ok();
+    // The one point where a lost block is observable. This channel is lossy by
+    // design - dropping under load beats blocking the USB callback - but lossy
+    // and invisible are different things: it carries no sequence number, so once
+    // `try_send` has returned there is nothing downstream that can tell the block
+    // ever existed. The depth is read straight after, which can only understate
+    // it if the worker drained the queue in between.
+    let taken = ctx.sample_tx.try_send(forward).is_ok();
+    ctx.fft_feed.record(ctx.sample_tx.len(), taken);
 }
 
 /// The running totals one block folds into, and the per-pair body that fills
@@ -407,17 +415,55 @@ mod tests {
         crossbeam_channel::Receiver<Vec<u8>>,
         crossbeam_channel::Receiver<DemodBlock>,
     ) {
-        let (sample_tx, sample_rx) = crossbeam_channel::bounded(8);
+        rx_ctx_holding(8)
+    }
+
+    /// The same, with the FFT queue's depth chosen: a shallow one can be filled
+    /// in a test, which is how the lossy hand-off is exercised without needing a
+    /// slow FFT worker to be behind.
+    fn rx_ctx_holding(
+        fft_cap: usize,
+    ) -> (
+        Arc<RxContext>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+        crossbeam_channel::Receiver<DemodBlock>,
+    ) {
+        let (sample_tx, sample_rx) = crossbeam_channel::bounded(fft_cap);
         let (demod_tx, demod_rx) = crossbeam_channel::bounded(8);
         let mut m = SdrMetrics::fixture();
         m.demod.enabled = true;
         let ctx = RxContext {
             metrics: Arc::new(Mutex::new(m)),
             sample_tx,
+            fft_feed: crate::hardware::FeedHealth::default(),
             demod_tx,
             geometry: eight_bit(),
         };
         (Arc::new(ctx), sample_rx, demod_rx)
+    }
+
+    /// The block the FFT feed could not take is counted.
+    ///
+    /// The channel is lossy by design and carries no sequence number, so this is
+    /// the only point in the program where the loss is observable at all: after
+    /// the `try_send` returns the block is simply gone, and nothing downstream
+    /// can tell it ever existed. It used to be discarded with an `.ok()`, and the
+    /// spectrum's frame rate halved under load with every panel reporting a
+    /// comfortable buffer.
+    #[test]
+    fn a_block_the_fft_feed_cannot_take_is_counted() {
+        let (ctx, _sample_rx, _demod_rx) = rx_ctx_holding(1);
+        let block = vec![0x10u8; 64];
+
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+        let (depth, dropped) = ctx.fft_feed.take();
+        assert_eq!((depth, dropped), (1, 0), "the queue took it");
+
+        // The worker has not drained it, so the next block has nowhere to go.
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+        let (depth, dropped) = ctx.fft_feed.take();
+        assert_eq!(dropped, 1, "a block the spectrum never saw");
+        assert_eq!(depth, 1, "and the queue was full when it happened");
     }
 
     /// The block a driver-side loss precedes is marked as such.

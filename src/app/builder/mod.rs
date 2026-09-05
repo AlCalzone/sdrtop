@@ -152,6 +152,7 @@ impl App {
         let rx_ctx = Arc::new(hardware::RxContext {
             metrics: Arc::clone(&state),
             sample_tx,
+            fft_feed: hardware::FeedHealth::default(),
             demod_tx,
             geometry,
         });

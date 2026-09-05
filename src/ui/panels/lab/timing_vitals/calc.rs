@@ -15,12 +15,6 @@ pub(super) fn link_ceiling_mbps(sample_rate_max_hz: f64, bytes_per_pair: usize) 
     (sample_rate_max_hz * bytes_per_pair as f64) / (1024.0 * 1024.0)
 }
 
-/// Overrun margin: how much ring-buffer headroom remains below the ceiling, from
-/// the session peak fill. Clamped to a sane 0..=100.
-pub(super) fn overrun_margin_pct(peak_fill_pct: f64) -> f64 {
-    (100.0 - peak_fill_pct).clamp(0.0, 100.0)
-}
-
 /// `HH:MM:SS` uptime from a whole-second count.
 pub(super) fn fmt_uptime(secs: u64) -> String {
     format!(
@@ -51,16 +45,6 @@ mod tests {
         let narrow = link_ceiling_mbps(20_000_000.0, 2);
         let wide = link_ceiling_mbps(20_000_000.0, 4);
         assert!((wide - narrow * 2.0).abs() < 1e-9, "{wide} vs {narrow}");
-    }
-
-    #[test]
-    fn overrun_margin_never_goes_negative() {
-        // A peak above the ceiling cannot push the margin negative.
-        assert_eq!(overrun_margin_pct(0.0), 100.0);
-        assert_eq!(overrun_margin_pct(40.0), 60.0);
-        assert_eq!(overrun_margin_pct(62.0), 38.0);
-        assert_eq!(overrun_margin_pct(100.0), 0.0);
-        assert_eq!(overrun_margin_pct(140.0), 0.0);
     }
 
     #[test]

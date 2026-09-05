@@ -7,6 +7,7 @@
 //! `native` and `soapy` submodules; everything device-generic keys off the
 //! [`DeviceCapabilities`] descriptor rather than matching on the device type.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
@@ -664,6 +665,8 @@ pub struct DeviceInfo {
 pub struct RxContext {
     pub metrics: Arc<Mutex<SdrMetrics>>,
     pub sample_tx: crossbeam_channel::Sender<Vec<u8>>,
+    /// What the FFT feed did with the blocks handed to it, for the poll task.
+    pub fft_feed: FeedHealth,
     /// Second, independently lossy feed to the demod worker. Blocks are forwarded
     /// only while `demod.enabled` is set, so the extra copy is paid for solely on
     /// the bench that uses it.
@@ -675,6 +678,52 @@ pub struct RxContext {
     /// for it.
     pub demod_tx: crossbeam_channel::Sender<DemodBlock>,
     pub geometry: SampleGeometry,
+}
+
+/// What the FFT feed did with the blocks handed to it since the last poll.
+///
+/// **Atomics rather than the shared accumulator**, the same trade
+/// [`crate::hardware::soapy::stream::ReadLoopClock`] makes and for the same
+/// reason: both answers are known only *after* `process_block`'s lock block has
+/// closed, and reopening the mutex to record two integers would put a second
+/// acquisition on the hot path for figures nothing reads until the next poll.
+///
+/// Both are reset by the poll that reads them, so each one is "this window".
+#[derive(Default)]
+pub struct FeedHealth {
+    peak_depth: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl FeedHealth {
+    /// Record one hand-off: how deep the queue was left, and whether it took the
+    /// block at all.
+    ///
+    /// **A high-water mark, not the latest reading.** The queue fills and drains
+    /// in microseconds while the poll runs every 200 ms, so a depth read at poll
+    /// time is a point sample of something that is almost always empty: it
+    /// reported a comfortable 0 % straight through backlogs it never happened to
+    /// land in.
+    ///
+    /// A block the queue could not take is the event the depth is a proxy for,
+    /// and it is the only place that event is visible: the channel is lossy by
+    /// design and carries no sequence number, so nothing downstream can tell that
+    /// a block ever existed.
+    pub fn record(&self, depth: usize, taken: bool) {
+        self.peak_depth.fetch_max(depth as u64, Ordering::Relaxed);
+        if !taken {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `(deepest the queue got, blocks it refused)` since the last call, and
+    /// start counting again.
+    pub fn take(&self) -> (u64, u64) {
+        (
+            self.peak_depth.swap(0, Ordering::Relaxed),
+            self.dropped.swap(0, Ordering::Relaxed),
+        )
+    }
 }
 
 /// One block of samples on its way to the demod worker.
@@ -846,6 +895,32 @@ pub trait SdrDevice: Send + Sync {
 mod tests {
     use super::*;
     use crate::hardware::native::{hackrf, rtlsdr};
+
+    // ── What the FFT feed did with a block ──────────────────────────────────
+
+    /// The depth has to be the deepest the queue got, not the depth at some
+    /// arbitrary later instant. A backlog that builds and drains between two
+    /// polls is exactly the event worth reporting, and a point sample is what
+    /// used to miss it.
+    #[test]
+    fn the_feed_reports_the_deepest_the_queue_got_and_not_the_last_reading() {
+        let feed = FeedHealth::default();
+        feed.record(1, true);
+        feed.record(3, true);
+        feed.record(0, true);
+        assert_eq!(feed.take(), (3, 0));
+    }
+
+    /// A block the queue refused is counted, and reading the counters starts the
+    /// next window rather than accumulating into it.
+    #[test]
+    fn a_refused_block_is_counted_and_the_window_starts_again() {
+        let feed = FeedHealth::default();
+        feed.record(4, false);
+        feed.record(4, false);
+        assert_eq!(feed.take(), (4, 2));
+        assert_eq!(feed.take(), (0, 0), "the window it reported is over");
+    }
 
     // ── The rate a radio settled on ─────────────────────────────────────────
 

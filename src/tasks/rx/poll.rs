@@ -153,12 +153,19 @@ pub(super) fn drain(
     }
     m.signal.usb_error_history.push_back(usb_delta);
 
+    // The FFT feed's own account of the window, taken from the hot path rather
+    // than sampled here: `sample_tx.len()` at poll time is one instant in 200 ms
+    // of a queue that fills and drains in microseconds. The blocks it refused are
+    // the event the depth was only ever a proxy for, and nothing counted them.
+    let (peak_depth, fft_drops) = rx_ctx.fft_feed.take();
     let cap = rx_ctx.sample_tx.capacity().unwrap_or(4);
     m.iq.buf_fill_pct = if cap > 0 {
-        rx_ctx.sample_tx.len() as f32 / cap as f32 * 100.0
+        peak_depth as f32 / cap as f32 * 100.0
     } else {
         0.0
     };
+    m.iq.fft_drops = fft_drops;
+    m.iq.fft_drops_session += fft_drops;
     let buf_sample = (m.iq.buf_fill_pct * 10.0) as u64;
     if m.iq.buf_fill_history.len() >= THROUGHPUT_HISTORY_LEN {
         m.iq.buf_fill_history.pop_front();
@@ -166,4 +173,59 @@ pub(super) fn drain(
     m.iq.buf_fill_history.push_back(buf_sample);
 
     drained
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::{FeedHealth, SampleFormat, SampleGeometry};
+
+    /// Both receivers come back so the caller holds them for the length of the
+    /// test: a dropped receiver disconnects its channel, and the queue's own
+    /// capacity is what the percentage below is measured against.
+    #[allow(clippy::type_complexity)]
+    fn ctx_and_state() -> (
+        Arc<Mutex<SdrMetrics>>,
+        Arc<RxContext>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+        crossbeam_channel::Receiver<crate::hardware::DemodBlock>,
+    ) {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let (sample_tx, sample_rx) = crossbeam_channel::bounded(4);
+        let (demod_tx, demod_rx) = crossbeam_channel::bounded(2);
+        let ctx = RxContext {
+            metrics: Arc::clone(&state),
+            sample_tx,
+            fft_feed: FeedHealth::default(),
+            demod_tx,
+            geometry: SampleGeometry {
+                format: SampleFormat::Int8,
+                full_scale: 128.0,
+            },
+        };
+        (state, Arc::new(ctx), sample_rx, demod_rx)
+    }
+
+    /// The depth the hot path recorded becomes a share of the queue's own size,
+    /// and the blocks it refused accumulate across polls: a feed that lost three
+    /// blocks two windows ago and none since still says so.
+    #[test]
+    fn the_feeds_window_becomes_a_percentage_and_a_session_total() {
+        let (state, ctx, _fft_rx, _demod_rx) = ctx_and_state();
+
+        ctx.fft_feed.record(2, true);
+        ctx.fft_feed.record(4, false);
+        drain(&state, &ctx, Instant::now(), true);
+        {
+            let m = state.lock().unwrap();
+            assert_eq!(m.iq.buf_fill_pct, 100.0, "four of four is full");
+            assert_eq!((m.iq.fft_drops, m.iq.fft_drops_session), (1, 1));
+        }
+
+        // A quiet window clears the per-window count and leaves the total.
+        drain(&state, &ctx, Instant::now(), true);
+        let m = state.lock().unwrap();
+        assert_eq!(m.iq.buf_fill_pct, 0.0);
+        assert_eq!((m.iq.fft_drops, m.iq.fft_drops_session), (0, 1));
+    }
 }

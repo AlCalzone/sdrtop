@@ -118,8 +118,25 @@ pub struct IqState {
     /// ADC-loading bell: bin `((v + 128) / 8)`, bin 16 = mid-scale, 0/31 = the rails.
     /// Snapshotted from the accumulator each ~200 ms window, like `iq_amplitude_hist`.
     pub adc_signed_hist: [u64; 32],
+    /// How full the FFT feed's queue got, as a percentage of its depth.
+    ///
+    /// **The deepest it reached during the window, not its depth at poll time.**
+    /// The queue holds four blocks and the FFT worker drains it continuously, so
+    /// a reading taken once every 200 ms is a point sample of something that is
+    /// almost always empty: it read a comfortable 0 % straight through backlogs
+    /// it never happened to land in. The high-water mark is kept in the hot path
+    /// by [`crate::hardware::FeedHealth`] instead.
     pub buf_fill_pct: f32,
     pub buf_fill_history: std::collections::VecDeque<u64>,
+    /// Blocks the FFT feed had to refuse in the last poll window, and since the
+    /// session started.
+    ///
+    /// Not folded into `signal.drops_per_sec`, which counts samples the *radio*
+    /// lost. This is a block sdrtop threw away because its own FFT worker was
+    /// behind: a different fact, with a different cause and a different fix, and
+    /// one witness each.
+    pub fft_drops: u64,
+    pub fft_drops_session: u64,
     pub phase_imbalance_deg: f32,
     /// Live I/Q correction state ([D] DC-block / [C] auto-cal / [F] freeze).
     pub cal: IqCalState,

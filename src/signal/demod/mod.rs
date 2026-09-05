@@ -15,7 +15,8 @@
 //!   load-shedding for a display feed. Statistics tolerate that happily. CTCSS
 //!   does not: telling ~2 Hz-apart tones apart needs half a second of *unbroken*
 //!   audio, so the demod feed carries a sequence number and the channel filter
-//!   ([`StreamingDecimator`]) keeps its state across blocks. A gap resets the run.
+//!   ([`super::dsp::fir::StreamingDecimator`]) keeps its state across blocks.
+//!   A gap resets the run.
 //! * **CPU is a displayed metric.** Work is bounded twice: at most [`SLICE_PAIRS`]
 //!   input pairs per update, and updates at [`UPDATE_INTERVAL`] regardless of how
 //!   fast blocks arrive - so cost is independent of the device sample rate, since
@@ -111,36 +112,6 @@ pub fn tap_count(d: usize) -> usize {
 /// the channel filter stops sharpening. Past this the panel advises a lower
 /// sample rate rather than silently returning a softer measurement.
 pub const FILTER_QUALITY_D_LIMIT: usize = 31;
-
-/// Hamming-windowed sinc low-pass. `fc` is the cutoff in cycles/sample (< 0.5).
-pub fn design_lowpass(taps: usize, fc: f64) -> Vec<f32> {
-    use std::f64::consts::PI;
-    let taps = taps.max(1) | 1;
-    let m = (taps - 1) as f64 / 2.0;
-    let mut h = Vec::with_capacity(taps);
-    let mut sum = 0.0f64;
-    for i in 0..taps {
-        let x = i as f64 - m;
-        // sinc, with the removable singularity at the centre tap handled exactly.
-        let sinc = if x.abs() < 1e-9 {
-            2.0 * fc
-        } else {
-            (2.0 * PI * fc * x).sin() / (PI * x)
-        };
-        let w = 0.54 - 0.46 * (2.0 * PI * i as f64 / (taps - 1).max(1) as f64).cos();
-        let v = sinc * w;
-        sum += v;
-        h.push(v);
-    }
-    // Normalise to unit DC gain so decimation does not change the level, and the
-    // deviation figures stay in real Hz.
-    if sum.abs() > 1e-12 {
-        for v in h.iter_mut() {
-            *v /= sum;
-        }
-    }
-    h.into_iter().map(|v| v as f32).collect()
-}
 
 /// Decode raw wire bytes into complex samples, taking at most `max_pairs`.
 ///
@@ -635,81 +606,6 @@ pub fn ctcss_detect(audio_hz: &[f32], window: &[f32], rate: f64) -> Option<Ctcss
     })
 }
 
-/// A decimating FIR that keeps its state between calls, so successive blocks
-/// produce one seamless output stream.
-///
-/// The stateless [`decimate`] restarts at each block: it discards the first
-/// `taps` samples and resets the decimation grid, which puts a small timing step
-/// at every block boundary. Deviation statistics never notice, but a narrowband
-/// tone detector does - the CTCSS window spans several blocks, and a phase step
-/// inside it destroys the coherence the detection depends on.
-pub struct StreamingDecimator {
-    taps: Vec<f32>,
-    d: usize,
-    /// Input samples carried over so the next block's first output can see the
-    /// full filter history.
-    tail: Vec<Complex<f32>>,
-    /// Where the decimation grid resumes inside the next block.
-    phase: usize,
-}
-
-impl StreamingDecimator {
-    pub fn new(taps: Vec<f32>, d: usize) -> Self {
-        Self {
-            taps,
-            d: d.max(1),
-            tail: Vec::new(),
-            phase: 0,
-        }
-    }
-
-    /// Forget the carried state - after a dropped block, or a parameter change.
-    /// The next output block starts a fresh contiguous run.
-    pub fn reset(&mut self) {
-        self.tail.clear();
-        self.phase = 0;
-    }
-
-    pub fn process(&mut self, input: &[Complex<f32>], out: &mut Vec<Complex<f32>>) {
-        out.clear();
-        let n = self.taps.len();
-        if n == 0 || input.is_empty() {
-            return;
-        }
-
-        // Splice the carried history in front of the new samples.
-        let mut buf = std::mem::take(&mut self.tail);
-        buf.extend_from_slice(input);
-        if buf.len() < n {
-            self.tail = buf;
-            return;
-        }
-
-        let mut start = self.phase;
-        while start + n <= buf.len() {
-            let w = &buf[start..start + n];
-            let mut acc = Complex {
-                re: 0.0f32,
-                im: 0.0f32,
-            };
-            for (s, &h) in w.iter().zip(self.taps.iter()) {
-                acc.re += s.re * h;
-                acc.im += s.im * h;
-            }
-            out.push(acc);
-            start += self.d;
-        }
-
-        // Keep the samples the next output still needs, and remember where the
-        // grid stands relative to them. When the stride overshoots the buffer
-        // entirely, the leftover stride carries into the next block as phase.
-        let consumed = start.min(buf.len());
-        buf.drain(..consumed);
-        self.phase = start - consumed;
-        self.tail = buf;
-    }
-}
-
 /// The demod thread. Mirrors [`crate::signal::FftWorker`]: owns its scratch
 /// buffers, consumes raw blocks, and writes finished measurements into the shared
 /// metrics.
@@ -720,6 +616,10 @@ pub use worker::DemodWorker;
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The FIR primitives live in `signal::dsp::fir`; this module's remaining use
+    // of them is the one integration test that runs a decimated block through the
+    // discriminator, which is a demod fact rather than a filter fact.
+    use super::super::dsp::fir::{design_lowpass, StreamingDecimator};
     use std::f64::consts::PI;
 
     /// Synthesise a complex FM tone: carrier at `offset_hz`, sinusoidally
@@ -795,35 +695,6 @@ mod tests {
         for d in [2usize, 8, 40, 80] {
             assert_eq!(tap_count(d) % 2, 1, "d={d} must give an odd tap count");
         }
-    }
-
-    #[test]
-    fn lowpass_has_unit_dc_gain() {
-        let h = design_lowpass(65, 0.05);
-        let dc: f32 = h.iter().sum();
-        assert!((dc - 1.0).abs() < 1e-4, "DC gain = {dc}");
-    }
-
-    #[test]
-    fn lowpass_rejects_out_of_band() {
-        // Response at a frequency well inside the stopband should be far down.
-        let fc = 0.05;
-        let h = design_lowpass(129, fc);
-        let eval = |f: f64| -> f64 {
-            let (mut re, mut im) = (0.0, 0.0);
-            for (n, &c) in h.iter().enumerate() {
-                let ph = -2.0 * PI * f * n as f64;
-                re += c as f64 * ph.cos();
-                im += c as f64 * ph.sin();
-            }
-            (re * re + im * im).sqrt()
-        };
-        assert!(eval(0.0) > 0.99, "passband gain {}", eval(0.0));
-        assert!(
-            eval(0.20) < 0.01,
-            "stopband gain {} should be < -40 dB",
-            eval(0.20)
-        );
     }
 
     #[test]
@@ -907,68 +778,6 @@ mod tests {
             "offset = {}",
             s.carrier_offset_hz
         );
-    }
-
-    #[test]
-    fn decimate_is_a_noop_when_input_is_shorter_than_the_filter() {
-        let mut sd = StreamingDecimator::new(design_lowpass(63, 0.1), 4);
-        let input = vec![
-            Complex {
-                re: 1.0f32,
-                im: 0.0
-            };
-            10
-        ];
-        let mut out = Vec::new();
-        sd.process(&input, &mut out);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn streaming_decimator_matches_one_long_block() {
-        // The property CTCSS depends on: feeding a signal in pieces must give the
-        // same output as feeding it whole - same samples, same count, no timing
-        // step at the seams.
-        let rate = 2_000_000.0;
-        let d = 8;
-        let iq = fm_signal(rate, 1 << 15, 5_000.0, 0.0, 0.0);
-        let taps = design_lowpass(tap_count(d), 0.4 / d as f64);
-
-        let mut whole = Vec::new();
-        StreamingDecimator::new(taps.clone(), d).process(&iq, &mut whole);
-
-        let mut sd = StreamingDecimator::new(taps, d);
-        let mut pieced = Vec::new();
-        let mut part = Vec::new();
-        // Deliberately ragged chunks, none a multiple of the decimation factor.
-        for chunk in iq.chunks(3_001) {
-            sd.process(chunk, &mut part);
-            pieced.extend_from_slice(&part);
-        }
-
-        assert_eq!(
-            pieced.len(),
-            whole.len(),
-            "sample count diverged across blocks"
-        );
-        for (i, (a, b)) in pieced.iter().zip(whole.iter()).enumerate() {
-            assert!((a - b).norm() < 1e-3, "sample {i} differs: {a} vs {b}");
-        }
-    }
-
-    #[test]
-    fn streaming_decimator_reset_starts_a_fresh_run() {
-        let d = 4;
-        let taps = design_lowpass(31, 0.1);
-        let iq = fm_signal(200_000.0, 4096, 1_000.0, 0.0, 0.0);
-        let mut sd = StreamingDecimator::new(taps, d);
-        let (mut a, mut b) = (Vec::new(), Vec::new());
-        sd.process(&iq, &mut a);
-        sd.reset();
-        sd.process(&iq, &mut b);
-        // After a reset the filter has no history, so it must re-warm exactly as
-        // it did the first time rather than splice onto stale samples.
-        assert_eq!(a.len(), b.len());
     }
 
     #[test]

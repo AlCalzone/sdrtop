@@ -23,11 +23,11 @@ use rustfft::num_complex::Complex;
 use crate::hardware::{DemodBlock, SampleGeometry};
 use crate::state::{AmMeasure, CtcssMeasure, FmMeasure, Modulation, SdrMetrics};
 
+use super::super::dsp::fir::{design_lowpass, StreamingDecimator};
 use super::{
-    am_envelope, am_stats, channel_rate, ctcss_detect, decimation_factor, decode, design_lowpass,
-    fm_discriminate, fm_stats, mix_offset, mpx_spectrum, pilot_measure, tap_count, target_rate_for,
-    StreamingDecimator, CTCSS_WINDOW_S, EMA_ALPHA, MPX_FFT_SIZE, PEAK_DECAY_HZ, SLICE_PAIRS,
-    UPDATE_INTERVAL,
+    am_envelope, am_stats, channel_rate, ctcss_detect, decimation_factor, decode, fm_discriminate,
+    fm_stats, mix_offset, mpx_spectrum, pilot_measure, tap_count, target_rate_for, CTCSS_WINDOW_S,
+    EMA_ALPHA, MPX_FFT_SIZE, PEAK_DECAY_HZ, SLICE_PAIRS, UPDATE_INTERVAL,
 };
 
 pub struct DemodWorker {

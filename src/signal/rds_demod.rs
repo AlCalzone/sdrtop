@@ -127,7 +127,7 @@ impl RdsDemod {
             freq: 2.0 * std::f64::consts::PI * PILOT_HZ / rate,
             kp: 2.0 * 0.707 * wn,
             ki: wn * wn,
-            lp: super::demod::design_lowpass(LP_TAPS, cutoff),
+            lp: super::dsp::fir::design_lowpass(LP_TAPS, cutoff),
             hist: vec![Complex { re: 0.0, im: 0.0 }; LP_TAPS],
             hist_pos: 0,
             dec_d,

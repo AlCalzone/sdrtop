@@ -44,8 +44,10 @@ impl Default for SampleFormat {
 /// ends up drawn against the wrong ceiling.
 ///
 /// Both shipped radios are 8-bit, so `full_scale` is 128.0 for each. That stays
-/// true even for the RTL-SDR, whose true DC bias is 127.5: see
-/// [`super::process`] on why centering by 128 is deliberate.
+/// true even for the RTL-SDR, whose analogue zero is at 127.5: the decoder
+/// centres on 128 because its accumulators are integers, and
+/// [`SampleGeometry::centre_bias`] is what anything reporting an offset adds
+/// back.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct SampleGeometry {
     pub format: SampleFormat,
@@ -84,6 +86,26 @@ impl SampleGeometry {
     pub fn bits(&self) -> u8 {
         let derived = (self.full_scale.max(1.0).log2().round() as i32 + 1).clamp(1, 32) as u8;
         derived.min(self.container_bits())
+    }
+
+    /// Counts between the decoder's zero and the converter's own zero.
+    ///
+    /// [`crate::hardware::process`] centres `Uint8` by subtracting 128, because
+    /// the accumulators are integers and 127.5 is not one. But the converter's
+    /// analogue zero sits *between* code 127 and code 128, so a perfectly
+    /// centred CU8 stream decodes to a mean of -0.5 counts. Anything reporting a
+    /// DC offset has to add this back or it reports the decode convention as a
+    /// fault in the radio.
+    ///
+    /// Half an LSB is 0.0039 of full scale on an 8-bit radio, which is 78 % of
+    /// the offset the IQ bench warns at and puts a -45 dBFS floor under a spike
+    /// it grades from -40 dBFS. Every other format's zero is a code, so there is
+    /// nothing to add back.
+    pub fn centre_bias(&self) -> f64 {
+        match self.format {
+            SampleFormat::Uint8 => 0.5,
+            SampleFormat::Int8 | SampleFormat::Int16 => 0.0,
+        }
     }
 
     /// How many bits the wire format can carry per component, whatever the
@@ -1233,6 +1255,21 @@ mod tests {
     /// actually reports. The 2048 case is the one that matters: a 12-bit ADC
     /// handing over 16-bit containers is 12 bits, and saying 16 would put a
     /// wrong ENOB on the RF bench for every such radio.
+    /// Only an unsigned format has a zero that is not a code. Half a count, and
+    /// half a count is 0.0039 of full scale on an 8-bit radio: enough to sit at
+    /// 78 % of the DC offset the IQ bench warns at, which is why it is added
+    /// back rather than shrugged off.
+    #[test]
+    fn only_an_unsigned_format_is_centred_off_a_code() {
+        let g = |format| SampleGeometry {
+            format,
+            full_scale: 128.0,
+        };
+        assert_eq!(g(SampleFormat::Uint8).centre_bias(), 0.5);
+        assert_eq!(g(SampleFormat::Int8).centre_bias(), 0.0);
+        assert_eq!(g(SampleFormat::Int16).centre_bias(), 0.0);
+    }
+
     #[test]
     fn bit_depth_follows_full_scale() {
         let wide = |fs| SampleGeometry {

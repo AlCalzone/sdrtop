@@ -356,10 +356,20 @@ fn on_rail(full_scale: i64, v: i64) -> bool {
 /// Decode one raw byte of an 8-bit format into a centered signed value in
 /// [-128, 127], and say whether it sits on a rail.
 ///
-/// The two formats differ only here: HackRF sends `Int8`, RTL-SDR `Uint8` biased
-/// at 127.5. Centering Uint8 by 128 rather than the true bias keeps the
-/// downstream DC-offset `/128.0` normalization valid, and the half-LSB
-/// difference is negligible for diagnostics.
+/// The two formats differ only here: HackRF sends `Int8`, RTL-SDR `Uint8` whose
+/// analogue zero sits between code 127 and code 128. Centering by 128 rather
+/// than by 127.5 is what keeps this an integer path, and every accumulator below
+/// it integer with it: a half-count offset would have to be carried in floats
+/// through the whole per-sample loop to buy back a shift that is the same for
+/// every sample in it.
+///
+/// It is **not** negligible where it lands, though, whatever this comment used
+/// to say. Half an LSB is 0.0039 of full scale, which is 78 % of the DC offset
+/// the IQ bench warns at and a -45 dBFS floor under a spike it grades from -40:
+/// no RTL-SDR could read better than that however clean its front end. Nothing
+/// here changes, because the fix costs nothing where the arithmetic is already
+/// floating point - see [`SampleGeometry::centre_bias`] and the one place that
+/// adds it back, `tasks::rx::metrics::iq_metrics`.
 ///
 /// `#[inline]` because this runs twice per sample in the RX callback.
 #[inline]

@@ -95,7 +95,7 @@ pub fn spawn_rx_task(
                 iq: metrics::iq_metrics(
                     drained.moments,
                     drained.cal,
-                    device.capabilities().sample_geometry.full_scale as f64,
+                    device.capabilities().sample_geometry,
                 ),
                 had_samples: drained.moments.samples > 0,
                 callback: metrics::callback_timing(

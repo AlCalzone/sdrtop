@@ -15,6 +15,7 @@
 //! imbalance, ADC loading in dBFS, callback jitter - had no tests at all before
 //! R8a.
 
+use crate::hardware::SampleGeometry;
 use crate::state::IqCalState;
 
 /// The floor every dBFS reading is clamped to, so a silent stream reports a
@@ -44,8 +45,15 @@ pub(super) struct IqMetrics {
     /// active, so it agrees with the corrected constellation.
     pub dc_i: f32,
     pub dc_q: f32,
-    /// Mean I/Q in raw sample units: what DC-block subtracts, measured before
-    /// correction because that is what a correction has to be built from.
+    /// Mean I/Q in raw sample units, referred to the converter's own zero: what
+    /// DC-block subtracts, measured before correction because that is what a
+    /// correction has to be built from.
+    ///
+    /// Carries [`SampleGeometry::centre_bias`], so on an unsigned radio it is
+    /// half a count above the decoded mean. It has to: the re-encode in the hot
+    /// path puts the corrected samples back on the same 128-centred grid, so
+    /// subtracting the decoded mean would leave the stream half an LSB the other
+    /// side of zero and report the result as centred.
     pub dc_i_raw: f32,
     pub dc_q_raw: f32,
     /// Candidate auto-cal Q-row coefficients, from the raw moments.
@@ -93,7 +101,8 @@ impl IqMetrics {
 /// `full_scale` is the device's own count for 0 dBFS, from
 /// [`crate::hardware::SampleGeometry`]. It used to be a module constant of 128,
 /// which was true of both radios sdrtop could open and of nothing else.
-pub(super) fn iq_metrics(m: Moments, cal: IqCalState, full_scale: f64) -> IqMetrics {
+pub(super) fn iq_metrics(m: Moments, cal: IqCalState, geometry: SampleGeometry) -> IqMetrics {
+    let full_scale = geometry.full_scale as f64;
     if m.samples == 0 {
         return IqMetrics::idle();
     }
@@ -128,10 +137,21 @@ pub(super) fn iq_metrics(m: Moments, cal: IqCalState, full_scale: f64) -> IqMetr
     } else {
         (var_i, var_q, cov_iq)
     };
+    // The converter's zero is not always the decoder's: an unsigned format is
+    // centred on a value that is not a code, and the hot path rounds it to one
+    // because its accumulators are integers. Only the offset takes the
+    // correction back - shifting every sample by the same amount moves the
+    // centre and not the spread, so the variances and the covariance above are
+    // the same numbers either way, and so is everything derived from them.
+    let bias = geometry.centre_bias();
+    let (offset_i, offset_q) = (mean_i + bias, mean_q + bias);
     let (emean_i, emean_q) = if cal.dc_block_on || cal.cal_applied {
-        (mean_i - cal.dc_i_raw as f64, mean_q - cal.dc_q_raw as f64)
+        (
+            offset_i - cal.dc_i_raw as f64,
+            offset_q - cal.dc_q_raw as f64,
+        )
     } else {
-        (mean_i, mean_q)
+        (offset_i, offset_q)
     };
 
     let i_ac = ev_i.sqrt();
@@ -140,8 +160,8 @@ pub(super) fn iq_metrics(m: Moments, cal: IqCalState, full_scale: f64) -> IqMetr
     IqMetrics {
         dc_i: (emean_i / full_scale) as f32,
         dc_q: (emean_q / full_scale) as f32,
-        dc_i_raw: mean_i as f32,
-        dc_q_raw: mean_q as f32,
+        dc_i_raw: offset_i as f32,
+        dc_q_raw: offset_q as f32,
         iq_corr,
         iq_imbalance_db: (q_ac > 0.0).then(|| (20.0 * (i_ac / q_ac).log10()) as f32),
         phase_imbalance: (denom > 0.0).then(|| {
@@ -319,11 +339,21 @@ impl RateBaseline {
 
 #[cfg(test)]
 mod tests {
-    /// Both shipped radios. Named rather than repeated so a future 16-bit case
-    /// reads as a different device and not as a typo.
-    const EIGHT_BIT: f64 = 128.0;
-
     use super::*;
+    use crate::hardware::SampleFormat;
+
+    /// A HackRF: signed, so its zero is a code and there is nothing to add back.
+    /// Used by every test whose subject is not the centring itself, so their
+    /// expectations are unchanged by the bias.
+    const EIGHT_BIT: SampleGeometry = SampleGeometry {
+        format: SampleFormat::Int8,
+        full_scale: 128.0,
+    };
+    /// An RTL-SDR: unsigned, centred on a value that is not a code.
+    const RTL: SampleGeometry = SampleGeometry {
+        format: SampleFormat::Uint8,
+        full_scale: 128.0,
+    };
 
     /// Moments for `n` samples with the given per-component variance and no DC,
     /// as an ideal balanced front end would produce.
@@ -341,6 +371,84 @@ mod tests {
 
     fn no_cal() -> IqCalState {
         IqCalState::default()
+    }
+
+    /// A perfectly centred RTL-SDR must read as having no DC offset.
+    ///
+    /// CU8's analogue zero sits between code 127 and code 128, and the hot path
+    /// centres on 128 because the accumulators are integers. A stream split
+    /// evenly between those two codes is as centred as an 8-bit converter can
+    /// be, and it decodes to a mean of -0.5 counts. Reported as it stands that
+    /// is 0.0039 of full scale on every channel, 78 % of the offset this bench
+    /// warns at, and a -45 dBFS floor under a spike it grades from -40: a number
+    /// describing the decoder rather than the radio, and one no RTL-SDR could
+    /// ever read better than.
+    #[test]
+    fn a_centred_unsigned_stream_has_no_dc_offset() {
+        let n = 1_000;
+        let mo = Moments {
+            i_sum: -(n as i64) / 2,
+            q_sum: -(n as i64) / 2,
+            i_sq_sum: n / 2,
+            q_sq_sum: n / 2,
+            cross_sum: n as i64 / 2,
+            samples: n,
+            peak_amp: 1,
+        };
+        let m = iq_metrics(mo, no_cal(), RTL);
+        assert_eq!(m.dc_i, 0.0, "the decode convention is not an offset");
+        assert_eq!(m.dc_q, 0.0);
+        assert_eq!(m.dc_i_raw, 0.0, "and there is nothing for [D] to subtract");
+        assert_eq!(m.dc_q_raw, 0.0);
+    }
+
+    /// The same window on a signed radio keeps its offset. There the zero really
+    /// is a code, so half a count below it is half a count of real DC, and adding
+    /// the correction everywhere would invent one radio's fix on another.
+    #[test]
+    fn a_signed_radio_keeps_the_offset_the_unsigned_one_does_not_have() {
+        let n = 1_000;
+        let mo = Moments {
+            i_sum: -(n as i64) / 2,
+            q_sum: -(n as i64) / 2,
+            i_sq_sum: n / 2,
+            q_sq_sum: n / 2,
+            cross_sum: n as i64 / 2,
+            samples: n,
+            peak_amp: 1,
+        };
+        let m = iq_metrics(mo, no_cal(), EIGHT_BIT);
+        assert_eq!(m.dc_i_raw, -0.5);
+        assert!((m.dc_i - (-0.5 / 128.0)).abs() < 1e-9, "got {}", m.dc_i);
+    }
+
+    /// The correction shifts where zero is, and must not move the spread around
+    /// it: the variance and covariance are the same numbers either way, so the
+    /// imbalance readings a device is graded on cannot depend on its format.
+    #[test]
+    fn the_centring_moves_the_offset_and_nothing_else() {
+        let mo = Moments {
+            i_sum: -500,
+            q_sum: -500,
+            i_sq_sum: 40_000,
+            q_sq_sum: 10_000,
+            cross_sum: 3_000,
+            samples: 1_000,
+            peak_amp: 60,
+        };
+        let signed = iq_metrics(mo, no_cal(), EIGHT_BIT);
+        let unsigned = iq_metrics(mo, no_cal(), RTL);
+        assert_eq!(signed.iq_imbalance_db, unsigned.iq_imbalance_db);
+        assert_eq!(signed.phase_imbalance, unsigned.phase_imbalance);
+        assert_eq!(signed.adc_rms_dbfs, unsigned.adc_rms_dbfs);
+        assert_eq!(signed.adc_peak_dbfs, unsigned.adc_peak_dbfs);
+        assert_eq!(signed.iq_corr, unsigned.iq_corr);
+        assert!(
+            unsigned.dc_i_raw > signed.dc_i_raw,
+            "only the offset moves: {} vs {}",
+            unsigned.dc_i_raw,
+            signed.dc_i_raw
+        );
     }
 
     #[test]
@@ -536,7 +644,17 @@ mod tests {
         };
         mo.peak_amp = 32768;
         assert!(
-            iq_metrics(mo, no_cal(), 32768.0).adc_peak_dbfs.abs() < 1e-4,
+            iq_metrics(
+                mo,
+                no_cal(),
+                SampleGeometry {
+                    format: SampleFormat::Int16,
+                    full_scale: 32768.0,
+                },
+            )
+            .adc_peak_dbfs
+            .abs()
+                < 1e-4,
             "a 16-bit rail is 0 dBFS on a 16-bit device"
         );
         assert!(

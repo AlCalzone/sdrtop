@@ -28,31 +28,58 @@
 //! measurement and any rule based on value over uncertainty would dash it. See
 //! `Uncertain::is_resolved`.
 
-use ratatui::{style::Style, text::Span};
+use ratatui::{
+    style::{Color, Style},
+    text::Span,
+};
 
 use crate::signal::dsp::uncertainty::Uncertain;
 use crate::Theme;
 
-/// Which of the three inks a piece of the cell is drawn in.
+/// Which ink a piece of a reading is drawn in.
+///
+/// One table for the whole widget family, so `limit` cannot invent a seventh
+/// colour for a number that is already being drawn here in one of six. Every one
+/// of them comes from the theme; see
+/// `the_three_inks_are_the_themes_and_never_a_literal`.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Ink {
+pub(super) enum Ink {
     /// The reading itself.
     Value,
     /// A value that could not be supported.
     Missing,
-    /// Uncertainty and unit.
+    /// Uncertainty, unit, label, and the track a marker sits on.
     Dim,
+    /// Inside the limit by more than the measurement's own uncertainty.
+    Ok,
+    /// Inside, but by less than that: too close to call.
+    Warn,
+    /// Outside.
+    Crit,
+}
+
+impl Ink {
+    pub(super) fn colour(self, theme: &Theme) -> Color {
+        match self {
+            Ink::Value => theme.value,
+            Ink::Missing => theme.stale,
+            Ink::Dim => theme.label,
+            Ink::Ok => theme.status_ok,
+            Ink::Warn => theme.status_warn,
+            Ink::Crit => theme.status_crit,
+        }
+    }
 }
 
 /// A measurement, ready to be drawn or written out.
-#[allow(dead_code)] // wired in at N11
+#[allow(dead_code)] // idiom A, drawn by idiom B, whose own consumer is B8
 pub(crate) struct Reading<'a> {
     value: Uncertain,
     unit: &'a str,
     resolution: f64,
 }
 
-#[allow(dead_code)] // wired in at N11
+#[allow(dead_code)] // idiom A, drawn by idiom B, whose own consumer is B8
 impl<'a> Reading<'a> {
     /// `resolution` is the smallest difference that matters for this reading: a
     /// specification tolerance, a channel spacing, a ppm budget. An uncertainty
@@ -66,15 +93,34 @@ impl<'a> Reading<'a> {
         }
     }
 
-    fn pieces(&self) -> Vec<(String, Ink)> {
+    /// The measurement behind the cell, for a caller that needs to compute with
+    /// it rather than print it.
+    pub(super) fn uncertain(&self) -> Uncertain {
+        self.value
+    }
+
+    pub(super) fn unit(&self) -> &str {
+        self.unit
+    }
+
+    /// The value this cell will actually print, or `None` when it dashes.
+    ///
+    /// The one condition, asked once. A row that drew a marker or a margin for a
+    /// value the cell refused to print would be contradicting itself on the same
+    /// line.
+    pub(super) fn resolved_value(&self) -> Option<f64> {
         let value = self.value.value();
+        (value.is_finite() && self.value.is_resolved(self.resolution)).then_some(value)
+    }
+
+    pub(super) fn pieces(&self) -> Vec<(String, Ink)> {
         let sigma = self.value.sigma();
         let places = self.value.decimals();
         let mut out = Vec::with_capacity(3);
 
         // A value that is not a number, or one the uncertainty cannot support,
         // is not printed. The house dash says so in every other panel too.
-        if value.is_finite() && self.value.is_resolved(self.resolution) {
+        if let Some(value) = self.resolved_value() {
             out.push((fmt_at(value, places.unwrap_or(3)), Ink::Value));
         } else {
             out.push(("—".to_string(), Ink::Missing));
@@ -108,11 +154,7 @@ impl<'a> Reading<'a> {
             .into_iter()
             .enumerate()
             .flat_map(|(i, (s, ink))| {
-                let colour = match ink {
-                    Ink::Value => theme.value,
-                    Ink::Missing => theme.stale,
-                    Ink::Dim => theme.label,
-                };
+                let colour = ink.colour(theme);
                 let lead = if i == 0 { "" } else { " " };
                 [
                     Span::raw(lead.to_string()),
@@ -131,7 +173,7 @@ impl<'a> Reading<'a> {
 /// The zero check is not paranoia. `format!("{:.1}", -0.04)` is `-0.0`, and a
 /// measurement that reads minus nothing is the sort of detail that makes a
 /// careful reader stop trusting the rest of the screen.
-fn fmt_at(x: f64, places: i32) -> String {
+pub(super) fn fmt_at(x: f64, places: i32) -> String {
     let step = 10f64.powi(-places);
     let rounded = (x / step).round() * step;
     let rounded = if rounded == 0.0 { 0.0 } else { rounded };

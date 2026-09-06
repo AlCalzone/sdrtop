@@ -62,6 +62,8 @@ pub use panels::lab::timing_diagnostics::TimingDiagnosticsPanel;
 pub use panels::lab::timing_stripchart::TimingStripchartPanel;
 pub use panels::lab::timing_vitals::TimingVitalsPanel;
 
+pub use panels::net::capability::NetCapabilityPanel;
+
 pub use panels::micro::entry::MicroPanel;
 pub use panels::micro::gain::MicroGainPanel;
 pub use panels::micro::health::MicroHealthPanel;

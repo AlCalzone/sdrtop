@@ -17,10 +17,16 @@ use crate::ui;
 use crate::app::App;
 
 impl App {
+    /// `net_admitted` comes from `signal::net::gate`: on a radio that cannot
+    /// reach the 2.4 GHz band, or cannot run even the cheapest mode there, the
+    /// presets in that section are dropped here and the section is **absent**
+    /// from the menu rather than present and empty. Rule 2, and the same
+    /// decision the RF bench makes about its noise-figure card.
     pub(super) fn build_ui(
         active_preset: &str,
         user_presets: &HashMap<String, crate::config::PresetConfig>,
         presets_dir: Option<&std::path::Path>,
+        net_admitted: bool,
     ) -> (ui::LayoutEngine, HashMap<char, &'static str>) {
         let mut registry = ui::PanelRegistry::new();
         registry.register(ui::HeaderPanel);
@@ -55,6 +61,7 @@ impl App {
         registry.register(ui::SweepPanel);
         registry.register(ui::SweepStripPanel);
         registry.register(ui::MicroSweepPanel);
+        registry.register(ui::NetCapabilityPanel);
 
         let (focus_keys, collisions) = harvest_focus_keys(&registry);
         // A key claimed twice does not merely shadow. The registry is a HashMap, so
@@ -66,10 +73,14 @@ impl App {
             "focus key claimed by more than one panel: {collisions:?}",
         );
 
-        let mut engine = ui::LayoutEngine::new(
-            LayoutConfig::with_user_presets(user_presets, presets_dir),
-            registry,
-        );
+        let mut layout = LayoutConfig::with_user_presets(user_presets, presets_dir);
+        if !net_admitted {
+            layout
+                .presets
+                .retain(|_, p| p.section.as_deref() != Some(ui::menu::model::NET));
+        }
+
+        let mut engine = ui::LayoutEngine::new(layout, registry);
         engine.set_preset(active_preset);
         (engine, focus_keys)
     }
@@ -128,7 +139,7 @@ mod tests {
     /// no focus mode at all, so this is checked rather than remembered.
     #[test]
     fn every_focusable_panel_has_a_dispatch_arm() {
-        let (_engine, focus_keys) = App::build_ui("command_rail", &HashMap::new(), None);
+        let (_engine, focus_keys) = App::build_ui("command_rail", &HashMap::new(), None, true);
         // The dispatch table is read as source text: the arms are `&str` matches on
         // a panel name, so nothing in the type system ties them to the registry.
         let dispatch = include_str!("../input/mod.rs");
@@ -154,7 +165,7 @@ mod tests {
     /// draws a gap. Cheap to check, invisible otherwise.
     #[test]
     fn every_panel_named_by_a_builtin_preset_is_registered() {
-        let (engine, _) = App::build_ui("command_rail", &HashMap::new(), None);
+        let (engine, _) = App::build_ui("command_rail", &HashMap::new(), None, true);
         let known: std::collections::HashSet<&str> = engine.registered_panel_names().collect();
         assert!(!known.is_empty(), "no panels were registered at all");
 
@@ -237,7 +248,7 @@ mod tests {
     fn the_real_registry_has_no_focus_key_collisions() {
         // `build_ui` debug-asserts this too; the test states it as a fact rather
         // than relying on someone running a debug build.
-        let (_engine, keys) = App::build_ui("command_rail", &HashMap::new(), None);
+        let (_engine, keys) = App::build_ui("command_rail", &HashMap::new(), None, true);
         let mut by_key: HashMap<char, usize> = HashMap::new();
         for k in keys.keys() {
             *by_key.entry(*k).or_default() += 1;
@@ -259,10 +270,10 @@ mod tests {
     /// somewhere sensible rather than on an empty layout.
     #[test]
     fn the_configured_preset_is_the_one_the_engine_starts_on() {
-        let (engine, _) = App::build_ui("lab_iq", &HashMap::new(), None);
+        let (engine, _) = App::build_ui("lab_iq", &HashMap::new(), None, true);
         assert_eq!(engine.active_preset(), "lab_iq");
 
-        let (engine, _) = App::build_ui("no_such_preset", &HashMap::new(), None);
+        let (engine, _) = App::build_ui("no_such_preset", &HashMap::new(), None, true);
         assert!(
             engine.has_preset(engine.active_preset()),
             "fell back to '{}', which is not a preset either",
@@ -290,7 +301,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (engine, _) = App::build_ui("my_layout", &user, None);
+        let (engine, _) = App::build_ui("my_layout", &user, None, true);
         assert_eq!(engine.active_preset(), "my_layout");
         assert!(engine.is_panel_visible("spectrum"));
     }
@@ -326,7 +337,7 @@ mod tests {
         let theme = crate::Theme::sdr();
 
         for h in [20u16, 30, 45, 60, 90] {
-            let (engine, _) = App::build_ui("waterfall", &HashMap::new(), None);
+            let (engine, _) = App::build_ui("waterfall", &HashMap::new(), None, true);
             let backend = ratatui::backend::TestBackend::new(100, h);
             let mut term = ratatui::Terminal::new(backend).unwrap();
             term.draw(|f| engine.draw(f, &m, &theme)).unwrap();
@@ -356,5 +367,39 @@ mod tests {
                 rows[top..=bot].join("\n")
             );
         }
+    }
+
+    /// The gate at the level it actually acts. A radio that cannot work in the
+    /// band gets **no** NET section: not one greyed out, not one showing zeros,
+    /// and not an empty heading with nothing under it.
+    #[test]
+    fn a_refused_radio_gets_no_net_section_at_all() {
+        let (admitted, _) = App::build_ui("command_rail", &HashMap::new(), None, true);
+        assert!(admitted.has_preset("net"));
+        assert!(admitted.menu().section("net").is_some());
+
+        let (refused, _) = App::build_ui("command_rail", &HashMap::new(), None, false);
+        assert!(!refused.has_preset("net"));
+        assert!(
+            refused.menu().section("net").is_none(),
+            "the section must be absent, not empty"
+        );
+        // Every other section is untouched: the gate removes one thing.
+        for other in ["command_rail", "lab", "sweep", "micro"] {
+            assert!(refused.menu().section(other).is_some(), "{other} went too");
+        }
+    }
+
+    /// A config saved on a HackRF and opened on an RTL-SDR names a layout that
+    /// no longer exists. It must fall back rather than start on a preset the
+    /// menu cannot even show.
+    #[test]
+    fn a_saved_net_layout_does_not_survive_a_radio_that_cannot_run_it() {
+        let (kept, _) = App::build_ui("net", &HashMap::new(), None, true);
+        assert_eq!(kept.active_preset(), "net");
+
+        let (dropped, _) = App::build_ui("net", &HashMap::new(), None, false);
+        assert_ne!(dropped.active_preset(), "net");
+        assert!(dropped.has_preset(dropped.active_preset()));
     }
 }

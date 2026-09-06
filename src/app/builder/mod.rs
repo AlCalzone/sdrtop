@@ -234,8 +234,17 @@ impl App {
             .and_then(crate::config::LayoutConfig::presets_dir);
         let theme = cfg.build_theme(themes_dir.as_deref());
 
+        // Whether the NET section exists at all, decided once, from the radio's
+        // own declaration. The reason travels with the decision so the log and
+        // the menu cannot end up disagreeing about why a section is missing.
+        let net = {
+            let m = state.lock().unwrap_or_else(|e| e.into_inner());
+            crate::signal::net::gate::verdict(&m.caps)
+        };
+
         let active = preset_override.unwrap_or(&cfg.display.active_preset);
-        let (engine, focus_keys) = Self::build_ui(active, &cfg.presets, presets_dir.as_deref());
+        let (engine, focus_keys) =
+            Self::build_ui(active, &cfg.presets, presets_dir.as_deref(), net.is_ok());
 
         // A user preset that wanted a number key already taken says so, once,
         // here. `menu::model::build` collects these instead of logging them so it
@@ -245,6 +254,9 @@ impl App {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
             for warning in engine.menu_warnings() {
                 m.push_log(warning.clone());
+            }
+            if let Err(why) = &net {
+                m.push_log(why.clone());
             }
 
             // The menu is the first screen. The cursor starts on the layout the

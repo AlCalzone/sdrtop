@@ -1,0 +1,16 @@
+# NET Capability — what this radio can do in the 2.4 GHz band, before a single
+# sample has arrived. The section only exists at all on a radio that reaches the
+# band and can run the cheapest mode; this layout says which of the rest are
+# within its sample rate and which are not.
+
+section = "net"
+slot    = 1
+title   = "Capability"
+blurb   = "what this radio can reach and receive"
+
+panels = [
+    { name = "header",         position = "top", height = 5 },
+    { name = "net_capability", position = "body" },
+    { name = "log",            position = "bottom", height = 5 },
+    { name = "footer",         position = "bottom" },
+]

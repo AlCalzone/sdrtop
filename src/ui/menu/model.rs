@@ -23,6 +23,11 @@ use crate::config::PresetConfig;
 /// would say otherwise.
 pub const HIDDEN: &str = "hidden";
 
+/// The NET section, named here because the startup path has to be able to drop
+/// it: `App::build_ui` removes every preset filed under it on a radio that
+/// cannot work in the 2.4 GHz band, so the section is absent rather than empty.
+pub const NET: &str = "net";
+
 /// The section a preset lands in when it names none. Only exists when something
 /// is actually in it, so a default install never shows an empty row.
 pub const OTHER: &str = "other";
@@ -36,6 +41,7 @@ const KNOWN: &[(&str, &str)] = &[
     ("lab", "Lab"),
     ("sweep", "Sweep"),
     ("micro", "Micro"),
+    (NET, "NET"),
 ];
 
 /// One layout, as the menu shows it.
@@ -200,12 +206,12 @@ mod tests {
         }
     }
 
-    /// The built-ins land in the four sections the design names, in order.
+    /// The built-ins land in the five sections the design names, in order.
     #[test]
-    fn the_builtins_build_four_sections() {
+    fn the_builtins_build_five_sections() {
         let menu = build(&LayoutConfig::default_config().presets);
         let ids: Vec<&str> = menu.sections.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["command_rail", "lab", "sweep", "micro"]);
+        assert_eq!(ids, ["command_rail", "lab", "sweep", "micro", "net"]);
         assert!(menu.warnings.is_empty(), "{:?}", menu.warnings);
     }
 
@@ -285,7 +291,10 @@ mod tests {
         let menu = build(&presets);
 
         let ids: Vec<&str> = menu.sections.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["command_rail", "lab", "sweep", "micro", "nightwatch"]);
+        assert_eq!(
+            ids,
+            ["command_rail", "lab", "sweep", "micro", "net", "nightwatch"]
+        );
         assert_eq!(menu.section("nightwatch").unwrap().title, "nightwatch");
     }
 
@@ -323,7 +332,7 @@ mod tests {
     fn the_same_slot_in_two_sections_is_fine() {
         let menu = build(&LayoutConfig::default_config().presets);
         assert!(menu.warnings.is_empty());
-        for section in ["command_rail", "lab", "sweep", "micro"] {
+        for section in ["command_rail", "lab", "sweep", "micro", "net"] {
             let s = menu.section(section).unwrap();
             assert_eq!(s.entries[0].slot, Some(1), "{section} has no slot 1");
         }
@@ -358,8 +367,8 @@ mod tests {
     #[test]
     fn a_cursor_past_the_end_is_clamped() {
         let menu = build(&LayoutConfig::default_config().presets);
-        // Four sections, and Sweep (index 2) has two entries.
-        assert_eq!(menu.clamp(99, 0), Some((3, 0)));
+        // Five sections, and Sweep (index 2) has two entries.
+        assert_eq!(menu.clamp(99, 0), Some((4, 0)));
         assert_eq!(menu.clamp(2, 99), Some((2, 1)));
         assert_eq!(
             menu.at(2, 99).map(|e| e.preset.as_str()),

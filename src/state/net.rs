@@ -41,6 +41,7 @@ impl NetMode {
 pub struct NetState {
     pub mode: NetMode,
     pub health: NetDecodeHealth,
+    pub band: BandOccupancy,
 }
 
 /// What the receiver missed, and what it never had a chance to see.
@@ -85,4 +86,47 @@ pub struct NetDecodeHealth {
     pub peak_depth: u64,
     /// When the last block arrived. `None` before the first one.
     pub last_block: Option<std::time::Instant>,
+}
+
+/// One megahertz of the band, as measured over the last dwell.
+///
+/// A cell that was never inside the observed span has `windows` of zero, and
+/// that is the difference between "nothing was transmitting here" and "nobody
+/// looked here". The panel draws them differently, because they are different
+/// answers and rule 2 is about exactly this.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellReading {
+    /// Transform windows this cell was measured over.
+    pub windows: u64,
+    /// Fraction of them with something in this cell, with the false-alarm floor
+    /// removed. Zero is a measurement.
+    pub duty: f64,
+    /// Mean and peak power in the cell, relative to the converter's full scale.
+    pub mean_dbfs: f64,
+    pub peak_dbfs: f64,
+}
+
+impl CellReading {
+    /// Whether anybody looked here.
+    pub fn observed(&self) -> bool {
+        self.windows > 0
+    }
+}
+
+/// The band as last measured, one megahertz at a time.
+#[derive(Clone, Debug, Default)]
+pub struct BandOccupancy {
+    /// Empty until the first dwell completes; `occupancy::CELLS` long after.
+    pub cells: Vec<CellReading>,
+    /// The receiver's own noise floor, which every duty cycle here was measured
+    /// against. `None` before the first dwell.
+    pub noise_dbfs: Option<f64>,
+    /// Whether the floor's preconditions held. When they did not, nothing here
+    /// is a measurement and the panel says so rather than drawing it.
+    pub trusted: bool,
+    /// What the plane looked like, kept because it is the reason `trusted` is
+    /// what it is and a panel that only showed the verdict would be asking to be
+    /// believed.
+    pub tail: f64,
+    pub spread: f64,
 }

@@ -8,13 +8,15 @@
 //! that owns the state carried between blocks, so that everything below it can
 //! be a pure function of its arguments and be tested with no radio anywhere.
 //!
-//! **What it does at N13 is count, and that is the point.** Design section 13.2
-//! makes what the receiver missed a first-class displayed number rather than an
-//! inference, and a feed whose losses are only visible once there is something
-//! to lose is a feed nobody will trust when the losses matter. The counting is
-//! built and shown first; the detectors arrive at N14 and the decoders after
-//! them. Nothing here reports a burst, a preamble or a frame, and the panel says
-//! so rather than printing a zero that would read as "we looked".
+//! **It counts what arrived and measures what was in the band, and it decodes
+//! nothing.** Design section 13.2 makes what the receiver missed a first-class
+//! displayed number rather than an inference, and a feed whose losses are only
+//! visible once there is something to lose is a feed nobody will trust when the
+//! losses matter - so the counting was built and shown before any measurement
+//! sat on top of it. The band measurement is [`super::scan`] over
+//! [`super::occupancy`]; the decoders arrive with the arcs. Nothing here reports
+//! a burst, a preamble or a frame, and the panel says so rather than printing a
+//! zero that would read as "we looked".
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -24,6 +26,23 @@ use crossbeam_channel::Receiver;
 use crate::hardware::{SampleGeometry, StreamBlock};
 use crate::signal::stream::plan_block;
 use crate::state::SdrMetrics;
+
+use super::scan::Scan;
+
+/// How much *observation* a dwell is, before it is published and started again.
+///
+/// **Not a wall-clock interval, which is what this was first written as.** The
+/// feed is lossy and the section can be closed and reopened, so wall time and
+/// time spent looking at the band are different quantities, and a duty cycle is
+/// a fraction of the second one. Counting windows means a dwell interrupted by
+/// dropped blocks is a shorter dwell rather than a diluted one - and it means
+/// the measurement can be tested without a clock, which is how the end-to-end
+/// test below exists at all.
+///
+/// Fifty milliseconds is about eight thousand windows, so the duty cycle it
+/// supports is finer than the tenth of a percent it is shown to, and it
+/// publishes at most twenty times a second against a screen that redraws thirty.
+const DWELL_S: f64 = 0.05;
 
 pub struct NetWorker {
     pub sample_rx: Receiver<StreamBlock>,
@@ -75,6 +94,7 @@ impl NetWorker {
     pub fn run(self) {
         let mut run = Run::default();
         let pair_bytes = self.geometry.bytes_per_pair() as u64;
+        let mut scan: Option<Scan> = None;
 
         while let Ok(StreamBlock {
             seq,
@@ -105,7 +125,7 @@ impl NetWorker {
             let broke = started && !plan.contiguous;
             run.blocks = if broke || !started { 1 } else { run.blocks + 1 };
 
-            let still_open = {
+            let (still_open, centre_hz, rate_hz, span_hz) = {
                 let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let h = &mut m.net.health;
                 h.blocks_in = h.blocks_in.saturating_add(1);
@@ -114,14 +134,53 @@ impl NetWorker {
                 h.blocks_lost = h.blocks_lost.saturating_add(plan.dropped);
                 h.run_blocks = run.blocks;
                 h.last_block = Some(now);
-                m.ui.is_net_section()
+                // The usable span is the baseband filter's where the radio has
+                // one, because the bins the front end rolled off carry no
+                // measurement and averaging them in would drag every cell at the
+                // edges of the view down towards a floor that is not the band's.
+                // Where there is no filter, the rate is all we know.
+                let span = if m.radio.bb_filter_hz > 0 {
+                    m.radio.bb_filter_hz as f64
+                } else {
+                    m.radio.config_sample_rate
+                };
+                (
+                    m.ui.is_net_section(),
+                    m.radio.frequency as f64,
+                    m.radio.config_sample_rate,
+                    span.min(m.radio.config_sample_rate),
+                )
             };
+
+            // Retuning invalidates every cell mapping, so the scan is rebuilt
+            // and whatever it had accumulated goes with it: half a dwell at one
+            // frequency and half at another is a measurement of neither.
+            if !scan
+                .as_ref()
+                .is_some_and(|s| s.matches(centre_hz, rate_hz, span_hz))
+            {
+                scan = Some(Scan::new(centre_hz, rate_hz, span_hz));
+            }
+            if let Some(scan) = scan.as_mut() {
+                scan.push(&bytes, self.geometry);
+                if scan.observed_s() >= DWELL_S {
+                    let band = scan.take();
+                    let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    m.net.band = band;
+                }
+            }
 
             // Closing the section stops `process_block` forwarding, but blocks
             // already in the channel still arrive - and the run they belong to
             // is over whether or not they are the last of it.
             if !still_open {
                 run.suspend();
+                // The band measurement stops with it. Nothing has been observed
+                // since the section closed, and a panel reopened an hour later
+                // showing the last dwell as if it were current is exactly what
+                // rule 4 exists to prevent; the chrome's staleness marks it, and
+                // dropping the scan means the next dwell starts clean.
+                scan = None;
             }
         }
     }
@@ -221,6 +280,129 @@ mod tests {
         let h = feed(&[(1, false, 64), (5, true, 64)], true);
         assert_eq!(h.blocks_lost, 4);
         assert_eq!(h.gaps, 1);
+    }
+
+    /// End to end, with no radio: bytes in, a duty cycle out, on the cell the
+    /// transmitter was actually on.
+    ///
+    /// The synthetic transmitter is a carrier three megahertz above the tuning,
+    /// keyed on for a quarter of the time. Everything between those bytes and
+    /// the number on the panel runs here: the transform, the bin-to-cell
+    /// mapping, the noise floor and its correction, and the threshold.
+    #[test]
+    fn a_transmitter_in_the_band_lands_on_its_own_cell() {
+        use crate::signal::dsp::testkit::Rng;
+        use std::f64::consts::TAU;
+
+        const RATE: f64 = 20_000_000.0;
+        const CENTRE: u64 = 2_437_000_000;
+        const OFFSET: f64 = 3_000_000.0;
+        const DUTY: f64 = 0.25;
+        // Eight microseconds at 20 Msps is 160 samples, so the transform is 128
+        // and one block holds a whole number of windows.
+        const PAIRS: usize = 128 * 400;
+
+        let mut rng = Rng::new(0xB0_1234);
+        let mut m = SdrMetrics::fixture().streaming();
+        m.ui.section = crate::signal::net::SECTION.to_string();
+        m.radio.frequency = CENTRE;
+        m.radio.config_sample_rate = RATE;
+        m.radio.bb_filter_hz = 18_000_000;
+        let state = Arc::new(Mutex::new(m));
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut phase = 0.0f64;
+        // Enough blocks to complete one dwell, so the real publish path runs.
+        for seq in 1..=20u64 {
+            let mut bytes = Vec::with_capacity(PAIRS * 2);
+            for i in 0..PAIRS {
+                // Keyed in whole windows, so a window is either on or off and
+                // the duty cycle the measurement recovers is the one keyed.
+                let window = i / 128;
+                let on = (window % 100) < (100.0 * DUTY) as usize;
+                phase += TAU * OFFSET / RATE;
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                if on {
+                    re = 40.0 * phase.cos();
+                    im = 40.0 * phase.sin();
+                }
+                let (a, b) = rng.normal_pair();
+                bytes.push((re + a).clamp(-127.0, 127.0) as i8 as u8);
+                bytes.push((im + b).clamp(-127.0, 127.0) as i8 as u8);
+            }
+            tx.send(StreamBlock {
+                seq,
+                gap_before: false,
+                bytes,
+            })
+            .unwrap();
+        }
+        drop(tx);
+        NetWorker::new(rx, Arc::clone(&state), eight_bit()).run();
+
+        let m = state.lock().unwrap();
+        let band = &m.net.band;
+        assert!(band.trusted, "tail {} spread {}", band.tail, band.spread);
+        assert_eq!(band.cells.len(), crate::signal::net::occupancy::CELLS);
+
+        // The carrier is at 2440 MHz, which is cell 40.
+        let cell = crate::signal::net::occupancy::cell_of(2_440_000_000.0).unwrap();
+        assert_eq!(cell, 40);
+        let hit = &band.cells[cell];
+        assert!(hit.observed());
+        assert!(
+            (hit.duty - DUTY).abs() < 0.02,
+            "cell {cell} read {} for a keyed {DUTY}",
+            hit.duty
+        );
+
+        // A cell nobody transmitted in reads empty, which is a measurement.
+        let quiet = &band.cells[30];
+        assert!(quiet.observed());
+        assert_eq!(quiet.duty, 0.0);
+        assert!(quiet.mean_dbfs < hit.mean_dbfs - 10.0);
+
+        // A cell outside the eighteen megahertz in view was not looked at, and
+        // that is a different answer from an empty one.
+        assert!(!band.cells[0].observed());
+        assert!(!band.cells[60].observed());
+    }
+
+    /// A dwell is published when it is a dwell, and not before.
+    ///
+    /// The duty cycle is shown to a tenth of a percent, and a fraction measured
+    /// over four hundred windows cannot support that: it can only take the
+    /// values a quarter of a percent apart. Publishing whatever has arrived so
+    /// far would put a number on screen finer than the observation behind it,
+    /// which is the same mistake `Uncertain::decimals` exists to prevent one
+    /// layer up.
+    #[test]
+    fn a_partial_dwell_is_not_published() {
+        let mut m = SdrMetrics::fixture().streaming();
+        m.ui.section = crate::signal::net::SECTION.to_string();
+        m.radio.frequency = 2_437_000_000;
+        m.radio.config_sample_rate = 20_000_000.0;
+        m.radio.bb_filter_hz = 18_000_000;
+        let state = Arc::new(Mutex::new(m));
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // One block: four hundred windows of six and a half microseconds, which
+        // is under three milliseconds of the fifty a dwell is.
+        tx.send(StreamBlock {
+            seq: 1,
+            gap_before: false,
+            bytes: vec![0x05u8; 128 * 400 * 2],
+        })
+        .unwrap();
+        drop(tx);
+        NetWorker::new(rx, Arc::clone(&state), eight_bit()).run();
+
+        let m = state.lock().unwrap();
+        assert_eq!(m.net.health.blocks_in, 1, "the block arrived");
+        assert!(
+            m.net.band.cells.is_empty(),
+            "and nothing was published from it"
+        );
     }
 
     #[test]

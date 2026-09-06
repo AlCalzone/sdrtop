@@ -10,3 +10,4 @@
 
 pub mod capability;
 pub mod decode_health;
+pub mod occupancy;

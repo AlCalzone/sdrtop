@@ -336,7 +336,7 @@ const BUILTIN_PRESETS: &[(&str, &str)] = &[
     ),
     ("micro_gain", include_str!("config/presets/micro_gain.toml")),
     ("net", include_str!("config/presets/net.toml")),
-    ("net_feed", include_str!("config/presets/net_feed.toml")),
+    ("net_survey", include_str!("config/presets/net_survey.toml")),
     (
         "micro_health",
         include_str!("config/presets/micro_health.toml"),
@@ -513,7 +513,7 @@ panels = [
             "micro_health",
             "micro_sweep",
             "net",
-            "net_feed",
+            "net_survey",
         ] {
             assert!(cfg.presets.contains_key(want), "missing built-in '{want}'");
         }

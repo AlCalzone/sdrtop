@@ -1,0 +1,20 @@
+# NET Survey — what is in this band, and who is spending the airtime? Design
+# section 9.3: one screen, one question, and the answer is the largest thing on
+# it.
+#
+# The feed-health panel is not a footnote here. Every duty cycle above it is a
+# fraction of the windows that arrived, so a feed dropping blocks makes every
+# one of them a lower bound, and design 13.2 puts the two on the same bench for
+# exactly that reason.
+
+section = "net"
+slot    = 2
+title   = "Survey"
+blurb   = "what is in this band"
+
+panels = [
+    { name = "header",            position = "top", height = 5 },
+    { name = "net_occupancy",     position = "body" },
+    { name = "net_decode_health", position = "right", width = 46 },
+    { name = "footer",            position = "bottom" },
+]

@@ -17,7 +17,7 @@
 mod acpr;
 mod analysis;
 mod carrier;
-mod frame;
+pub mod frame;
 mod publish;
 mod worker;
 
@@ -25,4 +25,7 @@ pub use carrier::{centre_radius_bins, strongest_real_bin};
 pub use worker::FftWorker;
 
 /// Floor for a magnitude of zero, so silence reads as a number rather than −∞.
-const DB_FLOOR: f32 = -160.0;
+///
+/// Public because `signal::net` reports powers in the same dBFS, and one scale
+/// for one quantity everywhere it appears is rule 5.
+pub const DB_FLOOR: f32 = -160.0;

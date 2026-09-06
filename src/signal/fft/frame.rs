@@ -20,7 +20,11 @@ use super::DB_FLOOR;
 /// The format branch is taken **once per frame**, not once per sample: the inner
 /// loop is the hottest in the program, and a match inside it would be paid
 /// thousands of times for an answer that cannot change within a frame.
-pub(super) fn decode_into(
+///
+/// Public because `signal::net` transforms the same bytes for a different
+/// question, and a second copy of the unsigned-eight-bit bias would be a second
+/// chance to get it wrong.
+pub fn decode_into(
     frame: &[u8],
     window: &[f32],
     geometry: SampleGeometry,

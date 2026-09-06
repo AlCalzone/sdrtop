@@ -1,0 +1,412 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 MusiThang <viktor.laszlo92@protonmail.com>
+
+//! `NetOccupancyPanel` - who is spending the airtime, one megahertz at a time.
+//!
+//! The band across the width of the panel, with the duty cycle of each cell as
+//! the height of its bar and the Wi-Fi channel numbering underneath it. Design
+//! section 11 calls it `net_occupancy` and the question it answers is the one
+//! `net_survey` is built around: what is in this band?
+//!
+//! **Three states, drawn three ways, and the distinction is the panel.**
+//!
+//! - *Busy*: a bar, its height the duty cycle.
+//! - *Observed and empty*: the baseline, drawn. Nothing was transmitting there
+//!   and that is a measurement.
+//! - *Not observed*: a dim dash. Nobody looked. Rule 2, and the reason the panel
+//!   cannot simply draw zero for both of the last two: a receiver seeing
+//!   eighteen megahertz of an eighty-three megahertz band that reported the
+//!   other sixty-five as empty would be lying about most of the screen.
+//!
+//! **And a fourth state above all of them**: when the noise floor's
+//! preconditions failed, the bars are not drawn at all. Everything here is
+//! measured against that floor, so if it is not a floor then none of this is a
+//! measurement. See `signal::net::occupancy`.
+
+use ratatui::{
+    layout::Rect,
+    style::Style,
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+
+use crate::signal::net::{band, occupancy};
+use crate::state::{BandOccupancy, CellReading, SdrMetrics};
+use crate::ui::panel::{Panel, PanelChrome, Staleness};
+
+pub struct NetOccupancyPanel;
+
+/// Eighth-block heights, so one row of bars carries eight levels of duty cycle.
+const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// What an unobserved cell is drawn as: nobody looked here.
+const UNSEEN: char = '·';
+
+/// The baseline an observed, empty cell rests on. Distinct from [`UNSEEN`] on
+/// purpose, and the whole reason this panel has two glyphs for "no bar".
+const FLOOR: char = '▁';
+
+/// Bar rows, so the duty cycle has more than eight levels to sit on.
+const ROWS: usize = 3;
+
+/// One column of the profile: the glyph for each of the [`ROWS`] rows.
+///
+/// The duty cycle is spread over the rows from the bottom up, so a cell busy a
+/// third of the time fills the bottom row and no more. Eight levels a row and
+/// three rows is twenty-four, which is finer than a terminal column deserves and
+/// is what stops a band of quiet channels reading as a flat run of identical
+/// stubs.
+fn column(cell: &CellReading) -> [char; ROWS] {
+    if !cell.observed() {
+        return [UNSEEN; ROWS];
+    }
+    let filled = cell.duty.clamp(0.0, 1.0) * (ROWS * 8) as f64;
+    let mut out = [' '; ROWS];
+    for (i, slot) in out.iter_mut().enumerate() {
+        // Row 0 is the top, so the bottom row is the last one.
+        let from_bottom = ROWS - 1 - i;
+        let here = (filled - (from_bottom * 8) as f64).clamp(0.0, 8.0);
+        *slot = BARS[here.round() as usize];
+    }
+    // An observed cell with nothing in it still shows where the floor is.
+    if out[ROWS - 1] == ' ' {
+        out[ROWS - 1] = FLOOR;
+    }
+    out
+}
+
+/// The band mapped onto `width` columns, each column the busiest cell it covers.
+///
+/// **The busiest, not the mean.** Squeezing eighty-three cells into forty
+/// columns by averaging turns one saturated megahertz next to a quiet one into
+/// two half-busy ones, which is the opposite of what this panel is for. A column
+/// says "the worst thing in here", and a column of unobserved cells stays
+/// unobserved.
+fn columns(cells: &[CellReading], width: usize) -> Vec<CellReading> {
+    if width == 0 || cells.is_empty() {
+        return Vec::new();
+    }
+    (0..width)
+        .map(|x| {
+            let lo = x * cells.len() / width;
+            let hi = ((x + 1) * cells.len() / width).max(lo + 1).min(cells.len());
+            cells[lo..hi]
+                .iter()
+                .copied()
+                .reduce(|a, b| {
+                    if b.duty > a.duty || !a.observed() {
+                        b
+                    } else {
+                        a
+                    }
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The channel numbers written under the columns they are centred on.
+fn ruler(width: usize) -> String {
+    let mut row = vec![b' '; width];
+    for ch in 1..=13u8 {
+        let Some(hz) = band::wifi_centre_hz(ch) else {
+            continue;
+        };
+        let Some(cell) = occupancy::cell_of(hz as f64) else {
+            continue;
+        };
+        let at = cell * width / occupancy::CELLS;
+        let label = ch.to_string();
+        // Centred on the channel, and only when it does not tread on the number
+        // beside it: a ruler that overwrites its own labels is worse than one
+        // with gaps.
+        let start = at.saturating_sub(label.len() / 2);
+        if start + label.len() > width {
+            continue;
+        }
+        if row[start..start + label.len()].iter().all(|c| *c == b' ')
+            && (start == 0 || row[start - 1] == b' ')
+        {
+            row[start..start + label.len()].copy_from_slice(label.as_bytes());
+        }
+    }
+    String::from_utf8(row).unwrap_or_default()
+}
+
+fn lines(occ: &BandOccupancy, theme: &crate::Theme, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let dim = Style::default().fg(theme.label);
+
+    let floor = match occ.noise_dbfs {
+        Some(db) => format!("{db:.1} dBFS"),
+        None => "—".to_string(),
+    };
+    let observed = occ.cells.iter().filter(|c| c.observed()).count();
+    out.push(Line::from(vec![
+        Span::styled("noise floor  ", dim),
+        Span::styled(floor, Style::default().fg(theme.value)),
+        Span::styled(
+            format!("   {observed} of {} MHz in view", occupancy::CELLS),
+            dim,
+        ),
+    ]));
+
+    if occ.cells.is_empty() {
+        out.push(Line::from(Span::styled("waiting for RX", dim)));
+        return out;
+    }
+
+    // Everything below is measured against the floor, so a floor that failed its
+    // own preconditions takes the whole profile with it rather than colouring it
+    // a warning shade and leaving it up.
+    if !occ.trusted {
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(
+            "no floor: the samples are not noise plus signal".to_string(),
+            Style::default().fg(theme.stale),
+        )));
+        out.push(Line::from(Span::styled(
+            format!(
+                "tail {:.2} (max {:.2})   spread {:.1} (min {:.1})",
+                occ.tail,
+                occupancy::TAIL_LIMIT,
+                occ.spread,
+                occupancy::SPREAD_FLOOR
+            ),
+            dim,
+        )));
+        out.push(Line::from(Span::styled(
+            "a saturated front end, or a band busy everywhere".to_string(),
+            dim,
+        )));
+        return out;
+    }
+
+    // The headline: the one cell a person would want named. Ties go to the
+    // lower frequency, which is arbitrary but is at least the same arbitrary
+    // choice every frame.
+    let busiest = occ
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.observed() && c.duty > 0.0)
+        .max_by(|a, b| a.1.duty.total_cmp(&b.1.duty));
+    out.push(match busiest {
+        Some((cell, c)) => Line::from(vec![
+            Span::styled("busiest      ", dim),
+            Span::styled(
+                format!("{:.0} MHz", occupancy::cell_centre_hz(cell) / 1_000_000),
+                Style::default().fg(theme.value_hi),
+            ),
+            Span::styled(format!("   {:.1} % busy", c.duty * 100.0), dim),
+            Span::styled(
+                format!("   {:.1} peak, {:.1} mean dBFS", c.peak_dbfs, c.mean_dbfs),
+                dim,
+            ),
+        ]),
+        None => Line::from(Span::styled("busiest      nothing above the floor", dim)),
+    });
+
+    let cols = columns(&occ.cells, width);
+    for row in 0..ROWS {
+        let spans = cols
+            .iter()
+            .map(|c| {
+                let ch = column(c)[row];
+                let colour = if !c.observed() {
+                    theme.stale
+                } else if ch == ' ' || ch == FLOOR {
+                    theme.label
+                } else {
+                    // Duty is the height; the power is what colours it, on the
+                    // same ramp the waterfall uses.
+                    theme.palette_color(((c.peak_dbfs + 90.0) / 90.0).clamp(0.0, 1.0) as f32)
+                };
+                Span::styled(ch.to_string(), Style::default().fg(colour))
+            })
+            .collect::<Vec<_>>();
+        out.push(Line::from(spans));
+    }
+    out.push(Line::from(Span::styled(ruler(width), dim)));
+    out.push(Line::from(Span::styled(
+        format!(
+            "{:<width$}",
+            format!("{} MHz", band::LOW_HZ / 1_000_000),
+            width = width.saturating_sub(8)
+        ) + &format!("{} MHz", band::HIGH_HZ / 1_000_000),
+        dim,
+    )));
+    out
+}
+
+impl Panel for NetOccupancyPanel {
+    fn name(&self) -> &'static str {
+        "net_occupancy"
+    }
+
+    fn min_size(&self) -> (u16, u16) {
+        (40, 8)
+    }
+
+    fn chrome(&self, _state: &SdrMetrics) -> PanelChrome {
+        PanelChrome::new("Band Occupancy").stale_when(Staleness::NotStreaming)
+    }
+
+    fn render(
+        &self,
+        f: &mut Frame,
+        inner: Rect,
+        state: &SdrMetrics,
+        theme: &crate::Theme,
+        _focused: bool,
+    ) {
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        f.render_widget(
+            Paragraph::new(lines(&state.net.band, theme, inner.width as usize)),
+            inner,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::fixture::draw;
+
+    /// Cells 12 to 46 observed - eighteen megahertz around channel 6 plus a
+    /// little - with three busy runs in it.
+    fn surveyed() -> SdrMetrics {
+        let mut m = SdrMetrics::fixture().streaming();
+        let mut cells = vec![CellReading::default(); occupancy::CELLS];
+        for (i, c) in cells.iter_mut().enumerate() {
+            if (12..=46).contains(&i) {
+                c.windows = 8_000;
+                c.peak_dbfs = -70.0;
+            }
+        }
+        for (i, duty, peak) in [(24usize, 0.62, -32.0), (36, 0.18, -48.0), (41, 0.95, -22.0)] {
+            cells[i].duty = duty;
+            cells[i].peak_dbfs = peak;
+        }
+        m.net.band = BandOccupancy {
+            cells,
+            noise_dbfs: Some(-78.4),
+            trusted: true,
+            tail: 2.07,
+            spread: 40.2,
+        };
+        m
+    }
+
+    /// The panel's whole job: a cell nobody looked at does not read as a cell
+    /// with nothing in it.
+    #[test]
+    fn unobserved_and_empty_are_drawn_differently() {
+        let m = surveyed();
+        let out = draw(NetOccupancyPanel, 85, 10, &m);
+        let baseline = out.iter().find(|l| l.contains(FLOOR)).expect("a baseline");
+        assert!(baseline.contains(UNSEEN), "{baseline}");
+        assert!(baseline.contains(FLOOR), "{baseline}");
+        // And the run of unobserved cells is on the outside, where it belongs.
+        let body: String = baseline
+            .chars()
+            .filter(|c| *c != '│' && *c != ' ')
+            .collect();
+        assert!(body.starts_with(UNSEEN), "{baseline}");
+        assert!(body.ends_with(UNSEEN), "{baseline}");
+        assert!(out.join("\n").contains("35 of 83 MHz in view"));
+    }
+
+    /// A duty cycle is a height, and a bigger one is taller.
+    #[test]
+    fn a_busier_cell_is_a_taller_bar() {
+        let quiet = column(&CellReading {
+            windows: 10,
+            duty: 0.1,
+            ..Default::default()
+        });
+        let busy = column(&CellReading {
+            windows: 10,
+            duty: 0.9,
+            ..Default::default()
+        });
+        let height = |c: [char; ROWS]| c.iter().filter(|ch| **ch != ' ').count();
+        assert!(height(busy) > height(quiet), "{busy:?} vs {quiet:?}");
+        // Full is full, and empty still shows where the floor is.
+        let full = column(&CellReading {
+            windows: 10,
+            duty: 1.0,
+            ..Default::default()
+        });
+        assert_eq!(full, ['█'; ROWS]);
+        let empty = column(&CellReading {
+            windows: 10,
+            duty: 0.0,
+            ..Default::default()
+        });
+        assert_eq!(empty, [' ', ' ', FLOOR]);
+    }
+
+    /// Squeezing the band into fewer columns keeps the worst cell, not the mean.
+    #[test]
+    fn a_narrow_panel_shows_the_busiest_cell_and_not_the_average() {
+        let mut cells = vec![CellReading::default(); occupancy::CELLS];
+        for c in cells.iter_mut() {
+            c.windows = 100;
+        }
+        cells[41].duty = 1.0;
+        let cols = columns(&cells, 20);
+        assert_eq!(cols.len(), 20);
+        let peak = cols.iter().filter(|c| c.duty > 0.5).count();
+        assert_eq!(peak, 1, "one saturated megahertz is still saturated");
+        // A column of cells nobody looked at stays unlooked-at.
+        let none = columns(&vec![CellReading::default(); occupancy::CELLS], 20);
+        assert!(none.iter().all(|c| !c.observed()));
+    }
+
+    /// Everything here rests on the floor, so a floor that failed takes the
+    /// profile with it rather than being a colour on the same picture.
+    #[test]
+    fn an_untrusted_floor_draws_no_profile_at_all() {
+        let mut m = surveyed();
+        m.net.band.trusted = false;
+        m.net.band.tail = 3.9;
+        let out = draw(NetOccupancyPanel, 85, 10, &m).join("\n");
+        assert!(out.contains("no floor"), "{out}");
+        assert!(out.contains("tail 3.90 (max 2.41)"), "{out}");
+        assert!(!out.contains('█'), "{out}");
+        assert!(!out.contains(UNSEEN), "{out}");
+    }
+
+    #[test]
+    fn a_band_never_measured_says_so_rather_than_drawing_an_empty_one() {
+        let m = SdrMetrics::fixture();
+        let out = draw(NetOccupancyPanel, 85, 10, &m).join("\n");
+        assert!(out.contains("waiting for RX"), "{out}");
+        assert!(out.contains('—'), "no floor to report yet: {out}");
+        assert!(!out.contains(FLOOR), "{out}");
+    }
+
+    /// The ruler never writes a channel number over its neighbour, at any width.
+    #[test]
+    fn it_fits_every_size_the_layout_can_hand_it() {
+        for w in 20..120u16 {
+            let r = ruler(w as usize);
+            assert_eq!(r.chars().count(), w as usize);
+            // Every run of digits in the ruler is a whole channel number, so
+            // "12" is never a 1 and a 2 from different channels touching.
+            for run in r.split(' ').filter(|s| !s.is_empty()) {
+                let n: u8 = run.parse().unwrap_or_else(|_| panic!("{w}: {r:?}"));
+                assert!((1..=13).contains(&n), "{w}: {r:?}");
+            }
+            for h in 4..20u16 {
+                for line in draw(NetOccupancyPanel, w, h, &surveyed()) {
+                    assert!(line.chars().count() <= w as usize, "{w}x{h}: {line:?}");
+                }
+            }
+        }
+    }
+}

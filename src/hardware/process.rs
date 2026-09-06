@@ -106,11 +106,14 @@ pub fn process_block(
     // is visible. What the bench *prints* is the residual after that correction
     // and not the raw impairment: this comment used to say otherwise, and the
     // split it was describing lives in `tasks::rx::metrics::iq_metrics`.
-    // Read the demod gate in the same lock as the correction state - the demod
-    // costs an extra block copy, so it must be free when switched off.
-    let (cal, demod_enabled) = {
+    // Read both feed gates in the same lock as the correction state - each
+    // costs an extra copy of the block, so each must be free when switched off.
+    // The NET gate is the section on screen rather than a switch of its own:
+    // that section is the only consumer, and a preset the user is not looking at
+    // is not a reason to copy every block off the USB callback.
+    let (cal, demod_enabled, net_enabled) = {
         let m = ctx.metrics.lock().unwrap_or_else(|e| e.into_inner());
-        (m.iq.cal, m.demod.enabled)
+        (m.iq.cal, m.demod.enabled, m.ui.is_net_section())
     };
     let correcting = cal.correcting();
     acc.correcting = correcting;
@@ -239,6 +242,22 @@ pub fn process_block(
                 bytes: forward.clone(),
             })
             .ok();
+    }
+    // The third feed, and the one that counts what it could not take. A Wi-Fi
+    // frame at 6 Mbps carrying 1500 bytes is 2 ms, which at 20 Msps is 40 000
+    // samples and several driver blocks: one block lost in the middle destroys
+    // the frame. An unbounded queue would only move that failure into memory, so
+    // this drops like the other two - and, unlike the other two, says so.
+    if net_enabled {
+        let taken = ctx
+            .net_tx
+            .try_send(super::StreamBlock {
+                seq: block_seq,
+                gap_before: dropped_pairs > 0,
+                bytes: forward.clone(),
+            })
+            .is_ok();
+        ctx.net_feed.record(ctx.net_tx.len(), taken);
     }
     // The one point where a lost block is observable. This channel is lossy by
     // design - dropping under load beats blocking the USB callback - but lossy
@@ -453,8 +472,9 @@ mod tests {
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
         crossbeam_channel::Receiver<StreamBlock>,
+        crossbeam_channel::Receiver<StreamBlock>,
     ) {
-        rx_ctx_holding(8)
+        rx_ctx_holding(8, 8)
     }
 
     /// The same, with the FFT queue's depth chosen: a shallow one can be filled
@@ -462,23 +482,29 @@ mod tests {
     /// slow FFT worker to be behind.
     fn rx_ctx_holding(
         fft_cap: usize,
+        net_cap: usize,
     ) -> (
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
         crossbeam_channel::Receiver<StreamBlock>,
+        crossbeam_channel::Receiver<StreamBlock>,
     ) {
         let (sample_tx, sample_rx) = crossbeam_channel::bounded(fft_cap);
         let (demod_tx, demod_rx) = crossbeam_channel::bounded(8);
+        let (net_tx, net_rx) = crossbeam_channel::bounded(net_cap);
         let mut m = SdrMetrics::fixture();
         m.demod.enabled = true;
+        m.ui.section = crate::signal::net::SECTION.to_string();
         let ctx = RxContext {
             metrics: Arc::new(Mutex::new(m)),
             sample_tx,
             fft_feed: crate::hardware::FeedHealth::default(),
             demod_tx,
+            net_tx,
+            net_feed: crate::hardware::FeedHealth::default(),
             geometry: eight_bit(),
         };
-        (Arc::new(ctx), sample_rx, demod_rx)
+        (Arc::new(ctx), sample_rx, demod_rx, net_rx)
     }
 
     /// The block the FFT feed could not take is counted.
@@ -491,7 +517,7 @@ mod tests {
     /// comfortable buffer.
     #[test]
     fn a_block_the_fft_feed_cannot_take_is_counted() {
-        let (ctx, _sample_rx, _demod_rx) = rx_ctx_holding(1);
+        let (ctx, _sample_rx, _demod_rx, _net_rx) = rx_ctx_holding(1, 8);
         let block = vec![0x10u8; 64];
 
         super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
@@ -502,6 +528,65 @@ mod tests {
         super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
         let (depth, dropped) = ctx.fft_feed.take();
         assert_eq!(dropped, 1, "a block the spectrum never saw");
+        assert_eq!(depth, 1, "and the queue was full when it happened");
+    }
+
+    /// A section nobody is looking at costs nothing on the hot path.
+    ///
+    /// The gate is the section on screen rather than a switch of its own,
+    /// because the section is the feed's only consumer. Forwarding costs a full
+    /// copy of every block inside the USB callback, and paying it for a preset
+    /// the user has not opened is exactly the kind of cost that is invisible
+    /// until it is a dropped frame.
+    #[test]
+    fn a_section_nobody_is_looking_at_is_never_fed() {
+        let (ctx, _sample_rx, _demod_rx, net_rx) = rx_ctx();
+        {
+            let mut m = ctx.metrics.lock().unwrap();
+            m.ui.section = "lab".to_string();
+        }
+        super::process_block(&[0x10u8; 64], eight_bit(), 0, &ctx, Instant::now());
+        assert!(net_rx.is_empty(), "nothing forwarded, and nothing copied");
+        let (depth, dropped) = ctx.net_feed.take();
+        assert_eq!(
+            (depth, dropped),
+            (0, 0),
+            "and no refusal either: a closed gate is not a loss"
+        );
+
+        // Open it, and the same block arrives with its continuity facts.
+        {
+            let mut m = ctx.metrics.lock().unwrap();
+            m.ui.section = crate::signal::net::SECTION.to_string();
+        }
+        super::process_block(&[0x10u8; 64], eight_bit(), 0, &ctx, Instant::now());
+        let block = net_rx.try_recv().expect("one block");
+        assert!(!block.gap_before);
+        assert_eq!(block.bytes.len(), 64);
+    }
+
+    /// The block the NET feed could not take is counted.
+    ///
+    /// The same shape as the FFT feed's test above and for the same reason, with
+    /// one difference that matters: design section 13.2 makes this number
+    /// testimony rather than diagnostics. A Wi-Fi frame spans several driver
+    /// blocks, so a refusal here is a frame nobody will ever see, and a panel
+    /// that reported the frames it decoded without reporting these would be
+    /// presenting a lower bound as a total.
+    #[test]
+    fn a_block_the_net_feed_cannot_take_is_counted() {
+        let (ctx, _sample_rx, _demod_rx, _net_rx) = rx_ctx_holding(8, 1);
+        let block = vec![0x10u8; 64];
+
+        super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+        assert_eq!(ctx.net_feed.take(), (1, 0), "the queue took it");
+
+        // Nothing has drained it, so the next block has nowhere to go.
+        let (depth, dropped) = {
+            super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
+            ctx.net_feed.take()
+        };
+        assert_eq!(dropped, 1, "a block no decoder will ever see");
         assert_eq!(depth, 1, "and the queue was full when it happened");
     }
 
@@ -543,7 +628,7 @@ mod tests {
     /// that blind spot.
     #[test]
     fn the_cloud_is_drawn_from_the_whole_transfer_and_not_just_its_start() {
-        let (ctx, _fft_rx, _demod_rx) = rx_ctx();
+        let (ctx, _fft_rx, _demod_rx, _net_rx) = rx_ctx();
         const PAIRS: usize = 131_072; // one HackRF transfer
         let mut block = vec![0u8; PAIRS * 2];
         for (idx, pair) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
@@ -572,7 +657,7 @@ mod tests {
     /// correction from.
     #[test]
     fn the_accumulators_stay_on_the_raw_stream_while_a_correction_runs() {
-        let (ctx, _fft_rx, _demod_rx) = rx_ctx();
+        let (ctx, _fft_rx, _demod_rx, _net_rx) = rx_ctx();
         {
             let mut m = ctx.metrics.lock().unwrap();
             m.iq.cal = crate::state::IqCalState {
@@ -604,7 +689,7 @@ mod tests {
     /// on the DC spike.
     #[test]
     fn the_corrected_stream_is_what_the_fft_and_the_demod_receive() {
-        let (ctx, fft_rx, demod_rx) = rx_ctx();
+        let (ctx, fft_rx, demod_rx, _net_rx) = rx_ctx();
         {
             let mut m = ctx.metrics.lock().unwrap();
             m.iq.cal = crate::state::IqCalState {
@@ -641,7 +726,7 @@ mod tests {
     /// it through `dropped_pairs`, which until now went only to the drop counter.
     #[test]
     fn a_driver_side_loss_marks_the_forwarded_demod_block() {
-        let (ctx, _fft_rx, demod_rx) = rx_ctx();
+        let (ctx, _fft_rx, demod_rx, _net_rx) = rx_ctx();
         let block = vec![0u8; 8]; // four Int8 pairs, contents irrelevant
 
         super::process_block(&block, eight_bit(), 0, &ctx, Instant::now());
@@ -669,7 +754,7 @@ mod tests {
     /// break the run, or the audio either side of the overflow is spliced.
     #[test]
     fn an_empty_overflow_block_still_carries_the_gap() {
-        let (ctx, _fft_rx, demod_rx) = rx_ctx();
+        let (ctx, _fft_rx, demod_rx, _net_rx) = rx_ctx();
         super::process_block(&[], eight_bit(), 16_384, &ctx, Instant::now());
         let b = demod_rx.recv().expect("the overflow was not forwarded");
         assert!(b.bytes.is_empty());

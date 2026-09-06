@@ -27,7 +27,7 @@ pub use demod::{
 pub use iq::{IqCalState, IqState, CONSTELLATION_CAP};
 pub use lab::{LabState, NoiseReading, RfFreeze};
 pub use micro::MicroView;
-pub use net::{NetMode, NetState};
+pub use net::{NetDecodeHealth, NetMode, NetState};
 pub use observer::ObserverState;
 pub use radio::RadioState;
 pub use signal::{

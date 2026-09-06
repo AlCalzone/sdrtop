@@ -12,7 +12,9 @@ pub mod net;
 pub mod noise_slope;
 pub mod rds;
 pub mod rds_demod;
+pub mod stream;
 
 pub use demod::DemodWorker;
 pub use fft::FftWorker;
 pub use iq::{corrected_moments, image_rejection_db, iq_correction_coeffs};
+pub use net::worker::NetWorker;

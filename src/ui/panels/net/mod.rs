@@ -9,3 +9,4 @@
 //! has to check whether it should be on screen. If it is drawing, it may.
 
 pub mod capability;
+pub mod decode_health;

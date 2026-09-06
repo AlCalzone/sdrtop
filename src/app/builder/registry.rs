@@ -62,6 +62,7 @@ impl App {
         registry.register(ui::SweepStripPanel);
         registry.register(ui::MicroSweepPanel);
         registry.register(ui::NetCapabilityPanel);
+        registry.register(ui::NetDecodeHealthPanel);
 
         let (focus_keys, collisions) = harvest_focus_keys(&registry);
         // A key claimed twice does not merely shadow. The registry is a HashMap, so

@@ -25,7 +25,7 @@ use std::time::Duration;
 use crate::config::AppConfig;
 use crate::event::EventStream;
 use crate::hardware;
-use crate::signal::{DemodWorker, FftWorker};
+use crate::signal::{DemodWorker, FftWorker, NetWorker};
 use crate::state::SdrMetrics;
 use crate::tasks;
 
@@ -149,11 +149,21 @@ impl App {
         // The demod queue is deliberately shallow: it duty-cycles to one update
         // per 250 ms, so anything deeper would only hold blocks it will discard.
         let (demod_tx, demod_rx) = crossbeam_channel::bounded::<crate::hardware::StreamBlock>(2);
+        // The NET queue is deeper than the demod's and for the opposite reason.
+        // The demod duty-cycles to four updates a second, so anything deeper
+        // than two would only hold blocks it will discard. This worker is meant
+        // to see every block, and four is the same depth the FFT feed uses: a
+        // burst that spans several driver blocks survives a hiccup on the UI
+        // thread, and anything deeper starts hiding the losses rather than
+        // absorbing them.
+        let (net_tx, net_rx) = crossbeam_channel::bounded::<crate::hardware::StreamBlock>(4);
         let rx_ctx = Arc::new(hardware::RxContext {
             metrics: Arc::clone(&state),
             sample_tx,
             fft_feed: hardware::FeedHealth::default(),
             demod_tx,
+            net_tx,
+            net_feed: hardware::FeedHealth::default(),
             geometry,
         });
 
@@ -162,6 +172,13 @@ impl App {
 
         let demod_state = Arc::clone(&state);
         std::thread::spawn(move || DemodWorker::new(demod_rx, demod_state, geometry).run());
+
+        // Spawned whether or not the gate admitted the section: with no section
+        // on screen nothing is forwarded, so the thread costs one blocked
+        // `recv`. Deciding here would mean two places that know what admits the
+        // feature, and the one that already knows is `net::gate`.
+        let net_state = Arc::clone(&state);
+        std::thread::spawn(move || NetWorker::new(net_rx, net_state, geometry).run());
 
         tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
         tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));

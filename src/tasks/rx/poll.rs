@@ -166,6 +166,15 @@ pub(super) fn drain(
     };
     m.iq.fft_drops = fft_drops;
     m.iq.fft_drops_session += fft_drops;
+
+    // The NET feed's account of the same window. Taken unconditionally, because
+    // a feed that stopped being forwarded to still has one last window's worth
+    // of refusals to hand over, and leaving them in the atomics would attach
+    // them to whenever the section is next opened.
+    let (net_depth, net_drops) = rx_ctx.net_feed.take();
+    m.net.health.peak_depth = net_depth;
+    m.net.health.refused = net_drops;
+    m.net.health.refused_session += net_drops;
     let buf_sample = (m.iq.buf_fill_pct * 10.0) as u64;
     if m.iq.buf_fill_history.len() >= THROUGHPUT_HISTORY_LEN {
         m.iq.buf_fill_history.pop_front();
@@ -189,21 +198,25 @@ mod tests {
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
         crossbeam_channel::Receiver<crate::hardware::StreamBlock>,
+        crossbeam_channel::Receiver<crate::hardware::StreamBlock>,
     ) {
         let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
         let (sample_tx, sample_rx) = crossbeam_channel::bounded(4);
         let (demod_tx, demod_rx) = crossbeam_channel::bounded(2);
+        let (net_tx, net_rx) = crossbeam_channel::bounded(4);
         let ctx = RxContext {
             metrics: Arc::clone(&state),
             sample_tx,
             fft_feed: FeedHealth::default(),
             demod_tx,
+            net_tx,
+            net_feed: FeedHealth::default(),
             geometry: SampleGeometry {
                 format: SampleFormat::Int8,
                 full_scale: 128.0,
             },
         };
-        (state, Arc::new(ctx), sample_rx, demod_rx)
+        (state, Arc::new(ctx), sample_rx, demod_rx, net_rx)
     }
 
     /// The depth the hot path recorded becomes a share of the queue's own size,
@@ -211,7 +224,7 @@ mod tests {
     /// blocks two windows ago and none since still says so.
     #[test]
     fn the_feeds_window_becomes_a_percentage_and_a_session_total() {
-        let (state, ctx, _fft_rx, _demod_rx) = ctx_and_state();
+        let (state, ctx, _fft_rx, _demod_rx, _net_rx) = ctx_and_state();
 
         ctx.fft_feed.record(2, true);
         ctx.fft_feed.record(4, false);

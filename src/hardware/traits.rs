@@ -699,6 +699,22 @@ pub struct RxContext {
     /// gap. The FFT feed needs no such thing, which is why only this channel pays
     /// for it.
     pub demod_tx: crossbeam_channel::Sender<StreamBlock>,
+    /// Third, independently lossy feed, to the 2.4 GHz worker. Forwarded only
+    /// while the NET section is the one on screen, so a user who never opens it
+    /// pays for none of it.
+    ///
+    /// It has a [`FeedHealth`] where the demod feed does not, and the difference
+    /// is what the two workers do with a block they never receive. The demod
+    /// notices: it duty-cycles to four updates a second and reads its own
+    /// sequence numbers, so a hole shows up as a gap in the audio and is
+    /// counted. This worker is meant to run flat out on every block, and design
+    /// section 13.2 makes what it missed a displayed number rather than an
+    /// inference - which needs the count taken at the point of refusal, because
+    /// after `try_send` returns there is nothing left that knows the block
+    /// existed.
+    pub net_tx: crossbeam_channel::Sender<StreamBlock>,
+    /// What the NET feed did with the blocks handed to it, for the poll task.
+    pub net_feed: FeedHealth,
     pub geometry: SampleGeometry,
 }
 

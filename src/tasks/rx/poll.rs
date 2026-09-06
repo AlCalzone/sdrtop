@@ -188,7 +188,7 @@ mod tests {
         Arc<Mutex<SdrMetrics>>,
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
-        crossbeam_channel::Receiver<crate::hardware::DemodBlock>,
+        crossbeam_channel::Receiver<crate::hardware::StreamBlock>,
     ) {
         let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
         let (sample_tx, sample_rx) = crossbeam_channel::bounded(4);

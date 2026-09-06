@@ -693,12 +693,12 @@ pub struct RxContext {
     /// only while `demod.enabled` is set, so the extra copy is paid for solely on
     /// the bench that uses it.
     ///
-    /// Carries a [`DemodBlock`] rather than bare bytes: this channel drops under
+    /// Carries a [`StreamBlock`] rather than bare bytes: this channel drops under
     /// load like the FFT one, and the CTCSS detector needs to know whether its
     /// half-second of audio is one unbroken run or two pieces either side of a
     /// gap. The FFT feed needs no such thing, which is why only this channel pays
     /// for it.
-    pub demod_tx: crossbeam_channel::Sender<DemodBlock>,
+    pub demod_tx: crossbeam_channel::Sender<StreamBlock>,
     pub geometry: SampleGeometry,
 }
 
@@ -748,19 +748,23 @@ impl FeedHealth {
     }
 }
 
-/// One block of samples on its way to the demod worker.
+/// A block of samples, plus the continuity facts a consumer that spans blocks
+/// needs.
 ///
 /// Named rather than a tuple because the two scalars answer the same question
-/// from opposite sides, and only one of them is visible from the worker.
+/// from opposite sides, and only one of them is visible from the consumer.
 ///
-/// `seq` catches a block lost **after** this point: the channel below is bounded
-/// and lossy, so a gap in the numbers is the only record that a block existed.
-/// `gap_before` carries the loss the sequence number cannot see, because it
-/// happened **before** the block was ever stamped - samples the driver itself
-/// lost, from a HackRF short transfer or a SoapySDR overflow. Both mean the
-/// audio here does not continue the audio in the block before it, and the
-/// detectors that span blocks have to be told so.
-pub struct DemodBlock {
+/// `seq` catches a block lost **after** this point: the channels that carry
+/// these are bounded and deliberately lossy, so a gap in the numbers is the only
+/// record that a block existed at all. `gap_before` carries the loss the
+/// sequence number cannot see, because it happened **before** the block was ever
+/// stamped - samples the driver itself lost, from a HackRF short transfer or a
+/// SoapySDR overflow. Both mean the samples here do not continue the samples in
+/// the block before them, and anything whose state spans blocks has to be told
+/// so: a CTCSS detector needs half a second of unbroken audio to tell two tones
+/// two hertz apart from each other, and a preamble correlator needs to know that
+/// the run it is in the middle of is a run.
+pub struct StreamBlock {
     /// Monotonic across every block stamped, forwarded or not.
     pub seq: u64,
     /// The driver reported lost samples immediately before this block.

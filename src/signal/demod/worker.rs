@@ -20,7 +20,7 @@ use std::time::Instant;
 use crossbeam_channel::Receiver;
 use rustfft::num_complex::Complex;
 
-use crate::hardware::{DemodBlock, SampleGeometry};
+use crate::hardware::{SampleGeometry, StreamBlock};
 use crate::state::{AmMeasure, CtcssMeasure, FmMeasure, Modulation, SdrMetrics};
 
 use super::super::dsp::fir::{design_lowpass, StreamingDecimator};
@@ -31,7 +31,7 @@ use super::{
 };
 
 pub struct DemodWorker {
-    pub sample_rx: Receiver<DemodBlock>,
+    pub sample_rx: Receiver<StreamBlock>,
     pub state: Arc<Mutex<SdrMetrics>>,
     pub geometry: SampleGeometry,
 }
@@ -226,7 +226,7 @@ struct Measured {
 
 impl DemodWorker {
     pub fn new(
-        sample_rx: Receiver<DemodBlock>,
+        sample_rx: Receiver<StreamBlock>,
         state: Arc<Mutex<SdrMetrics>>,
         geometry: SampleGeometry,
     ) -> Self {
@@ -246,7 +246,7 @@ impl DemodWorker {
 
         let mut s = Session::new();
 
-        while let Ok(DemodBlock {
+        while let Ok(StreamBlock {
             seq,
             gap_before,
             bytes: chunk,

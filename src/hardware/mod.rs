@@ -30,6 +30,6 @@ mod traits;
 
 pub use discovery::{list_all_devices, open_device, DeviceKind, DeviceListing};
 pub use traits::{
-    Boost, DeliveryModel, DemodBlock, DeviceCapabilities, DeviceInfo, FeedHealth, GainModel,
-    RxContext, SampleFormat, SampleGeometry, SdrDevice, SoftwareStack, StageSpec,
+    Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, FeedHealth, GainModel, RxContext,
+    SampleFormat, SampleGeometry, SdrDevice, SoftwareStack, StageSpec, StreamBlock,
 };

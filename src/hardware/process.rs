@@ -233,7 +233,7 @@ pub fn process_block(
     // hole, and CTCSS reported a tone measured over the join.
     if demod_enabled {
         ctx.demod_tx
-            .try_send(super::DemodBlock {
+            .try_send(super::StreamBlock {
                 seq: block_seq,
                 gap_before: dropped_pairs > 0,
                 bytes: forward.clone(),
@@ -433,7 +433,7 @@ mod tests {
     use std::time::Instant;
 
     use super::{SampleFormat, SampleGeometry};
-    use crate::hardware::{DemodBlock, RxContext};
+    use crate::hardware::{RxContext, StreamBlock};
     use crate::state::SdrMetrics;
 
     // These exercise the decode/saturation/histogram arithmetic that
@@ -452,7 +452,7 @@ mod tests {
     fn rx_ctx() -> (
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
-        crossbeam_channel::Receiver<DemodBlock>,
+        crossbeam_channel::Receiver<StreamBlock>,
     ) {
         rx_ctx_holding(8)
     }
@@ -465,7 +465,7 @@ mod tests {
     ) -> (
         Arc<RxContext>,
         crossbeam_channel::Receiver<Vec<u8>>,
-        crossbeam_channel::Receiver<DemodBlock>,
+        crossbeam_channel::Receiver<StreamBlock>,
     ) {
         let (sample_tx, sample_rx) = crossbeam_channel::bounded(fft_cap);
         let (demod_tx, demod_rx) = crossbeam_channel::bounded(8);

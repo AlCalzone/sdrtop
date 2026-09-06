@@ -166,7 +166,7 @@ pub struct DemodState {
     /// It also counts the losses the sequence number cannot see, which happen on
     /// the other side of the stamp: samples the driver itself threw away, from a
     /// HackRF short transfer or a SoapySDR overflow. Those arrive as
-    /// `DemodBlock::gap_before` and count one each - a floor, because the driver
+    /// `StreamBlock::gap_before` and count one each - a floor, because the driver
     /// reports that samples went and never how many blocks' worth. Both kinds
     /// answer the same question, which is why they share a field: the run has a
     /// hole in it and the station is not to blame.

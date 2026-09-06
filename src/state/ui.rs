@@ -157,6 +157,15 @@ pub struct UiState {
     /// footer can show it. The engine owns the authoritative value; this is a
     /// render-time mirror.
     pub active_preset: String,
+    /// The menu section the active preset is filed under, synced each frame
+    /// alongside `active_preset`.
+    ///
+    /// The header renders differently inside the NET section, and this is what
+    /// it asks. Mirrored from the engine rather than derived from the preset's
+    /// name, because a name prefix would make the section a convention that a
+    /// user preset could break by being called something sensible; the section
+    /// is a field a preset **declares**, and this is that field.
+    pub section: String,
     /// Names of all defined presets, synced each frame alongside active_preset.
     /// Lets the footer build the lab map from presets that actually exist.
     pub preset_names: Vec<String>,
@@ -248,6 +257,11 @@ impl UiState {
     /// Whether the active preset is a measurement lab (`lab_*`). Lab presets wear
     /// the instrument-chrome (banner + marker bar) and a cooler steel frame.
     /// Reads the per-frame `active_preset` mirror, so it is valid during draw.
+    /// Whether the deck is in the NET section, which the header varies on.
+    pub fn is_net_section(&self) -> bool {
+        self.section == crate::signal::net::SECTION
+    }
+
     pub fn is_lab_mode(&self) -> bool {
         self.active_preset.starts_with("lab_")
     }
@@ -309,6 +323,7 @@ impl Default for UiState {
             gain_stage: None,
             focused_panel_bindings: &[],
             active_preset: String::new(),
+            section: String::new(),
             preset_names: Vec::new(),
             scope: Vec::new(),
             log: VecDeque::new(),

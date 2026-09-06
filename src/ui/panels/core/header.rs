@@ -360,13 +360,111 @@ fn plain_separator(theme: &crate::Theme, outer_width: u16) -> Line<'static> {
 /// `◆╴2m╶`), so the band you're in sits exactly where the eye lands. `outer_width`
 /// is the FULL panel width; rendered at the outer Rect so `├`/`┤` overwrite `│`.
 fn band_strip_line(state: &SdrMetrics, theme: &crate::Theme, outer_width: u16) -> Line<'static> {
+    // Inside NET the rail spans the band being worked, not the radio's whole
+    // tuning range. A HackRF reaches 6 GHz, so on its own rail every channel in
+    // the 2.4 GHz band lands in the same column and the marker never moves. The
+    // rail is there to show where you are; over the wrong range it shows nothing.
+    // The compact formatter speaks in decades and cannot say 2483.5: it renders
+    // the two edges as "2.4G" and "2.5G", which look like a hundred megahertz
+    // apart and put the top of the band above where it ends. Inside NET the
+    // labels are megahertz.
+    let (fmin, fmax, lo, hi) = if state.ui.is_net_section() {
+        use crate::signal::net::band::{HIGH_HZ, LOW_HZ};
+        (
+            LOW_HZ,
+            HIGH_HZ,
+            format!("{}", LOW_HZ / 1_000_000),
+            format!("{}", HIGH_HZ / 1_000_000),
+        )
+    } else {
+        (
+            state.caps.freq_min_hz,
+            state.caps.freq_max_hz,
+            fmt_freq_compact(state.caps.freq_min_hz),
+            fmt_freq_compact(state.caps.freq_max_hz),
+        )
+    };
     compose_band_strip(
         state.radio.frequency,
-        state.caps.freq_min_hz,
-        state.caps.freq_max_hz,
+        fmin,
+        fmax,
+        lo,
+        hi,
         theme,
         outer_width,
     )
+}
+
+/// The NET section's bottom band: what the receiver is doing, in place of the
+/// gain staging and tuning the normal header shows.
+///
+/// Design section 9.2. In this section the tuning and the gain are the least
+/// interesting things on the screen, and they have a panel of their own; what
+/// the user needs continuously is the mode, because `SURVEY` and `LOCK` mean
+/// different things about every number below them.
+fn net_band_line(state: &SdrMetrics, theme: &crate::Theme, inner_width: u16) -> Line<'static> {
+    compose_net_band(
+        state.net.mode,
+        crate::signal::net::band::wifi_channel(state.radio.frequency),
+        state.radio.frequency,
+        state.radio.config_sample_rate,
+        theme,
+        inner_width,
+    )
+}
+
+/// Pure core of [`net_band_line`], taking primitives so the widths can be tested
+/// without a `SdrMetrics`.
+///
+/// **Fields are dropped from the right as the terminal narrows**, and the order
+/// is the order of least use: the sample rate goes first, then the frequency,
+/// then the channel. `NET` and the mode never go, because a header that has
+/// stopped saying which mode is running is worse than no header.
+fn compose_net_band(
+    mode: crate::state::NetMode,
+    channel: Option<u8>,
+    freq_hz: u64,
+    sample_rate_hz: f64,
+    theme: &crate::Theme,
+    inner_width: u16,
+) -> Line<'static> {
+    use ratatui::style::Modifier;
+
+    let mut optional: Vec<String> = Vec::new();
+    if let Some(ch) = channel {
+        optional.push(format!("ch {ch}"));
+    }
+    optional.push(format!("{:.3} MHz", freq_hz as f64 / 1e6));
+    optional.push(format!("{:.3} Msps", sample_rate_hz / 1e6));
+
+    const SEP: &str = " · ";
+    let fixed = 1 + 3 + 3 + mode.label().len(); // " NET" + sep + mode
+    let mut width = fixed;
+    let mut shown = 0usize;
+    for field in &optional {
+        let next = width + SEP.len() + field.chars().count();
+        if next > inner_width as usize {
+            break;
+        }
+        width = next;
+        shown += 1;
+    }
+
+    let mut spans = vec![
+        Span::styled(" NET", Style::default().fg(theme.border_accent)),
+        Span::styled(SEP, Style::default().fg(theme.label)),
+        Span::styled(
+            mode.label().to_string(),
+            Style::default()
+                .fg(theme.value_hi)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    for field in optional.into_iter().take(shown) {
+        spans.push(Span::styled(SEP, Style::default().fg(theme.label)));
+        spans.push(Span::styled(field, Style::default().fg(theme.value)));
+    }
+    Line::from(spans)
 }
 
 /// Pure core of [`band_strip_line`] - takes the tuned frequency and tunable range
@@ -375,12 +473,12 @@ fn compose_band_strip(
     freq: u64,
     fmin: u64,
     fmax: u64,
+    lo_lbl: String,
+    hi_lbl: String,
     theme: &crate::Theme,
     outer_width: u16,
 ) -> Line<'static> {
     let frac = range_frac(freq, fmin, fmax);
-    let lo_lbl = fmt_freq_compact(fmin);
-    let hi_lbl = fmt_freq_compact(fmax);
 
     // Fixed chrome around the track:  ├ ─ ␠ LO ␠ <track> ␠ HI ␠ ─ ┤
     let left_w = 1 + 1 + 1 + lo_lbl.chars().count() + 1;
@@ -630,10 +728,12 @@ impl Panel for HeaderPanel {
             Paragraph::new(band_strip_line(state, theme, outer.width)),
             sep_area,
         );
-        f.render_widget(
-            Paragraph::new(bottom_band_line(state, theme, inner.width)),
-            bot_area,
-        );
+        let bottom = if state.ui.is_net_section() {
+            net_band_line(state, theme, inner.width)
+        } else {
+            bottom_band_line(state, theme, inner.width)
+        };
+        f.render_widget(Paragraph::new(bottom), bot_area);
     }
 }
 
@@ -882,11 +982,27 @@ mod tests {
             for (lbl, line) in [
                 (
                     "named",
-                    compose_band_strip(145_500_000, 1_000_000, 6_000_000_000, &t, outer),
+                    compose_band_strip(
+                        145_500_000,
+                        1_000_000,
+                        6_000_000_000,
+                        "1M".into(),
+                        "6G".into(),
+                        &t,
+                        outer,
+                    ),
                 ),
                 (
                     "percent",
-                    compose_band_strip(200_000_000, 1_000_000, 6_000_000_000, &t, outer),
+                    compose_band_strip(
+                        200_000_000,
+                        1_000_000,
+                        6_000_000_000,
+                        "1M".into(),
+                        "6G".into(),
+                        &t,
+                        outer,
+                    ),
                 ),
             ] {
                 let w: usize = line.spans.iter().map(|s| s.width()).sum();
@@ -947,5 +1063,121 @@ mod tests {
             chain.contains("USB"),
             "the rest of the band survives:\n{chain}"
         );
+    }
+
+    /// A `SdrMetrics` sitting in the NET section on Wi-Fi channel 6, which is
+    /// design section 9.2's own worked example.
+    fn net_fixture() -> SdrMetrics {
+        let mut m = SdrMetrics::fixture();
+        m.ui.section = crate::signal::net::SECTION.to_string();
+        m.ui.active_preset = "net".to_string();
+        m.radio.frequency = 2_437_000_000;
+        m.radio.config_sample_rate = 20_000_000.0;
+        m
+    }
+
+    /// The mode is the first thing the header says and it is never ambiguous:
+    /// exactly one of the two words is on screen, whichever mode is running.
+    #[test]
+    fn exactly_one_mode_word_is_on_screen() {
+        for (mode, want, other) in [
+            (crate::state::NetMode::Survey, "SURVEY", "LOCK"),
+            (crate::state::NetMode::Lock, "LOCK", "SURVEY"),
+        ] {
+            let mut m = net_fixture();
+            m.net.mode = mode;
+            let out = crate::state::fixture::draw(HeaderPanel, 100, 5, &m).join("\n");
+            assert!(out.contains(want), "{want} missing from:\n{out}");
+            assert!(!out.contains(other), "{other} present too:\n{out}");
+        }
+    }
+
+    /// Outside the section the header is the one it has always been: no mode
+    /// word, and the gain staging still there.
+    #[test]
+    fn the_variant_is_confined_to_its_own_section() {
+        let m = SdrMetrics::fixture();
+        let out = crate::state::fixture::draw(HeaderPanel, 100, 5, &m).join("\n");
+        assert!(!out.contains("SURVEY") && !out.contains("LOCK"), "{out}");
+        assert!(!out.contains(" NET · "), "{out}");
+    }
+
+    #[test]
+    fn the_channel_is_named_beside_the_frequency() {
+        let out = crate::state::fixture::draw(HeaderPanel, 100, 5, &net_fixture()).join("\n");
+        assert!(out.contains("ch 6"), "{out}");
+        assert!(out.contains("2437.000 MHz"), "{out}");
+        assert!(out.contains("20.000 Msps"), "{out}");
+
+        // Between channels there is no channel, and the header says nothing
+        // rather than rounding to the nearest one.
+        let mut m = net_fixture();
+        m.radio.frequency = 2_439_500_000;
+        let out = crate::state::fixture::draw(HeaderPanel, 100, 5, &m).join("\n");
+        assert!(!out.contains("ch "), "{out}");
+        assert!(out.contains("2439.500 MHz"), "{out}");
+    }
+
+    /// N10's exit condition. Three widths, and at each one what is left is what
+    /// matters most: the mode survives to the last column.
+    #[test]
+    fn the_band_degrades_from_the_right_as_the_terminal_narrows() {
+        let theme = crate::Theme::sdr();
+        let render = |w: u16| -> String {
+            compose_net_band(
+                crate::state::NetMode::Lock,
+                Some(6),
+                2_437_000_000,
+                20_000_000.0,
+                &theme,
+                w,
+            )
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+        };
+
+        let wide = render(100);
+        assert!(wide.contains("ch 6") && wide.contains("MHz") && wide.contains("Msps"));
+
+        let middle = render(30);
+        assert!(middle.contains("LOCK") && middle.contains("ch 6"));
+        assert!(
+            !middle.contains("Msps"),
+            "the rate should go first: {middle}"
+        );
+
+        let narrow = render(12);
+        assert!(narrow.contains("LOCK"), "the mode must survive: {narrow}");
+        assert!(!narrow.contains("ch 6"), "{narrow}");
+
+        for w in [12u16, 30, 100] {
+            assert!(
+                render(w).chars().count() <= w as usize,
+                "width {w} overflowed: {:?}",
+                render(w)
+            );
+        }
+    }
+
+    /// The rail spans the band being worked, not the radio's whole range. On a
+    /// HackRF the two differ by a factor of seventy, and on the wrong one the
+    /// marker never moves.
+    #[test]
+    fn the_rail_spans_the_band_and_not_the_whole_radio() {
+        let m = net_fixture();
+        let net = crate::state::fixture::draw(HeaderPanel, 100, 5, &m).join("\n");
+        assert!(net.contains("2400") && net.contains("2483"), "{net}");
+        assert!(
+            !net.contains(" 6G "),
+            "the full tuning range leaked in:\n{net}"
+        );
+
+        let mut plain = m.clone();
+        plain.ui.section = "lab".to_string();
+        let out = crate::state::fixture::draw(HeaderPanel, 100, 5, &plain).join("\n");
+        assert!(out.contains(" 6G "), "{out}");
+        assert!(!out.contains("2400"), "{out}");
     }
 }

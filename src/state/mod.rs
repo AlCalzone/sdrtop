@@ -8,6 +8,7 @@ pub(crate) mod fixture;
 mod iq;
 mod lab;
 mod micro;
+mod net;
 mod observer;
 mod radio;
 mod signal;
@@ -26,6 +27,7 @@ pub use demod::{
 pub use iq::{IqCalState, IqState, CONSTELLATION_CAP};
 pub use lab::{LabState, NoiseReading, RfFreeze};
 pub use micro::MicroView;
+pub use net::{NetMode, NetState};
 pub use observer::ObserverState;
 pub use radio::RadioState;
 pub use signal::{
@@ -71,6 +73,8 @@ pub struct SdrMetrics {
     pub lab: LabState,
     /// Demodulator measurement + gating for the `lab_signal` bench. See [`DemodState`].
     pub demod: DemodState,
+    /// What the 2.4 GHz receiver is doing. See [`NetState`].
+    pub net: NetState,
     /// Active device's capability descriptor - drives capability-aware UI
     /// rendering (gain model, BB filter / Friis applicability, ranges). Shared
     /// (Arc) so the per-frame `SdrMetrics` clone stays cheap.

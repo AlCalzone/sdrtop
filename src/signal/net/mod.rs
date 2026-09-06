@@ -9,4 +9,13 @@
 //! questions live that no single protocol can answer, and [`gate`] is the first
 //! of them: **can this radio do any of this at all?**
 
+/// The menu section id this feature's presets are filed under.
+///
+/// Named here rather than in the menu because three unrelated places need to
+/// agree on it: the section table, the startup path that drops the section when
+/// the gate refuses, and the header that renders differently inside it. A string
+/// literal in each would be three chances to disagree.
+pub const SECTION: &str = "net";
+
+pub mod band;
 pub mod gate;

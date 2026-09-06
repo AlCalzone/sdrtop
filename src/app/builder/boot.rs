@@ -403,6 +403,7 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         },
         lab: crate::state::LabState::default(),
         demod: crate::state::DemodState::default(),
+        net: crate::state::NetState::default(),
         caps,
         acc: Accumulators::default(),
     }

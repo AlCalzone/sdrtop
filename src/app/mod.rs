@@ -139,6 +139,11 @@ impl App {
         m.ui.preset_names = self.engine.preset_names();
         // The footer names the keys that work right now, and the digits are
         // scoped, so it reads the active section rather than keeping a table.
+        m.ui.section = self
+            .engine
+            .scope()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
         m.ui.scope = self
             .engine
             .scope()

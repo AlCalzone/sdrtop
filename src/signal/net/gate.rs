@@ -23,12 +23,11 @@ use crate::hardware::DeviceCapabilities;
 /// on offer.
 pub const LOWEST_CENTRE_HZ: u64 = 2_402_000_000;
 
-/// The top of the 2.4 GHz ISM band, 2483.5 MHz. Bluetooth LE channel 39 sits at
-/// 2480 MHz and Wi-Fi channel 13 at 2472, so a radio that stops below this can
-/// still reach some of the band; requiring the whole band is deliberate, because
-/// a survey that silently covered three quarters of it would be worse than no
-/// survey.
-pub const HIGHEST_CENTRE_HZ: u64 = 2_483_500_000;
+/// The top of the 2.4 GHz ISM band. Bluetooth LE channel 39 sits at 2480 MHz and
+/// Wi-Fi channel 13 at 2472, so a radio that stops below this can still reach
+/// some of the band; requiring the whole band is deliberate, because a survey
+/// that silently covered three quarters of it would be worse than no survey.
+pub const HIGHEST_CENTRE_HZ: u64 = super::band::HIGH_HZ;
 
 /// A physical layer this section could work with, and what it costs to receive.
 #[derive(Clone, Copy, Debug, PartialEq)]

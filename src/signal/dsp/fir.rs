@@ -14,14 +14,13 @@
 
 use num_complex::Complex;
 
-/// Hamming-windowed sinc low-pass. `fc` is the cutoff in cycles/sample (< 0.5).
+/// A windowed sinc low-pass, given the window as a function of tap index.
 ///
-/// **The cutoff convention is the one thing to get right here**, and it is the
-/// classic source of a silent factor of two: `fc` is in cycles per sample, so
-/// `fc = 0.25` is a quarter of the sample rate and half of Nyquist. The design
-/// places its -6 dB point there, which is what
-/// `the_cutoff_sits_where_the_argument_says_it_does` pins.
-pub fn design_lowpass(taps: usize, fc: f64) -> Vec<f32> {
+/// Both designs in this module go through here, which is what makes "the same
+/// contract" a structural fact rather than a promise: unit DC gain, the -6 dB
+/// point at `fc`, an odd tap count so the delay is a whole number of samples.
+/// Only the window differs.
+fn windowed_sinc(taps: usize, fc: f64, window: impl Fn(usize, usize) -> f64) -> Vec<f32> {
     use std::f64::consts::PI;
     let taps = taps.max(1) | 1;
     let m = (taps - 1) as f64 / 2.0;
@@ -35,8 +34,7 @@ pub fn design_lowpass(taps: usize, fc: f64) -> Vec<f32> {
         } else {
             (2.0 * PI * fc * x).sin() / (PI * x)
         };
-        let w = 0.54 - 0.46 * (2.0 * PI * i as f64 / (taps - 1).max(1) as f64).cos();
-        let v = sinc * w;
+        let v = sinc * window(i, taps);
         sum += v;
         h.push(v);
     }
@@ -48,6 +46,153 @@ pub fn design_lowpass(taps: usize, fc: f64) -> Vec<f32> {
         }
     }
     h.into_iter().map(|v| v as f32).collect()
+}
+
+/// Hamming-windowed sinc low-pass. `fc` is the cutoff in cycles/sample (< 0.5).
+///
+/// **The cutoff convention is the one thing to get right here**, and it is the
+/// classic source of a silent factor of two: `fc` is in cycles per sample, so
+/// `fc = 0.25` is a quarter of the sample rate and half of Nyquist. The design
+/// places its -6 dB point there, which is what
+/// `the_cutoff_sits_where_the_argument_says_it_does` pins.
+///
+/// The stopband is whatever Hamming gives, about 53 dB, and no argument can
+/// change that. A caller that needs to *specify* a stopband wants
+/// [`design_lowpass_to_spec`].
+pub fn design_lowpass(taps: usize, fc: f64) -> Vec<f32> {
+    use std::f64::consts::PI;
+    windowed_sinc(taps, fc, |i, taps| {
+        0.54 - 0.46 * (2.0 * PI * i as f64 / (taps - 1).max(1) as f64).cos()
+    })
+}
+
+/// The modified Bessel function of the first kind, order zero.
+///
+/// The series is the definition: `I0(x) = sum over k of ((x/2)^k / k!)^2`. Each
+/// term is the one before it times `(x / 2k)^2`, so nothing here evaluates a
+/// factorial or a power, and the loop stops when a term no longer moves the sum.
+/// Sixty-four terms cover every `beta` a filter design will ask for; `beta = 20`
+/// is a 190 dB stopband and converges in about thirty.
+#[allow(dead_code)] // wired in at N4
+fn bessel_i0(x: f64) -> f64 {
+    let mut term = 1.0f64;
+    let mut sum = 1.0f64;
+    for k in 1..=64 {
+        term *= (x / (2.0 * k as f64)).powi(2);
+        sum += term;
+        if term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+/// Kaiser's shape parameter for a required stopband attenuation.
+///
+/// `stopband_db` is Kaiser's `A = -20 log10(delta)`, where `delta` is the peak
+/// approximation error. Kaiser's design makes the passband ripple and the
+/// stopband ripple the same `delta`, so asking for 60 dB of stopband also asks
+/// for a passband flat to about 0.0087 dB.
+///
+/// Source: Kaiser, "Nonrecursive Digital Filter Design Using the I0-Sinh Window
+/// Function", Proc. 1974 IEEE Int. Symp. Circuits and Systems, pp. 20-23. The
+/// same piecewise form appears in Oppenheim and Schafer, Discrete-Time Signal
+/// Processing, pp. 475-476.
+///
+/// Below 21 dB the window is rectangular. That is not a special case bolted on:
+/// truncating the sinc alone already gives about 21 dB, so there is nothing left
+/// for a window to do.
+#[allow(dead_code)] // wired in at N4
+pub fn kaiser_beta(stopband_db: f64) -> f64 {
+    if stopband_db > 50.0 {
+        0.1102 * (stopband_db - 8.7)
+    } else if stopband_db >= 21.0 {
+        let x = stopband_db - 21.0;
+        0.5842 * x.powf(0.4) + 0.07886 * x
+    } else {
+        0.0
+    }
+}
+
+/// Tap count for a required stopband attenuation and transition width.
+///
+/// `transition` is the width of the transition band in cycles per sample, the
+/// unit [`design_lowpass`] takes its cutoff in. The band is centred on the
+/// cutoff: it runs from `fc - transition/2` to `fc + transition/2`.
+///
+/// Source: Kaiser (1974), `M = (A - 7.95) / (2.285 * dw)` for the order, with
+/// `dw` the transition width in radians per sample, so `dw = 2*pi*transition`.
+/// Oppenheim and Schafer round the 7.95 to 8; this uses Kaiser's own figure. The
+/// tap count is the order plus one, rounded up and forced odd.
+///
+/// The two constants are not distinguishable by measurement here: substituting 8
+/// for 7.95 changes the estimate by a fifth of a tap at a transition of 0.02
+/// cycles per sample, and every test in this module still passes. The primary
+/// source is therefore the only reason to prefer one, which is reason enough.
+///
+/// **The estimate is an estimate**, and Kaiser never claimed otherwise, which is
+/// why `the_requested_stopband_is_delivered` measures the filter that comes out
+/// rather than trusting the count that went in.
+///
+/// Below 21 dB the count is evaluated at 21 dB: that is where beta bottoms out
+/// at a rectangular window, and below it the formula has nothing to say. There
+/// is no upper clamp. A transition of a millionth of the sample rate really does
+/// need millions of taps, and whether that is affordable is the caller's
+/// question, not this function's to answer with a number nobody asked for.
+#[allow(dead_code)] // wired in at N4
+pub fn kaiser_taps(transition: f64, stopband_db: f64) -> usize {
+    use std::f64::consts::TAU;
+    if !transition.is_finite() || transition <= 0.0 || !stopband_db.is_finite() {
+        return 1;
+    }
+    let order = (stopband_db.max(21.0) - 7.95) / (2.285 * TAU * transition);
+    ((order.ceil() as usize).saturating_add(1)).max(1) | 1
+}
+
+/// Kaiser-windowed sinc low-pass, with the window shape given directly.
+///
+/// Same contract as [`design_lowpass`]: `fc` in cycles per sample, unit DC gain,
+/// -6 dB at `fc`. `beta` comes from [`kaiser_beta`], and pairing it with a tap
+/// count from [`kaiser_taps`] for the *same* attenuation is the caller's job.
+/// [`design_lowpass_to_spec`] exists so that job can be skipped.
+#[allow(dead_code)] // wired in at N4
+pub fn design_lowpass_kaiser(taps: usize, fc: f64, beta: f64) -> Vec<f32> {
+    let denom = bessel_i0(beta);
+    windowed_sinc(taps, fc, |i, taps| {
+        let m = (taps - 1) as f64 / 2.0;
+        if m <= 0.0 {
+            return 1.0;
+        }
+        let r = (i as f64 - m) / m;
+        // Clamped because the endpoints can land a few ulps outside the unit
+        // interval, and a negative square root here would be a NaN in the kernel
+        // rather than an error anyone could see.
+        bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / denom
+    })
+}
+
+/// The design rule, as one call: ask for a stopband and a transition width, get
+/// a filter that meets them.
+///
+/// This is the reason N3 exists as a step. Hamming hands out 53 dB and no
+/// argument changes it; a channel filter and a decimator do not want the same
+/// rejection, and neither should have to take the one number a fixed window
+/// happens to give. Pairing the shape with the length is done here because a
+/// mismatched pair meets neither specification and looks perfectly reasonable
+/// while doing it.
+///
+/// Measured, at `fc = 0.1` and a transition of 0.02 cycles per sample: a request
+/// for 40 dB comes back as 39.92 dB in 113 taps, 60 dB as 60.08 dB in 183, and
+/// 80 dB as 79.96 dB in 253. The design rule is that close to calibrated, which
+/// is why `the_requested_stopband_is_delivered` holds it to half a dB either
+/// way rather than only checking that the filter is good enough.
+#[allow(dead_code)] // wired in at N4
+pub fn design_lowpass_to_spec(fc: f64, transition: f64, stopband_db: f64) -> Vec<f32> {
+    design_lowpass_kaiser(
+        kaiser_taps(transition, stopband_db),
+        fc,
+        kaiser_beta(stopband_db),
+    )
 }
 
 /// A decimating FIR that keeps its state between calls, so successive blocks
@@ -362,6 +507,139 @@ mod tests {
         assert_eq!(a.len(), b.len());
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
             assert!((x - y).norm() < 1e-6, "sample {i}: {x} vs {y}");
+        }
+    }
+
+    /// Standard tabulated values of I0. The series is the function's own
+    /// definition, so what is at risk here is not the mathematics but the loop:
+    /// an off-by-one in the term recurrence, or a break that fires before the
+    /// sum has settled.
+    #[test]
+    fn the_bessel_function_matches_its_table() {
+        for (x, want) in [
+            (0.0, 1.0),
+            (1.0, 1.2660658777520084),
+            (2.0, 2.2795853023360673),
+            (3.75, 9.118945860844565),
+            (5.0, 27.23987182360445),
+            (10.0, 2815.716628466255),
+        ] {
+            let got = bessel_i0(x);
+            assert!(
+                (got - want).abs() <= want * 1e-12,
+                "I0({x}) came out {got}, the table says {want}"
+            );
+        }
+    }
+
+    /// Peak response anywhere in the stopband, in dB. The transition band is
+    /// centred on the cutoff, so the stopband starts half a transition above it.
+    /// Sampled finely, because the worst ripple sits right at that edge.
+    fn stopband_peak_db(h: &[f32], fc: f64, transition: f64) -> f64 {
+        let start = fc + transition / 2.0;
+        let mut peak = 0.0f64;
+        for k in 0..=4000 {
+            let f = start + (0.5 - start) * k as f64 / 4000.0;
+            peak = peak.max(response(h, f));
+        }
+        db(peak)
+    }
+
+    /// N3's exit condition: ask for a stopband, get one.
+    #[test]
+    fn the_requested_stopband_is_delivered() {
+        for a in [40.0, 60.0, 80.0] {
+            let (fc, t) = (0.1, 0.02);
+            let h = design_lowpass_to_spec(fc, t, a);
+            let got = -stopband_peak_db(&h, fc, t);
+            // Two-sided on purpose. Falling short means the filter does not do
+            // what the caller asked; overshooting means the tap estimate is
+            // paying for attenuation nobody wanted, and at these widths that is
+            // just as much a defect in a design rule.
+            assert!(
+                (got - a).abs() <= 0.5,
+                "asked for {a} dB, measured {got:.2} dB with {} taps",
+                h.len()
+            );
+        }
+    }
+
+    /// The transition really is the width that was requested, measured at both
+    /// of its edges. Kaiser's design makes the passband ripple equal the
+    /// stopband ripple, so the lower edge answers to the same delta as the
+    /// upper one, and asserting both is what pins the width.
+    #[test]
+    fn the_transition_lands_between_the_edges_it_was_given() {
+        for a in [40.0, 60.0, 80.0] {
+            let (fc, t) = (0.1, 0.02);
+            let h = design_lowpass_to_spec(fc, t, a);
+            let delta = 10f64.powf(-a / 20.0);
+            let pass = response(&h, fc - t / 2.0);
+            assert!(
+                (pass - 1.0).abs() <= 2.0 * delta,
+                "a={a}: passband edge is {pass}, off by more than twice delta {delta:.2e}"
+            );
+            let stop = db(response(&h, fc + t / 2.0));
+            assert!(
+                stop <= -a + 2.0,
+                "a={a}: stopband edge is only {stop:.2} dB down"
+            );
+        }
+    }
+
+    /// Both designs go through `windowed_sinc`, so this is a check that the
+    /// shared path was not broken for one window while working for the other:
+    /// unit DC gain and the -6 dB point at the cutoff, the same two properties
+    /// `a_lowpass_has_unit_dc_gain` and `the_cutoff_sits_where_the_argument_
+    /// says_it_does` hold for Hamming.
+    #[test]
+    fn kaiser_answers_to_the_same_contract_as_hamming() {
+        for (taps, fc, a) in [
+            (129usize, 0.05f64, 60.0f64),
+            (257, 0.1, 80.0),
+            (65, 0.2, 40.0),
+        ] {
+            let h = design_lowpass_kaiser(taps, fc, kaiser_beta(a));
+            let dc = response(&h, 0.0);
+            assert!((dc - 1.0).abs() < 1e-6, "taps={taps} a={a}: DC gain {dc}");
+            let at_fc = response(&h, fc);
+            assert!(
+                (at_fc - 0.5).abs() < 0.01,
+                "taps={taps} a={a}: |H(fc)| = {at_fc:.4}, the -6 dB point is elsewhere"
+            );
+        }
+    }
+
+    /// Asked for what Hamming gives, Kaiser gives the same kind of object. This
+    /// is the sanity check that the two designs are comparable at all, not a
+    /// claim that they are identical: they are different windows and their
+    /// stopbands have different shapes.
+    #[test]
+    fn kaiser_at_hammings_attenuation_is_hammings_kind_of_filter() {
+        let (taps, fc) = (161usize, 0.1f64);
+        let t = 3.3 / taps as f64;
+        let hamming = -stopband_peak_db(&design_lowpass(taps, fc), fc, t);
+        let kaiser = -stopband_peak_db(&design_lowpass_kaiser(taps, fc, kaiser_beta(53.0)), fc, t);
+        // Measured: 51.46 dB for Hamming, 52.72 dB for Kaiser asked for 53.
+        assert!(
+            (hamming - kaiser).abs() < 3.0,
+            "hamming gives {hamming:.2} dB and kaiser asked for 53 gives {kaiser:.2} dB"
+        );
+    }
+
+    /// The tap count follows the two things it is a function of, and refuses a
+    /// transition width that is not a width.
+    #[test]
+    fn the_tap_estimate_grows_with_the_specification() {
+        assert!(kaiser_taps(0.02, 80.0) > kaiser_taps(0.02, 40.0));
+        assert!(kaiser_taps(0.01, 60.0) > kaiser_taps(0.02, 60.0));
+        assert_eq!(
+            kaiser_taps(0.02, 60.0) % 2,
+            1,
+            "the tap count must stay odd"
+        );
+        for bad in [0.0, -0.01, f64::NAN] {
+            assert_eq!(kaiser_taps(bad, 60.0), 1);
         }
     }
 }

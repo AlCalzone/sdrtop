@@ -16,12 +16,16 @@
 //! * [`fir`] - filter design and streaming decimation. The window used *inside*
 //!   `fir` shapes a filter kernel rather than a transform input, which is why
 //!   the two are separate modules despite both saying "window".
+//! * [`nco`] - the oscillator and the complex mixer, on an integer phase
+//!   accumulator. Everything that has to move a signal in frequency without
+//!   putting a phase step or a slow phase creep into it goes through here.
 //!
 //! Policy stays with its owner. `signal::demod` decides how sharp an FM channel
 //! filter has to be and what decimation reaches its target rate; this module
 //! only knows how to build the filter it is asked for.
 
 pub mod fir;
+pub mod nco;
 pub mod window;
 
 pub use window::{compute_window, WindowFn};

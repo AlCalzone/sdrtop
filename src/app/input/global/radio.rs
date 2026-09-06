@@ -102,15 +102,20 @@ pub(super) fn begin_sample_rate_input(ctx: &mut InputCtx<'_>) {
 
 /// `[m]` - survey the band, or lock to where the radio is pointed.
 ///
-/// A key that does nothing outside the NET section, which is the same shape as
-/// the gain keys doing nothing on a radio with no such stage: the deck says what
-/// is available and a key that has no meaning here quietly has none. Design
-/// section 13.1 makes this a mode rather than a setting, so switching it changes
-/// what every reading in the section *claims*, not just what the receiver does.
-pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) {
+/// Design section 13.1 makes this a mode rather than a setting, so switching it
+/// changes what every reading in the section *claims*, not just what the
+/// receiver does.
+///
+/// **Returns whether it claimed the key, and that return value is the whole
+/// point.** `m` was already the FM demodulator's focus key, and a global arm
+/// that swallowed it would have made that panel unreachable everywhere outside
+/// this section - silently, because the existing structural test checks that a
+/// focusable panel *has* a dispatch arm, not that its key still reaches it. A
+/// section-scoped key has to decline rather than absorb.
+pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) -> bool {
     let mut m = metrics(ctx.state);
     if !m.ui.is_net_section() {
-        return;
+        return false;
     }
     let mode = m.net.mode.toggled();
     m.net.mode = mode;
@@ -123,4 +128,5 @@ pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) {
         crate::state::NetMode::Lock => format!("NET locked to {where_to:.3} MHz"),
         crate::state::NetMode::Survey => "NET surveying the band".to_string(),
     });
+    true
 }

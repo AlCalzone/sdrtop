@@ -42,7 +42,13 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         KeyCode::Char('r') => radio::reset_defaults(ctx),
         KeyCode::Char('f') => radio::begin_frequency_input(ctx),
         KeyCode::Char('s') => radio::begin_sample_rate_input(ctx),
-        KeyCode::Char('m') => radio::toggle_net_mode(ctx),
+        // Section-scoped, and it declines rather than absorbing: outside NET
+        // this is still the FM demodulator's focus key.
+        KeyCode::Char('m') => {
+            if !radio::toggle_net_mode(ctx) {
+                view::enter_focus(ctx, 'm');
+            }
+        }
 
         // ── Gain staging ────────────────────────────────────────────────────
         KeyCode::Up => gain::step_primary(ctx, true),
@@ -151,6 +157,46 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
+    }
+
+    /// **A section-scoped key declines outside its section rather than
+    /// absorbing.**
+    ///
+    /// `m` toggles the NET survey/lock mode, and `m` was already the FM
+    /// demodulator's focus key. A global arm that simply returned would have
+    /// made that panel unreachable on every deck outside NET, and nothing would
+    /// have said so: `every_focusable_panel_has_a_dispatch_arm` checks that a
+    /// focusable panel *has* a handler, not that its key still gets there.
+    ///
+    /// The rule generalises past this key, which is why it is written as one: a
+    /// global arm added for one section must fall through when that section is
+    /// not on screen, or it quietly takes a key away from the rest of the deck.
+    #[test]
+    fn a_section_scoped_key_does_not_shadow_a_panel_focus_key() {
+        let mut h = Harness::new();
+        h.focus_keys.insert('m', "fm_demod");
+        h.engine.set_preset("lab_signal");
+
+        // Outside NET, `m` is still the focus key it has always been.
+        assert!(!metrics(&h.state).ui.is_net_section());
+        h.press('m');
+        assert_eq!(
+            metrics(&h.state).ui.focused_panel.as_deref(),
+            Some("fm_demod"),
+            "the global arm swallowed the focus key"
+        );
+        assert_eq!(metrics(&h.state).net.mode, crate::state::NetMode::Survey);
+
+        // Inside it, the same key is the mode and nothing gets focused.
+        let mut h = Harness::new();
+        h.focus_keys.insert('m', "fm_demod");
+        metrics(&h.state).ui.section = crate::signal::net::SECTION.to_string();
+        h.press('m');
+        assert_eq!(metrics(&h.state).net.mode, crate::state::NetMode::Lock);
+        assert_eq!(metrics(&h.state).ui.focused_panel, None);
+        h.press('m');
+        assert_eq!(metrics(&h.state).net.mode, crate::state::NetMode::Survey);
+        assert!(h.log().contains("surveying the band"), "{}", h.log());
     }
 
     #[test]

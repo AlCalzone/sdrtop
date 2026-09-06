@@ -34,13 +34,11 @@ use std::f64::consts::TAU;
 
 /// A measured value and its standard uncertainty, in the same unit.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)] // wired in at N8
 pub struct Uncertain {
     value: f64,
     sigma: f64,
 }
 
-#[allow(dead_code)] // wired in at N8
 impl Uncertain {
     /// From an estimate and the variance of the estimator that produced it.
     ///
@@ -49,6 +47,7 @@ impl Uncertain {
     /// infinite one: that is what it means to have measured something and have
     /// no idea how well, and it propagates honestly through everything below
     /// instead of poisoning it with a NaN.
+    #[allow(dead_code)] // built from a live variance at N11
     pub fn from_variance(value: f64, variance: f64) -> Self {
         let sigma = if variance.is_nan() {
             f64::INFINITY
@@ -58,12 +57,14 @@ impl Uncertain {
         Self { value, sigma }
     }
 
+    #[allow(dead_code)] // built from a live variance at N11
     pub fn from_sigma(value: f64, sigma: f64) -> Self {
         Self::from_variance(value, sigma * sigma)
     }
 
     /// A number that carries no uncertainty of its own: a specification limit, a
     /// channel centre, a count.
+    #[allow(dead_code)] // built from a live variance at N11
     pub fn exact(value: f64) -> Self {
         Self { value, sigma: 0.0 }
     }
@@ -79,6 +80,7 @@ impl Uncertain {
 
     /// The expanded uncertainty, `k` sigma. A caller using this owes the reader
     /// the `k`.
+    #[allow(dead_code)] // wired in at N11, where a limit and a margin need them
     pub fn expanded(&self, k: f64) -> f64 {
         self.sigma * k.abs()
     }
@@ -86,6 +88,7 @@ impl Uncertain {
     /// The same measurement in another unit. Cycles per sample to ppm, volts to
     /// dB of a ratio, anything linear: the uncertainty scales with the value,
     /// which is the whole reason it travels attached to it.
+    #[allow(dead_code)] // wired in at N11, where a limit and a margin need them
     pub fn scale(&self, k: f64) -> Self {
         Self {
             value: self.value * k,
@@ -95,6 +98,7 @@ impl Uncertain {
 
     /// Shifted by an exactly known offset. The uncertainty is untouched, because
     /// an exact offset adds none.
+    #[allow(dead_code)] // wired in at N11, where a limit and a margin need them
     pub fn shift(&self, delta: f64) -> Self {
         Self {
             value: self.value + delta,
@@ -106,6 +110,7 @@ impl Uncertain {
     /// it is not defined and where its absence is the point: a frequency offset
     /// of zero is a perfectly good measurement, and a relative uncertainty is
     /// simply the wrong question to ask about it.
+    #[allow(dead_code)] // wired in at N11, where a limit and a margin need them
     pub fn relative(&self) -> Option<f64> {
         if self.value == 0.0 {
             None
@@ -188,7 +193,7 @@ impl Uncertain {
 ///
 /// Infinite below two samples, where there is no frequency to estimate, and at
 /// or below zero SNR, where there is nothing to estimate it from.
-#[allow(dead_code)] // wired in at N8
+#[allow(dead_code)] // wired in at N13
 pub fn crlb_frequency(snr: f64, samples: usize) -> f64 {
     if snr.is_nan() || snr <= 0.0 || samples < 2 {
         return f64::INFINITY;
@@ -206,7 +211,7 @@ pub fn crlb_frequency(snr: f64, samples: usize) -> f64 {
 ///
 /// Above one is impossible for an unbiased estimator, so a caller seeing it has
 /// found a bug rather than a good day.
-#[allow(dead_code)] // wired in at N8
+#[allow(dead_code)] // wired in at N13
 pub fn efficiency(variance: f64, bound: f64) -> f64 {
     if variance <= 0.0 || !variance.is_finite() || !bound.is_finite() {
         return 0.0;

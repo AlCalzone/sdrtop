@@ -19,6 +19,10 @@
 //! * [`nco`] - the oscillator and the complex mixer, on an integer phase
 //!   accumulator. Everything that has to move a signal in frequency without
 //!   putting a phase step or a slow phase creep into it goes through here.
+//! * [`resample`] - rational resampling by L/M, polyphase, on a filter designed
+//!   by `fir` to a rejection the caller states. Moving a stream in frequency and
+//!   moving it onto another rate are the two things needed to put an arbitrary
+//!   radio on the grid a mode expects.
 //!
 //! Policy stays with its owner. `signal::demod` decides how sharp an FM channel
 //! filter has to be and what decimation reaches its target rate; this module
@@ -26,6 +30,7 @@
 
 pub mod fir;
 pub mod nco;
+pub mod resample;
 pub mod window;
 
 pub use window::{compute_window, WindowFn};

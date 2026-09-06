@@ -33,7 +33,6 @@ const IDLE_POLL: Duration = Duration::from_millis(100);
 pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice>) {
     tokio::spawn(async move {
         let mut surveying = false;
-        let mut resume_hz = 0u64;
 
         loop {
             let (active, span_hz, tuned) = {
@@ -51,19 +50,27 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
             };
 
             if !active {
-                // Leaving survey puts the radio back where the user left it.
-                // The pass owns the tuner while it runs, so without this a user
-                // who switched to lock would be locked to whichever position the
-                // sweep happened to stop on.
+                // Where the radio belongs is `NetState::end`'s answer, not this
+                // task's: locking means stay here, leaving the section means go
+                // back where the survey found you, and quitting mid-pass has to
+                // reach the same answer without another iteration of this loop.
                 if surveying {
                     surveying = false;
-                    let _ = device.set_frequency(resume_hz);
+                    let exit = {
+                        let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                        m.net.end(tuned)
+                    };
+                    let _ = device.set_frequency(exit.tune_hz);
                     let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                    m.radio.frequency = resume_hz;
-                    m.push_log(format!(
-                        "NET survey stopped, back to {:.3} MHz",
-                        resume_hz as f64 / 1e6
-                    ));
+                    m.radio.frequency = exit.tune_hz;
+                    m.push_log(if exit.locked {
+                        format!("NET locked to {:.3} MHz", exit.tune_hz as f64 / 1e6)
+                    } else {
+                        format!(
+                            "NET survey stopped, back to {:.3} MHz",
+                            exit.tune_hz as f64 / 1e6
+                        )
+                    });
                 }
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
@@ -76,8 +83,8 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
             }
             if !surveying {
                 surveying = true;
-                resume_hz = tuned;
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                m.net.pre_survey_hz = Some(tuned);
                 // The coverage is logged rather than assumed. A plan is only a
                 // plan if its positions between them see the whole band, and a
                 // radio whose usable span left a gap would otherwise report that

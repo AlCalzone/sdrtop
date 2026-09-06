@@ -57,11 +57,60 @@ impl NetMode {
     }
 }
 
+/// Where the radio belongs once the survey gives the tuner back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetExit {
+    pub tune_hz: u64,
+    /// Whether the radio stays where the pass left it, rather than going back
+    /// where the survey found it.
+    pub locked: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NetState {
     pub mode: NetMode,
     pub health: NetDecodeHealth,
     pub band: BandOccupancy,
+    /// The tuning the survey interrupted, so it can be given back.
+    ///
+    /// **In the state rather than in the task**, for the reason
+    /// [`crate::state::SweepState::end`] gives about the same field: the task is
+    /// not the only thing that has to put the radio back. Quitting mid-pass
+    /// never reaches another iteration of that loop - the process ends - and
+    /// `save_config` would write out whichever hop the survey was parked on, so
+    /// the app would reopen somewhere in the middle of the band, one position
+    /// further along each time.
+    pub pre_survey_hz: Option<u64>,
+}
+
+impl NetState {
+    /// Give the tuner back, and say where the radio belongs.
+    ///
+    /// **The two ways out of a survey want opposite answers, and treating them
+    /// as one was a bug.** Leaving the section ends the survey, so the radio goes
+    /// back where it was found. Switching to lock means "stay here": the user
+    /// pressed the key while looking at a position, and that position is what
+    /// they meant. The first version restored in both cases, while the key
+    /// handler logged `NET locked to <the current hop>` - so the log said one
+    /// thing and the radio did another.
+    ///
+    /// `tuned_hz` is `radio.frequency`. Safe on a state that never surveyed, and
+    /// safe to call twice: the second call has nothing left to take and answers
+    /// with whatever the caller wrote back after the first.
+    pub fn end(&mut self, tuned_hz: u64) -> NetExit {
+        let pre = self.pre_survey_hz.take();
+        if self.mode == NetMode::Lock {
+            NetExit {
+                tune_hz: tuned_hz,
+                locked: true,
+            }
+        } else {
+            NetExit {
+                tune_hz: pre.unwrap_or(tuned_hz),
+                locked: false,
+            }
+        }
+    }
 }
 
 /// What the receiver missed, and what it never had a chance to see.
@@ -220,6 +269,71 @@ impl BandOccupancy {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// **Locking means "stay here". Leaving the section means "put it back".**
+    ///
+    /// Treating the two as one exit was the bug: the survey restored the
+    /// pre-survey tuning on both, while the key handler logged
+    /// `NET locked to <the current hop>`. The log said one thing and the radio
+    /// did another, and the user pressed the key precisely because of what they
+    /// were looking at.
+    #[test]
+    fn locking_keeps_the_position_and_leaving_gives_it_back() {
+        // A survey started at 2412 and is currently parked on 2442.
+        let mut net = NetState {
+            pre_survey_hz: Some(2_412_000_000),
+            ..Default::default()
+        };
+
+        // Locked: the position the pass is on is the one the user meant.
+        net.mode = NetMode::Lock;
+        let exit = net.end(2_442_000_000);
+        assert_eq!(exit.tune_hz, 2_442_000_000);
+        assert!(exit.locked);
+
+        // Still surveying and leaving the section: back where it was found.
+        let mut net = NetState {
+            pre_survey_hz: Some(2_412_000_000),
+            ..Default::default()
+        };
+        let exit = net.end(2_442_000_000);
+        assert_eq!(exit.tune_hz, 2_412_000_000);
+        assert!(!exit.locked);
+    }
+
+    /// Safe on a state that never surveyed, and safe to call twice, because the
+    /// quit path calls it unconditionally and the task may have called it first.
+    #[test]
+    fn ending_a_survey_that_never_ran_leaves_the_radio_alone() {
+        let mut net = NetState::default();
+        assert_eq!(net.end(2_437_000_000).tune_hz, 2_437_000_000);
+
+        let mut net = NetState {
+            pre_survey_hz: Some(2_412_000_000),
+            ..Default::default()
+        };
+        assert_eq!(net.end(2_442_000_000).tune_hz, 2_412_000_000);
+        // The task wrote the answer back; quitting must not move it again.
+        assert_eq!(net.end(2_412_000_000).tune_hz, 2_412_000_000);
+        assert_eq!(net.pre_survey_hz, None);
+    }
+
+    /// Leaving the section after locking does not undo the lock.
+    ///
+    /// The lock already took the interrupted tuning, so there is nothing left to
+    /// restore and the radio stays where the user put it - which is what they
+    /// asked for and is why `take` rather than a read is the right call.
+    #[test]
+    fn leaving_the_section_does_not_undo_a_lock() {
+        let mut net = NetState {
+            pre_survey_hz: Some(2_412_000_000),
+            ..Default::default()
+        };
+        net.mode = NetMode::Lock;
+        assert_eq!(net.end(2_442_000_000).tune_hz, 2_442_000_000);
+        // Now the user leaves NET entirely, still locked.
+        assert_eq!(net.end(2_442_000_000).tune_hz, 2_442_000_000);
+    }
 
     /// One dwell's worth of band: `cells` measured, the rest untouched.
     fn dwell(cells: &[(usize, f64, u64)]) -> BandOccupancy {

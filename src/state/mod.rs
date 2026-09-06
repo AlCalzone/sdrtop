@@ -27,6 +27,8 @@ pub use demod::{
 pub use iq::{IqCalState, IqState, CONSTELLATION_CAP};
 pub use lab::{LabState, NoiseReading, RfFreeze};
 pub use micro::MicroView;
+// `NetExit` is not re-exported, for the reason `SweepExit` is not: it exists
+// to be returned and destructured, and no call site has to name it.
 pub use net::{BandOccupancy, CellReading, NetDecodeHealth, NetMode, NetState};
 pub use observer::ObserverState;
 pub use radio::RadioState;

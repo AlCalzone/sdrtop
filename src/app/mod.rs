@@ -245,14 +245,25 @@ impl App {
     /// `micro_sweep` therefore reopened the app somewhere in the middle of the
     /// swept band, one band-width further along each time.
     ///
-    /// Harmless on a state that was not sweeping, so it is not conditional.
+    /// The NET survey does the same thing for the same reason, so it gives the
+    /// tuner back here too. Harmless on a state that did neither, so it is not
+    /// conditional.
     fn restore_sweep_tuning(&self) {
         let moved = {
             let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let tuned = m.radio.frequency;
-            let exit = m.sweep.end(tuned);
-            m.radio.frequency = exit.tune_hz;
-            (exit.tune_hz != tuned).then_some(exit.tune_hz)
+            let was = m.radio.frequency;
+            m.radio.frequency = m.sweep.end(was).tune_hz;
+            // The NET survey parks the radio at each position in turn for
+            // exactly the same reason and with exactly the same consequence on
+            // quit, so it gives the tuner back through the same path. Harmless
+            // on a state that never surveyed, and it runs second because either
+            // may have moved the radio but never both: the two live in different
+            // sections and only one section is on screen.
+            let after_sweep = m.radio.frequency;
+            m.radio.frequency = m.net.end(after_sweep).tune_hz;
+            // Measured against where the radio actually was when quitting, not
+            // against whatever the first of the two handed on.
+            (m.radio.frequency != was).then_some(m.radio.frequency)
         };
         // Only when the sweep had actually moved the radio: every quit comes
         // through here, and a retune to the frequency the radio is already on is
@@ -355,6 +366,34 @@ mod tests {
             "restore_sweep_tuning must run before save_config, or the config \
              still records the scan position"
         );
+    }
+
+    /// **Every scanner that parks the radio gives the tuner back on quit.**
+    ///
+    /// Two now do: the frequency sweep and the NET survey. Both write their
+    /// current position into `radio.frequency` because that is the field the FFT
+    /// worker stamps frames with, and `save_config` persists that field, so a
+    /// scanner missing from this function reopens the app somewhere in the
+    /// middle of its band - one position further along each time.
+    ///
+    /// Read as source text, like the test above and for the same reason: adding
+    /// a third scanner and forgetting this line compiles perfectly, and the
+    /// symptom shows up a week later as "the app forgot where I was tuned".
+    #[test]
+    fn every_scanner_gives_the_tuner_back_on_quit() {
+        let body = include_str!("mod.rs")
+            .split_once("fn restore_sweep_tuning(&self) {")
+            .expect("restore_sweep_tuning has been renamed")
+            .1
+            .split_once("\n    fn ")
+            .expect("restore_sweep_tuning no longer ends")
+            .0;
+        for scanner in ["m.sweep.end(", "m.net.end("] {
+            assert!(
+                body.contains(scanner),
+                "{scanner} is missing: quitting mid-scan will save the scan position"
+            );
+        }
     }
 
     #[test]

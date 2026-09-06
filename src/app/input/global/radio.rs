@@ -123,10 +123,14 @@ pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) -> bool {
     // measured at, so the panel goes on showing the last pass while the new mode
     // fills in over it. Clearing it here would throw away good measurements to
     // make a point about the mode.
-    let where_to = m.radio.frequency as f64 / 1e6;
-    m.push_log(match mode {
-        crate::state::NetMode::Lock => format!("NET locked to {where_to:.3} MHz"),
-        crate::state::NetMode::Survey => "NET surveying the band".to_string(),
-    });
+    //
+    // **The lock is not logged here**, and that is the fix rather than an
+    // omission: this handler knows the mode the user asked for, not the
+    // frequency the radio ends on, and it used to name the current hop in a
+    // line the survey task then falsified by retuning somewhere else. The task
+    // logs it, once, with the frequency it actually left the radio on.
+    if mode == crate::state::NetMode::Survey {
+        m.push_log("NET surveying the band".to_string());
+    }
     true
 }

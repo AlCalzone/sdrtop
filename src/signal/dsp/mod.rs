@@ -35,6 +35,7 @@ pub mod nco;
 pub mod resample;
 #[cfg(test)]
 pub mod testkit;
+pub mod uncertainty;
 pub mod window;
 
 pub use window::{compute_window, WindowFn};

@@ -34,6 +34,7 @@ use ratatui::{
 use crate::signal::net::{band, occupancy};
 use crate::state::{BandOccupancy, CellReading, SdrMetrics};
 use crate::ui::panel::{Panel, PanelChrome, Staleness};
+use crate::ui::widgets::reading::Reading;
 
 pub struct NetOccupancyPanel;
 
@@ -193,20 +194,52 @@ fn lines(occ: &BandOccupancy, theme: &crate::Theme, width: usize) -> Vec<Line<'s
         .filter(|(_, c)| c.observed() && c.duty > 0.0)
         .max_by(|a, b| a.1.duty.total_cmp(&b.1.duty));
     out.push(match busiest {
-        Some((cell, c)) => Line::from(vec![
-            Span::styled("busiest      ", dim),
-            Span::styled(
-                format!("{:.0} MHz", occupancy::cell_centre_hz(cell) / 1_000_000),
-                Style::default().fg(theme.value_hi),
-            ),
-            Span::styled(format!("   {:.1} % busy", c.duty * 100.0), dim),
-            Span::styled(
+        Some((cell, c)) => {
+            let mut spans = vec![
+                Span::styled("busiest      ", dim),
+                Span::styled(
+                    format!("{:.0} MHz", occupancy::cell_centre_hz(cell) / 1_000_000),
+                    Style::default().fg(theme.value_hi),
+                ),
+                Span::raw("  "),
+            ];
+            // The duty cycle through idiom A, with the spread its window count
+            // supports: a cell watched for a sixth of the time is not a sixth as
+            // busy, it is as busy with a wider bar. `resolution` is the tenth of
+            // a percent the reading is shown to, which is the difference that
+            // matters here by construction.
+            spans.extend(
+                Reading::new(
+                    occupancy::duty_uncertain(c.duty, c.windows).scale(100.0),
+                    "% busy",
+                    occupancy::DUTY_RESOLUTION * 100.0,
+                )
+                .spans(theme),
+            );
+            spans.push(Span::styled(
                 format!("   {:.1} peak, {:.1} mean dBFS", c.peak_dbfs, c.mean_dbfs),
                 dim,
-            ),
-        ]),
+            ));
+            Line::from(spans)
+        }
         None => Line::from(Span::styled("busiest      nothing above the floor", dim)),
     });
+
+    // How much of the time the band was actually under the receiver, which is
+    // what the mode costs and the one number that says it in figures rather than
+    // as a word in the chrome.
+    let covered: Vec<f64> = occ.cells.iter().filter_map(|c| c.coverage).collect();
+    out.push(Line::from(Span::styled(
+        match covered.len() {
+            0 => "coverage     — · every cell measured once so far".to_string(),
+            n => format!(
+                "coverage     {:.0} % of the time, on {n} of {} cells",
+                covered.iter().sum::<f64>() / n as f64 * 100.0,
+                occupancy::CELLS
+            ),
+        },
+        dim,
+    )));
 
     let cols = columns(&occ.cells, width);
     for row in 0..ROWS {
@@ -249,8 +282,10 @@ impl Panel for NetOccupancyPanel {
         (40, 8)
     }
 
-    fn chrome(&self, _state: &SdrMetrics) -> PanelChrome {
-        PanelChrome::new("Band Occupancy").stale_when(Staleness::NotStreaming)
+    fn chrome(&self, state: &SdrMetrics) -> PanelChrome {
+        PanelChrome::new("Band Occupancy")
+            .stale_when(Staleness::NotStreaming)
+            .tag_if(true, state.net.mode.tag())
     }
 
     fn render(
@@ -297,12 +332,67 @@ mod tests {
             trusted: true,
             tail: 2.07,
             spread: 40.2,
+            window_s: 6.4e-6,
         };
         m
     }
 
     /// The panel's whole job: a cell nobody looked at does not read as a cell
     /// with nothing in it.
+    /// The mode costs coverage, and the panel says so in figures as well as in
+    /// the word on its nameplate.
+    #[test]
+    fn the_panel_reports_what_fraction_of_the_time_it_was_looking() {
+        let mut m = surveyed();
+        for c in m.net.band.cells.iter_mut().filter(|c| c.observed()) {
+            c.coverage = Some(0.16);
+        }
+        let out = draw(NetOccupancyPanel, 80, 12, &m).join("\n");
+        assert!(out.contains("16 % of the time"), "{out}");
+        assert!(out.contains("[SURVEY]"), "{out}");
+
+        // Locked, the same cells are watched all the time.
+        let mut m = surveyed();
+        m.net.mode = crate::state::NetMode::Lock;
+        for c in m.net.band.cells.iter_mut().filter(|c| c.observed()) {
+            c.coverage = Some(1.0);
+        }
+        let out = draw(NetOccupancyPanel, 80, 12, &m).join("\n");
+        assert!(out.contains("100 % of the time"), "{out}");
+        assert!(out.contains("[LOCK]"), "{out}");
+
+        // Before a cell has been measured twice the question has no answer, and
+        // the panel says that rather than guessing at one.
+        let out = draw(NetOccupancyPanel, 80, 12, &surveyed()).join("\n");
+        assert!(out.contains("every cell measured once so far"), "{out}");
+    }
+
+    /// The busiest reading prints, which is a claim about the dwell as much as
+    /// about the widget.
+    ///
+    /// `Reading` dashes a value its uncertainty cannot support, so this passes
+    /// only while the duty cycle's binomial error is inside the resolution the
+    /// panel shows it at. It was not, at first: N14 declared a tenth of a
+    /// percent that a fifty-millisecond dwell cannot pay for, and this is the
+    /// assertion that would have caught it.
+    #[test]
+    fn the_busiest_cell_prints_a_number_rather_than_a_dash() {
+        let mut m = surveyed();
+        m.net.band.cells[41].windows = 7_800;
+        let out = draw(NetOccupancyPanel, 80, 12, &m);
+        let line = out
+            .iter()
+            .find(|l| l.contains("busiest"))
+            .expect("a busiest line");
+        assert!(line.contains("2441 MHz"), "{line}");
+        assert!(line.contains("95."), "{line}");
+        assert!(
+            line.contains('±'),
+            "the sampling spread travels with it: {line}"
+        );
+        assert!(!line.contains('—'), "{line}");
+    }
+
     #[test]
     fn unobserved_and_empty_are_drawn_differently() {
         let m = surveyed();

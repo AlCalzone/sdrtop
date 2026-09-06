@@ -120,14 +120,24 @@ pub const TAIL_SHAPE: f64 = 2.054_079_717_745_686;
 /// nothing else, and reading it costs one more quantile.
 pub const TAIL_LIMIT: f64 = 2.409_420_839_653_209;
 
-/// The duty cycle is displayed to a tenth of a percent.
-pub const DUTY_RESOLUTION: f64 = 0.001;
+/// The duty cycle is displayed to a whole percent.
+///
+/// **It was a tenth of a percent, and that was a claim the measurement could not
+/// pay for.** A duty cycle over `n` windows carries a binomial standard error of
+/// `sqrt(d(1-d)/n)`, which at the eight thousand windows a dwell produces is a
+/// quarter of a percent - so a tenth-of-a-percent reading would have been two
+/// and a half times finer than its own uncertainty. Reaching a tenth honestly
+/// needs a quarter of a million windows, which is one and a half seconds of
+/// observation per cell and ten seconds a pass while surveying: too slow to
+/// watch. Nothing said so until [`crate::ui::widgets::reading::Reading`] was
+/// asked to print the number and refused, which is what that widget is for.
+pub const DUTY_RESOLUTION: f64 = 0.01;
 
 /// So the detector is allowed to be wrong an order of magnitude less often than
 /// the last digit it is shown to.
 ///
 /// This is the whole justification, and it is a fact about this program rather
-/// than a number from a table. It buys a threshold of `-ln(1e-4)`, which is 9.6
+/// than a number from a table. It buys a threshold of `-ln(1e-3)`, which is 8.4
 /// dB above the noise floor.
 pub const FALSE_ALARM: f64 = DUTY_RESOLUTION / 10.0;
 
@@ -274,6 +284,28 @@ fn above(plane: &[f64], threshold: f64) -> f64 {
     plane.iter().filter(|p| **p > threshold).count() as f64 / plane.len() as f64
 }
 
+/// A duty cycle with the uncertainty its window count supports.
+///
+/// **This is what sampling actually costs, and it is not the magnitude.** A
+/// channel busy all the time, watched a sixth of the time, is busy all the time;
+/// scaling its reading down to a sixth would be a wrong number, not a sampled
+/// one. What a shorter look costs is certainty, and for a fraction of `n`
+/// independent windows that is the binomial standard error, `sqrt(d(1-d)/n)`.
+///
+/// It is the estimator's own spread and not the whole story - a burst pattern
+/// correlated with the hop rhythm would beat it, and design section 13.1's
+/// warning about survey and lock being different claims is the part no error bar
+/// can carry. Which is why the mode is a tag on the panel as well as a sigma on
+/// the number.
+pub fn duty_uncertain(duty: f64, windows: u64) -> crate::signal::dsp::uncertainty::Uncertain {
+    use crate::signal::dsp::uncertainty::Uncertain;
+    if windows == 0 {
+        return Uncertain::from_sigma(duty, f64::INFINITY);
+    }
+    let d = duty.clamp(0.0, 1.0);
+    Uncertain::from_variance(duty, d * (1.0 - d) / windows as f64)
+}
+
 /// The `q`-th value of the plane, by selection rather than by a full sort.
 ///
 /// Reorders in place, which is why the caller owns the buffer: a dwell is tens
@@ -329,7 +361,9 @@ mod tests {
         assert!((TAIL_LIMIT - (1.0 - q / noise).ln() / (1.0 - q / 2.0 / noise).ln()).abs() < 1e-12);
         assert!((TAIL_LIMIT - 0.5f64.ln() / 0.75f64.ln()).abs() < 1e-12);
         // The threshold the false-alarm rate buys, in decibels above the floor.
-        assert!((-10.0 * FALSE_ALARM.log10() * std::f64::consts::LN_10 / 10.0 - 9.21).abs() < 0.01);
+        assert!(
+            (-10.0 * FALSE_ALARM.log10() * std::f64::consts::LN_10 / 10.0 - 6.908).abs() < 0.01
+        );
     }
 
     #[test]
@@ -422,8 +456,8 @@ mod tests {
         );
         assert!((f.threshold / f.power + FALSE_ALARM.ln()).abs() < 1e-12);
         assert!(
-            (f.threshold / f.power - 9.21).abs() < 0.01,
-            "9.6 dB above the floor: {}",
+            (f.threshold / f.power - 6.908).abs() < 0.01,
+            "8.4 dB above the floor: {}",
             f.threshold / f.power
         );
         assert!(f.trusted);
@@ -570,8 +604,38 @@ mod tests {
                 f.threshold
             );
             // And a cell nobody transmitted in reads empty, not "no data".
-            assert_eq!(duty_of(&p[1], &f), 0.0);
+            //
+            // Empty to the resolution it is shown at, rather than exactly zero:
+            // the correction removes the *expected* false-alarm floor and what
+            // is left is the Poisson noise on it, four counts in four thousand
+            // windows. That residual is an order of magnitude under
+            // `DUTY_RESOLUTION`, which is the whole reason `FALSE_ALARM` is a
+            // tenth of it.
+            let quiet = duty_of(&p[1], &f);
+            assert!(quiet < DUTY_RESOLUTION, "a quiet cell read {quiet}");
         }
+    }
+
+    /// Sampling costs certainty, not magnitude.
+    #[test]
+    fn a_shorter_look_widens_the_reading_rather_than_shrinking_it() {
+        let long = duty_uncertain(0.5, 40_000);
+        let short = duty_uncertain(0.5, 400);
+        assert_eq!(long.value(), short.value(), "the value is the value");
+        assert!(
+            short.sigma() > long.sigma() * 9.0,
+            "ten times fewer windows"
+        );
+        // The closed form, so the bound is arithmetic rather than a feeling.
+        assert!((long.sigma() - (0.25f64 / 40_000.0).sqrt()).abs() < 1e-12);
+
+        // A saturated channel has no spread at all: every window said yes and
+        // there is nothing left for the sampling to have got wrong.
+        assert_eq!(duty_uncertain(1.0, 400).sigma(), 0.0);
+        assert_eq!(duty_uncertain(0.0, 400).sigma(), 0.0);
+        // And a cell nobody measured has an uncertainty nobody can write down,
+        // which `Reading` already knows how to refuse.
+        assert!(!duty_uncertain(0.0, 0).sigma().is_finite());
     }
 
     /// An empty band reads zero, and a full one reads one, and neither runs off

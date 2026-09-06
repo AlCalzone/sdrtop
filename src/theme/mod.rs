@@ -192,9 +192,22 @@ mod tests {
     use super::*;
 
     /// Write `text` to `<tmp>/<name>.toml` and return the directory.
+    ///
+    /// **One directory per call, not per theme name.** Two tests wrote a good
+    /// `tokyonight.toml` and a malformed one into the same path, ran
+    /// concurrently, and whichever finished first deleted the directory out from
+    /// under the other. It failed about once in fifty runs, which is the worst
+    /// rate for a flake to have: often enough to matter, rarely enough to be
+    /// blamed on whatever was changed that week.
     fn themes_dir_with(name: &str, text: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("sdrtop-theme-test-{}-{}", name, std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sdrtop-theme-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{name}.toml")), text).unwrap();
         dir

@@ -81,6 +81,10 @@ impl Panel for NetCapabilityPanel {
         // Nothing here is a reading, so nothing here can go stale. The record it
         // draws was written when the device was opened and is true until it is
         // closed.
+        // No mode tag, and this is the panel that proves the rule has an edge
+        // rather than being applied by habit: nothing here is a reading. It is
+        // the capability record built when the device was opened, and it is the
+        // same record whether the radio is hopping or parked.
         PanelChrome::new("Band Capability").stale_when(Staleness::Never)
     }
 

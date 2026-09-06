@@ -220,6 +220,12 @@ impl Scan {
                     0.0
                 }),
                 peak_dbfs: dbfs(self.peak[c]),
+                // A dwell knows nothing about how often it happens. Coverage
+                // and the time of measurement are `BandOccupancy::absorb`'s to
+                // fill in, because both are about the sequence of dwells rather
+                // than about this one.
+                coverage: None,
+                measured: None,
             })
             .collect();
         let n = self.floors.max(1) as f64;
@@ -229,6 +235,7 @@ impl Scan {
             trusted: self.floors > 0 && self.trusted,
             tail: self.tail_sum / n,
             spread: self.spread_sum / n,
+            window_s: self.n as f64 / self.rate_hz.max(1.0),
         };
         self.reset();
         out

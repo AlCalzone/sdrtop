@@ -39,8 +39,10 @@ use super::scan::Scan;
 /// the measurement can be tested without a clock, which is how the end-to-end
 /// test below exists at all.
 ///
-/// Fifty milliseconds is about eight thousand windows, so the duty cycle it
-/// supports is finer than the tenth of a percent it is shown to, and it
+/// Fifty milliseconds is about eight thousand windows. The duty cycle that
+/// supports is good to a quarter of a percent, which is finer than the whole
+/// percent it is shown to and not by much - see
+/// [`super::occupancy::DUTY_RESOLUTION`], where the two were made to agree. It
 /// publishes at most twenty times a second against a screen that redraws thirty.
 const DWELL_S: f64 = 0.05;
 
@@ -166,7 +168,7 @@ impl NetWorker {
                 if scan.observed_s() >= DWELL_S {
                     let band = scan.take();
                     let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    m.net.band = band;
+                    m.net.band.absorb(band, now);
                 }
             }
 
@@ -370,12 +372,11 @@ mod tests {
 
     /// A dwell is published when it is a dwell, and not before.
     ///
-    /// The duty cycle is shown to a tenth of a percent, and a fraction measured
-    /// over four hundred windows cannot support that: it can only take the
-    /// values a quarter of a percent apart. Publishing whatever has arrived so
-    /// far would put a number on screen finer than the observation behind it,
-    /// which is the same mistake `Uncertain::decimals` exists to prevent one
-    /// layer up.
+    /// A fraction measured over four hundred windows can only take values a
+    /// quarter of a percent apart, and carries a standard error four times
+    /// coarser than that. Publishing whatever has arrived so far would put a
+    /// number on screen finer than the observation behind it, which is the same
+    /// mistake `Uncertain::decimals` exists to prevent one layer up.
     #[test]
     fn a_partial_dwell_is_not_published() {
         let mut m = SdrMetrics::fixture().streaming();

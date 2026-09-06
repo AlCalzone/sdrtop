@@ -187,6 +187,63 @@ mod tests {
         );
     }
 
+    /// **Every panel in the NET section says how its numbers were gathered.**
+    ///
+    /// Design section 13.1 makes the mode part of the reading rather than a
+    /// setting: a duty-cycle-sampled census and a complete capture are different
+    /// claims, and a panel that shows one while the other was running is stating
+    /// the wrong one. Asserted here rather than in each panel's own tests,
+    /// because the rule is about the section and a rule enforced panel by panel
+    /// is a rule the next panel will not know about.
+    ///
+    /// **The exemption is checkable rather than a list of names.** A panel may
+    /// skip the tag only if it declares `Staleness::Never` - that is a panel
+    /// saying nothing on it goes out of date, which is a panel saying nothing on
+    /// it is a reading. `net_capability` qualifies: it draws the record built
+    /// when the device was opened, which is the same record hopping or parked.
+    /// A panel that wanted out of this rule by simply not carrying the tag would
+    /// have to claim its numbers never age, which is a much harder thing to
+    /// write by accident.
+    #[test]
+    fn every_net_panel_says_how_its_numbers_were_gathered() {
+        use crate::state::{NetMode, SdrMetrics};
+        use crate::ui::panel::Staleness;
+
+        let (engine, _) = App::build_ui("net", &HashMap::new(), None, true);
+        let mut seen = 0;
+        for mode in [NetMode::Survey, NetMode::Lock] {
+            let mut m = SdrMetrics::fixture();
+            m.net.mode = mode;
+            for panel in engine.registered_panels() {
+                if !panel.name().starts_with("net_") {
+                    continue;
+                }
+                seen += 1;
+                let chrome = panel.chrome(&m);
+                if chrome.staleness == Staleness::Never {
+                    assert!(
+                        !chrome.tags.contains(&mode.tag()),
+                        "{}: a panel with nothing that ages has no mode to report",
+                        panel.name()
+                    );
+                    continue;
+                }
+                assert!(
+                    chrome.tags.contains(&mode.tag()),
+                    "{} carries readings but does not say it is in {}",
+                    panel.name(),
+                    mode.label()
+                );
+                assert!(
+                    !chrome.tags.contains(&mode.toggled().tag()),
+                    "{} claims both modes at once",
+                    panel.name()
+                );
+            }
+        }
+        assert!(seen >= 4, "only {seen} net panels were checked");
+    }
+
     /// Two panels claiming one key must be *reported*, not silently resolved.
     ///
     /// `HashMap::insert` would drop one of them, which is exactly how `v` and `t`

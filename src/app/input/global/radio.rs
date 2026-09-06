@@ -99,3 +99,28 @@ pub(super) fn begin_sample_rate_input(ctx: &mut InputCtx<'_>) {
         lo, hi
     ));
 }
+
+/// `[m]` - survey the band, or lock to where the radio is pointed.
+///
+/// A key that does nothing outside the NET section, which is the same shape as
+/// the gain keys doing nothing on a radio with no such stage: the deck says what
+/// is available and a key that has no meaning here quietly has none. Design
+/// section 13.1 makes this a mode rather than a setting, so switching it changes
+/// what every reading in the section *claims*, not just what the receiver does.
+pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) {
+    let mut m = metrics(ctx.state);
+    if !m.ui.is_net_section() {
+        return;
+    }
+    let mode = m.net.mode.toggled();
+    m.net.mode = mode;
+    // The band keeps what it measured, and every cell keeps the time it was
+    // measured at, so the panel goes on showing the last pass while the new mode
+    // fills in over it. Clearing it here would throw away good measurements to
+    // make a point about the mode.
+    let where_to = m.radio.frequency as f64 / 1e6;
+    m.push_log(match mode {
+        crate::state::NetMode::Lock => format!("NET locked to {where_to:.3} MHz"),
+        crate::state::NetMode::Survey => "NET surveying the band".to_string(),
+    });
+}

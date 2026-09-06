@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 MusiThang <viktor.laszlo92@protonmail.com>
 
+mod net;
 mod observer;
 mod rx;
 mod sweep;
 mod system;
 
+pub use net::spawn_net_survey_task;
 pub use observer::spawn_observer_task;
 pub use rx::spawn_rx_task;
 pub use sweep::spawn_sweep_task;

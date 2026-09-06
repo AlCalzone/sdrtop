@@ -167,11 +167,13 @@ impl Panel for NetDecodeHealthPanel {
         (44, 12)
     }
 
-    fn chrome(&self, _state: &SdrMetrics) -> PanelChrome {
+    fn chrome(&self, state: &SdrMetrics) -> PanelChrome {
         // Every number here is a count of something that arrived, so it goes out
         // of date the moment the samples stop. The engine tags and cools it; the
         // panel only declares which rule it lives under.
-        PanelChrome::new("Feed Health").stale_when(Staleness::NotStreaming)
+        PanelChrome::new("Feed Health")
+            .stale_when(Staleness::NotStreaming)
+            .tag_if(true, state.net.mode.tag())
     }
 
     fn render(

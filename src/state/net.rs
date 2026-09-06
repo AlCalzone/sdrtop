@@ -22,7 +22,6 @@ pub enum NetMode {
     #[default]
     Survey,
     /// Parked on one channel.
-    #[allow(dead_code)] // set by the survey/lock control at N15
     Lock,
 }
 
@@ -33,6 +32,27 @@ impl NetMode {
         match self {
             NetMode::Survey => "SURVEY",
             NetMode::Lock => "LOCK",
+        }
+    }
+
+    /// The chrome tag every panel in the section carries.
+    ///
+    /// A panel says *which claim its numbers are*, and the engine spells and
+    /// colours it, which is the rule for every tag. Design section 13.1: the
+    /// mode is part of the reading, so this is not optional for a panel here and
+    /// `every_net_panel_says_how_its_numbers_were_gathered` is what makes that
+    /// true rather than customary.
+    pub fn tag(self) -> crate::ui::panel::Tag {
+        match self {
+            NetMode::Survey => crate::ui::panel::Tag::Survey,
+            NetMode::Lock => crate::ui::panel::Tag::Lock,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            NetMode::Survey => NetMode::Lock,
+            NetMode::Lock => NetMode::Survey,
         }
     }
 }
@@ -104,6 +124,22 @@ pub struct CellReading {
     /// Mean and peak power in the cell, relative to the converter's full scale.
     pub mean_dbfs: f64,
     pub peak_dbfs: f64,
+    /// What fraction of wall time this cell was actually under observation,
+    /// between its last two measurements.
+    ///
+    /// About one in [`crate::signal::net::survey::Plan::hops`] while surveying,
+    /// and one while locked. `None` until a cell has been measured twice, which
+    /// is when the question first has an answer.
+    ///
+    /// **The duty cycle is not scaled by this**, and the temptation to is worth
+    /// naming: a channel busy all the time, seen for a sixth of the time, is
+    /// busy all the time. Scaling its reading to sixteen percent would not be a
+    /// sampled measurement, it would be a wrong one. What sampling costs is
+    /// certainty, not magnitude, and that is carried by the window count and
+    /// reported as an uncertainty.
+    pub coverage: Option<f64>,
+    /// When this cell was last measured.
+    pub measured: Option<std::time::Instant>,
 }
 
 impl CellReading {
@@ -129,4 +165,171 @@ pub struct BandOccupancy {
     /// believed.
     pub tail: f64,
     pub spread: f64,
+    /// How long one transform window was. The resolution every duty cycle here
+    /// was measured at, and what turns a window count back into seconds.
+    pub window_s: f64,
+}
+
+impl BandOccupancy {
+    /// Fold one dwell into the band, keeping every cell the dwell did not see.
+    ///
+    /// **This is what makes a survey a survey.** Each dwell measures the slice
+    /// the radio was pointed at; the rest of the band keeps what the last pass
+    /// found there, with the time it was found. A dwell that replaced the whole
+    /// band would leave a receiver seeing a fifth of it reporting the other four
+    /// fifths as unobserved on every frame, which is a picture of the receiver
+    /// rather than of the band.
+    ///
+    /// The floor is the receiver's rather than the position's, so the newest one
+    /// wins outright: it is a fact about the front end at this gain, and the
+    /// front end does not change between hops.
+    pub fn absorb(&mut self, dwell: BandOccupancy, now: std::time::Instant) {
+        if self.cells.len() != dwell.cells.len() {
+            self.cells = vec![CellReading::default(); dwell.cells.len()];
+        }
+        for (old, new) in self.cells.iter_mut().zip(dwell.cells.iter()) {
+            if new.windows == 0 {
+                continue;
+            }
+            let observed_s = new.windows as f64 * dwell.window_s;
+            // Coverage needs two measurements to be a fraction of anything, and
+            // the honest answer before that is that nobody knows yet.
+            let coverage = old.measured.map(|then| {
+                let elapsed = now.duration_since(then).as_secs_f64();
+                if elapsed > 0.0 {
+                    (observed_s / elapsed).min(1.0)
+                } else {
+                    1.0
+                }
+            });
+            *old = CellReading {
+                coverage,
+                measured: Some(now),
+                ..*new
+            };
+        }
+        self.noise_dbfs = dwell.noise_dbfs;
+        self.trusted = dwell.trusted;
+        self.tail = dwell.tail;
+        self.spread = dwell.spread;
+        self.window_s = dwell.window_s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// One dwell's worth of band: `cells` measured, the rest untouched.
+    fn dwell(cells: &[(usize, f64, u64)]) -> BandOccupancy {
+        let mut out = BandOccupancy {
+            cells: vec![CellReading::default(); 83],
+            noise_dbfs: Some(-78.0),
+            trusted: true,
+            tail: 2.1,
+            spread: 30.0,
+            window_s: 6.4e-6,
+        };
+        for &(c, duty, windows) in cells {
+            out.cells[c] = CellReading {
+                windows,
+                duty,
+                mean_dbfs: -60.0,
+                peak_dbfs: -30.0,
+                coverage: None,
+                measured: None,
+            };
+        }
+        out
+    }
+
+    /// **This is what makes a survey a survey.** Each dwell sees one slice; the
+    /// band keeps what the last pass found everywhere else.
+    ///
+    /// Without it, a receiver seeing a fifth of the band would report the other
+    /// four fifths as unobserved on every frame, which is a picture of the
+    /// receiver rather than of the band, and the panel's whole
+    /// observed-versus-unobserved distinction would collapse to "wherever the
+    /// radio happens to be pointed this instant".
+    #[test]
+    fn a_dwell_folds_into_the_band_rather_than_replacing_it() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+
+        band.absorb(dwell(&[(10, 0.4, 8_000)]), t0);
+        assert_eq!(band.cells[10].duty, 0.4);
+        assert!(band.cells[10].observed());
+
+        // A second dwell somewhere else does not take the first one with it.
+        band.absorb(dwell(&[(60, 0.9, 8_000)]), t0 + Duration::from_millis(300));
+        assert_eq!(band.cells[60].duty, 0.9);
+        assert_eq!(
+            band.cells[10].duty, 0.4,
+            "the other end of the band is still what the last pass found"
+        );
+        assert!(band.cells[10].observed());
+        // And a cell no pass has reached yet is still unobserved, which is a
+        // different answer from empty.
+        assert!(!band.cells[30].observed());
+    }
+
+    /// Sampling costs certainty, not magnitude.
+    ///
+    /// A channel busy all the time, watched a sixth of the time, is busy all the
+    /// time. Scaling its reading to sixteen percent would not be a sampled
+    /// measurement, it would be a wrong one - and it is the obvious thing to
+    /// write, which is why it is asserted against.
+    #[test]
+    fn the_coverage_is_reported_and_never_multiplied_into_the_duty_cycle() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+
+        // A saturated cell, measured over 8000 windows of 6.4 us: 51 ms of
+        // looking.
+        band.absorb(dwell(&[(10, 1.0, 8_000)]), t0);
+        assert_eq!(band.cells[10].duty, 1.0);
+        assert_eq!(
+            band.cells[10].coverage, None,
+            "one measurement is not a fraction of anything yet"
+        );
+
+        // A pass later - 625 ms - the same cell is measured again.
+        band.absorb(dwell(&[(10, 1.0, 8_000)]), t0 + Duration::from_millis(625));
+        assert_eq!(band.cells[10].duty, 1.0, "still busy all the time");
+        let coverage = band.cells[10].coverage.expect("two measurements");
+        assert!(
+            (coverage - 0.0819).abs() < 0.001,
+            "51 ms of looking in 625: {coverage}"
+        );
+    }
+
+    /// Locked, the receiver is looking almost all the time, and the coverage
+    /// says so rather than being pinned to one by the mode.
+    #[test]
+    fn locking_shows_as_coverage_rather_than_being_assumed() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0);
+        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0 + Duration::from_millis(52));
+        let coverage = band.cells[10].coverage.unwrap();
+        assert!(coverage > 0.95, "{coverage}");
+        // It never exceeds one, however the clock lands.
+        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0 + Duration::from_millis(52));
+        assert!(band.cells[10].coverage.unwrap() <= 1.0);
+    }
+
+    /// The floor is the receiver's, not the position's, so the newest wins.
+    #[test]
+    fn the_newest_floor_is_the_bands_floor() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0);
+        let mut second = dwell(&[(60, 0.3, 8_000)]);
+        second.noise_dbfs = Some(-71.0);
+        second.trusted = false;
+        band.absorb(second, t0 + Duration::from_millis(300));
+        assert_eq!(band.noise_dbfs, Some(-71.0));
+        assert!(!band.trusted, "a front end on its rails is on its rails");
+    }
 }

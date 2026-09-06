@@ -125,6 +125,13 @@ impl LayoutEngine {
         self.registry.panels_iter().map(|p| p.name())
     }
 
+    /// Every registered panel, for the structural tests that ask each of them
+    /// the same question. Nothing outside a test has a reason to walk the deck.
+    #[cfg(test)]
+    pub fn registered_panels(&self) -> impl Iterator<Item = &Box<dyn crate::ui::panel::Panel>> {
+        self.registry.panels_iter()
+    }
+
     /// Names of all defined presets (built-in + user). Used by the footer to
     /// show only the lab presets that actually exist.
     pub fn preset_names(&self) -> Vec<String> {

@@ -42,6 +42,7 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         KeyCode::Char('r') => radio::reset_defaults(ctx),
         KeyCode::Char('f') => radio::begin_frequency_input(ctx),
         KeyCode::Char('s') => radio::begin_sample_rate_input(ctx),
+        KeyCode::Char('m') => radio::toggle_net_mode(ctx),
 
         // ── Gain staging ────────────────────────────────────────────────────
         KeyCode::Up => gain::step_primary(ctx, true),

@@ -182,6 +182,7 @@ impl App {
 
         tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
         tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));
+        tasks::spawn_net_survey_task(Arc::clone(&state), Arc::clone(&device));
         tasks::spawn_sys_resource_task(Arc::clone(&state));
 
         Ok(Self::assemble(

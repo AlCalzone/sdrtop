@@ -89,6 +89,17 @@ pub enum Tag {
     Stride(usize),
     /// `[↑N]` - how far back through the history the view is scrolled. Absent at 0.
     Scroll(usize),
+    /// `[SURVEY]` - the numbers on this panel were gathered by sampling the
+    /// band, not by watching all of it.
+    ///
+    /// **A duty-cycle-sampled census and a complete capture are different
+    /// claims**, and presenting one as the other is what rule 4 exists to
+    /// prevent. Design section 13.1 makes the mode part of the reading rather
+    /// than a setting, so every panel in the section that carries a number
+    /// carries this too, and a structural test says so.
+    Survey,
+    /// `[LOCK]` - parked on one channel: complete inside it, blind outside it.
+    Lock,
 }
 
 /// The *shape* of a panel's frame. Its colour is [`FrameTone`]; the two are

@@ -36,10 +36,13 @@ pub(super) struct SpectrumView {
 }
 
 impl SpectrumView {
-    /// Select the centre slice of the frame at `zoom`
+    /// Window `full_*` down to the centre `1/zoom` of its bins. A `zoom` of 1
+    /// (or a frame with nothing in it) returns the whole span, sharing the
+    /// frame's `Arc`s rather than copying.
     ///
-    /// The full view shares the frame's buffers. Empty frames have no view.
-    /// A held trace may have a different bin count.
+    /// `held` may have been captured at a different bin count than the live
+    /// frame, so it is windowed against its own length. Slicing it blind is a
+    /// panic waiting for the user to change sample rate while holding.
     pub fn new(
         bins: &Arc<Vec<f32>>,
         peaks: &Arc<Vec<f32>>,
@@ -55,6 +58,7 @@ impl SpectrumView {
         let hi = lo + window.bin_count;
 
         if lo == 0 && hi == full_n {
+            // Arc::clone is O(1) - no data copied.
             return Some(Self {
                 bins: Arc::clone(bins),
                 peaks: Arc::clone(peaks),
@@ -84,7 +88,7 @@ impl SpectrumView {
         self.left_hz + self.bw
     }
 
-    /// Return the right edge of the canvas in bin-interval units
+    /// Right edge of the canvas in bin-interval units.
     pub fn n(&self) -> f64 {
         self.bin_axis.interval_count(self.n_bins).unwrap_or(1) as f64
     }
@@ -92,6 +96,7 @@ impl SpectrumView {
     pub fn bin_end(&self, index: usize) -> f64 {
         match self.bin_axis {
             BinAxis::FftBins => (index + 1) as f64,
+            BinAxis::MeasuredPoints => index as f64,
         }
     }
 
@@ -163,6 +168,48 @@ mod tests {
     }
 
     #[test]
+    fn measured_point_zoom_keeps_the_slice_endpoints() {
+        let bins = ramp(64);
+        let v = SpectrumView::new(
+            &bins,
+            &ramp(64),
+            None,
+            131_500_000,
+            63_000_000.0,
+            4,
+            BinAxis::MeasuredPoints,
+        )
+        .unwrap();
+
+        assert_eq!(v.bins.first(), Some(&24.0));
+        assert_eq!(v.bins.last(), Some(&39.0));
+        assert_eq!(v.freq_of_bin(0), 124_000_000.0);
+        assert_eq!(v.freq_of_bin(15), 139_000_000.0);
+        assert_eq!(v.left_hz, 124_000_000.0);
+        assert_eq!(v.right_hz(), 139_000_000.0);
+    }
+
+    #[test]
+    fn bin_frequencies_map_to_their_canvas_positions() {
+        for axis in [BinAxis::FftBins, BinAxis::MeasuredPoints] {
+            let bins = ramp(32);
+            let view =
+                SpectrumView::new(&bins, &ramp(32), None, 100_000_000, 32_000_000.0, 1, axis)
+                    .unwrap();
+            for index in [0, 8, 16, 24, 31] {
+                let x = super::super::scale::freq_to_canvas_x(
+                    view.freq_of_bin(index),
+                    view.left_hz,
+                    view.bw,
+                    view.n(),
+                )
+                .unwrap();
+                assert!((x - index as f64).abs() < 1e-9, "{axis:?} bin {index}");
+            }
+        }
+    }
+
+    #[test]
     fn a_hold_captured_at_another_bin_count_does_not_panic() {
         // The user changed sample rate while holding: the snapshot is shorter
         // than the live frame, so the window has to clamp to its own length.
@@ -190,7 +237,7 @@ mod tests {
             92_800_000,
             2_000_000.0,
             1,
-            BinAxis::FftBins
+            BinAxis::FftBins,
         )
         .is_none());
         assert!(
@@ -201,7 +248,7 @@ mod tests {
                 92_800_000,
                 0.0,
                 1,
-                BinAxis::FftBins
+                BinAxis::FftBins,
             )
             .is_none(),
             "a zero sample rate has no span to draw"

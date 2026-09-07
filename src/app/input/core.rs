@@ -347,32 +347,56 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::time::Instant;
 
-    use crate::state::SdrMetrics;
+    use super::*;
+    use crate::state::{BinAxis, FftFrame, SdrMetrics};
     use crate::ui::{LayoutEngine, PanelRegistry};
 
     #[test]
     fn peak_jump_uses_the_captured_fft_frequency_after_retuning() {
-        let mut state = crate::state::SdrMetrics::fixture();
+        let mut state = SdrMetrics::fixture();
         state.radio.frequency = 100_000_000;
         state.radio.config_sample_rate = 32_000_000.0;
         let mut state = state.with_carrier(8_000_000.0, 70.0);
         state.radio.frequency = 200_000_000;
         let frame = state.waterfall.last_fft.as_ref().unwrap();
         assert_eq!(strongest_bin_frequency(frame), Some(108_000_000));
-        assert_eq!(frame.bin_axis, crate::state::BinAxis::FftBins);
+        assert_eq!(frame.bin_axis, BinAxis::FftBins);
         assert_eq!(frame.window(4).unwrap().span_hz, 8_000_000.0);
     }
 
     #[test]
     fn peak_jump_rejects_an_empty_frame() {
-        let state = crate::state::SdrMetrics::fixture().with_carrier(0.0, 70.0);
+        let state = SdrMetrics::fixture().with_carrier(0.0, 70.0);
         let mut frame = state.waterfall.last_fft.unwrap();
-        frame.bins_dbfs = std::sync::Arc::new(Vec::new());
+        frame.bins_dbfs = Arc::new(Vec::new());
         assert_eq!(strongest_bin_frequency(&frame), None);
+    }
+
+    #[test]
+    fn peak_jump_reaches_the_last_measured_point() {
+        let mut bins = vec![-90.0; 64];
+        bins[63] = -20.0;
+        let bins = Arc::new(bins);
+        let frame = FftFrame {
+            bins_dbfs: Arc::clone(&bins),
+            peak_hold: bins,
+            noise_floor: -90.0,
+            center_freq_hz: 131_500_000,
+            sample_rate: 63_000_000.0,
+            timestamp: Instant::now(),
+            peak_to_nf_db: 70.0,
+            channel_power_dbfs: -20.0,
+            occupied_bw_hz: 0,
+            enbw_hz: 0.0,
+            bin_axis: BinAxis::MeasuredPoints,
+        };
+
+        assert_eq!(strongest_bin_frequency(&frame), Some(163_000_000));
     }
 
     #[test]

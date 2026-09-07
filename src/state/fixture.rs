@@ -166,7 +166,7 @@ impl SdrMetrics {
         self
     }
 
-    /// Age the newest FFT frame past the IQ trace limit
+    /// Age the newest FFT frame past the IQ trace limit.
     pub(crate) fn with_stale_fft(mut self) -> Self {
         if let Some(fr) = self.waterfall.last_fft.as_mut() {
             fr.timestamp = Instant::now()

@@ -68,6 +68,16 @@ impl Columns {
                 col * visible_n / self.cols,
                 (col + 1) * visible_n / self.cols,
             ),
+            BinAxis::MeasuredPoints => {
+                let intervals = visible_n.saturating_sub(1);
+                let start = (col * intervals).div_ceil(self.cols);
+                let end = if col + 1 >= self.cols {
+                    visible_n
+                } else {
+                    ((col + 1) * intervals).div_ceil(self.cols)
+                };
+                (start, end)
+            }
         };
         let start = start.min(visible_n - 1);
         let end = end.max(start + 1).min(visible_n);
@@ -280,6 +290,8 @@ mod tests {
 
     #[test]
     fn singleton_and_zero_columns_do_not_underflow() {
+        // A zero-bin row and a zero zoom are both nonsense, and both used to be
+        // one subtraction away from panicking.
         let c = columns(1, 32, 40);
         let (lo, hi) = c.range(0);
         assert!(hi > lo);
@@ -303,5 +315,14 @@ mod tests {
                 "column {col}"
             );
         }
+    }
+    #[test]
+    fn measured_point_columns_follow_endpoint_coordinates() {
+        let window = BinAxis::MeasuredPoints
+            .window(131_500_000, 63_000_000.0, 64, 1)
+            .unwrap();
+        let columns = Columns::new(window, 40, BinAxis::MeasuredPoints);
+        assert_eq!(columns.range(0), (0, 2));
+        assert_eq!(columns.range(39), (62, 64));
     }
 }

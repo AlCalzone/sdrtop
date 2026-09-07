@@ -29,8 +29,10 @@ pub mod sysfs;
 mod traits;
 
 pub use discovery::{list_all_devices, open_device, DeviceKind, DeviceListing};
+#[cfg(test)]
+pub(crate) use traits::RateSet;
 pub use traits::{
-    Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, FeedHealth, GainModel, LevelUnit,
-    RxContext, SampleFormat, SampleGeometry, SdrDevice, SoftwareStack, StageSpec, StreamBlock,
-    IQ_TRACE_STALE_MS,
+    AcquisitionKind, Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, FeedHealth, GainModel,
+    LevelUnit, PowerTrace, RxContext, SampleFormat, SampleGeometry, SdrDevice, SoftwareStack,
+    StageSpec, StreamBlock, IQ_TRACE_STALE_MS,
 };

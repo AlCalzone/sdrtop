@@ -101,6 +101,9 @@ impl Panel for WaterfallPanel {
     fn name(&self) -> &'static str {
         "waterfall"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (40, 5)
     }

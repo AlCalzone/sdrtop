@@ -311,7 +311,7 @@ impl App {
                 recall_hz: recall,
             },
             display: DisplayConfig {
-                active_preset: self.engine.active_preset().to_string(),
+                active_preset: self.engine.saved_active_preset().to_string(),
                 waterfall_max_rows: wf_rows,
                 waterfall_palette: wf_palette,
                 spectrum_style: spec_style,

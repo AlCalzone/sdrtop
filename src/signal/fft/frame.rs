@@ -125,19 +125,8 @@ pub(super) fn average(
     decay_db: f32,
     initialized: &mut bool,
 ) {
-    if !*initialized {
-        smoothed.copy_from_slice(shifted);
-        peak.copy_from_slice(shifted);
-        *initialized = true;
-        return;
-    }
-    let one_minus = 1.0 - alpha;
-    for (s, &new) in smoothed.iter_mut().zip(shifted.iter()) {
-        *s = alpha * new + one_minus * *s;
-    }
-    for (p, &s) in peak.iter_mut().zip(smoothed.iter()) {
-        *p = (*p - decay_db).max(s);
-    }
+    crate::signal::stats::average_and_peak(shifted, smoothed, peak, alpha, decay_db, *initialized);
+    *initialized = true;
 }
 
 #[cfg(test)]
@@ -298,5 +287,46 @@ mod tests {
             s = alpha * target + (1.0 - alpha) * s;
         }
         assert!(s > 0.99, "EMA should converge to target, got {}", s);
+    }
+
+    #[test]
+    fn finite_iq_sequence_keeps_the_existing_average_and_peak_law() {
+        let mut smoothed = [0.0];
+        let mut peak = [0.0];
+        let mut initialized = false;
+        for sample in [-90.0, -80.0, -100.0] {
+            average(
+                &[sample],
+                &mut smoothed,
+                &mut peak,
+                0.2,
+                0.5,
+                &mut initialized,
+            );
+        }
+
+        assert!((smoothed[0] - -90.4).abs() < 1e-4);
+        assert!((peak[0] - -88.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn finite_iq_first_frame_and_reset_seed_both_traces() {
+        let mut smoothed = [-120.0; 2];
+        let mut peak = [0.0; 2];
+        let mut initialized = false;
+        for samples in [[-90.0, -80.0], [-100.0, -110.0]] {
+            average(
+                &samples,
+                &mut smoothed,
+                &mut peak,
+                0.2,
+                0.5,
+                &mut initialized,
+            );
+            assert!(initialized);
+            assert_eq!(smoothed, samples);
+            assert_eq!(peak, samples);
+            initialized = false;
+        }
     }
 }

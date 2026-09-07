@@ -52,12 +52,7 @@ pub(super) fn carrier(linear: &[f32], sample_rate: f64, noise_floor_db: f32) -> 
 ///
 /// `scratch` is the worker's reused buffer; nothing is allocated here.
 pub(super) fn noise_floor(smoothed: &[f32], scratch: &mut [f32]) -> f32 {
-    scratch.copy_from_slice(smoothed);
-    let count = (smoothed.len() / NOISE_FLOOR_FRACTION).max(1);
-    scratch.select_nth_unstable_by(count - 1, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scratch[..count].iter().sum::<f32>() / count as f32
+    crate::signal::stats::quietest_mean(smoothed, scratch, NOISE_FLOOR_FRACTION)
 }
 
 /// The SNR the worker publishes: the strongest real bin *near centre*, minus the
@@ -190,6 +185,18 @@ mod tests {
     fn a_single_bin_spectrum_has_a_floor() {
         let mut scratch = vec![0.0; 1];
         assert_eq!(noise_floor(&[-42.0], &mut scratch), -42.0);
+    }
+
+    #[test]
+    fn finite_iq_noise_floor_keeps_the_quietest_tenth_mean() {
+        let mut bins = [-20.0; 29];
+        bins[7] = -100.0;
+        bins[19] = -90.0;
+        bins[25] = -80.0;
+        let mut scratch = [0.0; 29];
+        assert_eq!(noise_floor(&bins, &mut scratch), -95.0);
+        bins.reverse();
+        assert_eq!(noise_floor(&bins, &mut scratch), -95.0);
     }
 
     /// `level_db` is the carrier's **total** power, spread evenly across the bins it

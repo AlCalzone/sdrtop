@@ -287,8 +287,6 @@ impl Worker {
                     effective_center_hz,
                     effective_span_hz,
                 }) => {
-                    self.center_hz = effective_center_hz;
-                    self.span_hz = effective_span_hz;
                     if let Some(context) = &self.rx_context {
                         let published = context
                             .power_tx
@@ -369,20 +367,18 @@ impl Worker {
                 let _ = reply.send(Ok(()));
             }
             Command::SetSpan(hz, reply) => {
-                let result = if !hz.is_finite() || hz <= 0.0 {
-                    Err(anyhow!("tinySA span must be a positive finite value"))
-                } else {
-                    let maximum = self.identity.model.maximum_hz() - MIN_FREQUENCY_HZ;
-                    self.span_hz = (hz.round() as u64).clamp(1, maximum);
-                    Ok(RateSet::new(
+                let maximum = self.identity.model.maximum_hz() - MIN_FREQUENCY_HZ;
+                let result = normalize_span(hz, maximum, self.settings.points).map(|span_hz| {
+                    self.span_hz = span_hz;
+                    RateSet::new(
                         hz,
                         Some(self.span_hz as f64),
                         self.settings
                             .rbw_khz
                             .map(|khz| (khz * 1_000.0).round() as u32)
                             .unwrap_or(0),
-                    ))
-                };
+                    )
+                });
                 let _ = reply.send(result);
             }
             Command::NoOp(reply) => {
@@ -416,6 +412,11 @@ impl Worker {
             self.identity.model.maximum_hz(),
         );
         let points = self.settings.points;
+        self.center_hz = window_center(start_hz, stop_hz);
+        self.span_hz = stop_hz - start_hz;
+        if self.span_hz < points as u64 {
+            bail!("tinySA scan span is too narrow for {points} points");
+        }
         let mut frequencies_hz = Vec::with_capacity(points as usize);
         let mut levels_dbm = Vec::with_capacity(points as usize);
         for segment in scan_segments(self.identity.model, start_hz, stop_hz, points) {
@@ -443,11 +444,14 @@ impl Worker {
                 interrupted => return Ok(interrupted),
             }
         }
+        if frequencies_hz.windows(2).any(|pair| pair[1] <= pair[0]) {
+            bail!("tinySA scan returned duplicate or descending frequencies");
+        }
         Ok(ScanResult::Complete {
-            frequencies_hz: uniform_display_frequencies(&frequencies_hz)?,
+            frequencies_hz,
             levels_dbm,
-            effective_center_hz: start_hz + (stop_hz - start_hz) / 2,
-            effective_span_hz: stop_hz - start_hz,
+            effective_center_hz: self.center_hz,
+            effective_span_hz: self.span_hz,
         })
     }
 
@@ -676,7 +680,7 @@ fn scan_segment(
             segment.points,
         ),
         levels_dbm,
-        effective_center_hz: segment.start_hz + (segment.stop_hz - segment.start_hz) / 2,
+        effective_center_hz: window_center(segment.start_hz, segment.stop_hz),
         effective_span_hz: segment.stop_hz - segment.start_hz,
     })
 }
@@ -806,7 +810,7 @@ fn capabilities(model: Model) -> DeviceCapabilities {
         trace_stale_ms: 5_000,
         freq_min_hz: MIN_FREQUENCY_HZ,
         freq_max_hz: model.maximum_hz(),
-        sample_rate_min_hz: 1.0,
+        sample_rate_min_hz: DEFAULT_POINTS as f64,
         sample_rate_max_hz: (model.maximum_hz() - MIN_FREQUENCY_HZ) as f64,
         default_frequency_hz: DEFAULT_FREQUENCY_HZ,
         default_sample_rate_hz: DEFAULT_SPAN_HZ as f64,
@@ -838,27 +842,15 @@ fn centered_window(center_hz: u64, span_hz: u64, minimum_hz: u64, maximum_hz: u6
     (start_hz, stop_hz)
 }
 
-fn uniform_display_frequencies(measured_hz: &[u64]) -> anyhow::Result<Vec<u64>> {
-    let first = *measured_hz
-        .first()
-        .context("tinySA scan returned no frequencies")?;
-    let last = *measured_hz
-        .last()
-        .context("tinySA scan returned no frequencies")?;
-    let intervals = measured_hz.len().saturating_sub(1) as u64;
-    if intervals == 0 {
-        bail!("tinySA scan returned only one frequency");
+fn window_center(start_hz: u64, stop_hz: u64) -> u64 {
+    start_hz + (stop_hz - start_hz) / 2
+}
+
+fn normalize_span(hz: f64, maximum_hz: u64, points: u32) -> anyhow::Result<u64> {
+    if !hz.is_finite() || hz <= 0.0 {
+        bail!("tinySA span must be a positive finite value");
     }
-    let step = last.saturating_sub(first) / intervals;
-    if step == 0 {
-        bail!(
-            "tinySA scan span is too narrow for {} points",
-            measured_hz.len()
-        );
-    }
-    Ok((0..measured_hz.len())
-        .map(|index| first + step * index as u64)
-        .collect())
+    Ok((hz.round() as u64).clamp(points as u64, maximum_hz))
 }
 
 fn scan_segments(model: Model, start_hz: u64, stop_hz: u64, points: u32) -> Vec<Segment> {
@@ -1022,27 +1014,34 @@ mod tests {
     }
 
     #[test]
-    fn float_rounded_firmware_frequencies_get_a_uniform_display_grid() {
+    fn float_rounded_firmware_frequencies_keep_the_measured_edges() {
         let measured = protocol::scan_frequencies(100_000_000, 200_000_000, 450);
         assert!(measured
             .windows(2)
             .any(|pair| pair[1] - pair[0] != measured[1] - measured[0]));
-        let display = uniform_display_frequencies(&measured).unwrap();
-        let step = display[1] - display[0];
-        assert!(display.windows(2).all(|pair| pair[1] - pair[0] == step));
-        assert_eq!(display[0], measured[0]);
-        assert!(display.last().unwrap().abs_diff(*measured.last().unwrap()) < 450);
+        let first = measured[0];
+        let last = *measured.last().unwrap();
+        assert_eq!(
+            crate::signal::power::trace_window(&measured),
+            Some((window_center(first, last), (last - first) as f64))
+        );
     }
 
     #[test]
-    fn a_span_too_narrow_for_the_point_count_is_rejected() {
-        assert!(uniform_display_frequencies(&[100_000, 100_000, 100_000]).is_err());
+    fn a_span_too_narrow_for_the_point_count_is_clamped() {
+        assert_eq!(
+            normalize_span(1.0, 959_900_000, DEFAULT_POINTS).unwrap(),
+            DEFAULT_POINTS as u64
+        );
+        let frequencies =
+            protocol::scan_frequencies(100_000, 100_000 + DEFAULT_POINTS as u64, DEFAULT_POINTS);
+        assert!(frequencies.windows(2).all(|pair| pair[1] > pair[0]));
     }
 
     #[test]
     fn an_edge_shift_becomes_the_next_scan_center() {
         let (start, stop) = centered_window(100_000, 10_000_000, 100_000, 960_000_000);
-        let effective_center = start + (stop - start) / 2;
+        let effective_center = window_center(start, stop);
         assert_eq!(effective_center, 5_100_000);
         assert_eq!(
             centered_window(effective_center, 1_000_000, 100_000, 960_000_000),

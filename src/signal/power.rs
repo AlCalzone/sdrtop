@@ -443,4 +443,13 @@ mod tests {
         assert_eq!(frame.frequency_of_bin(0), Some(100_000.0));
         assert_eq!(frame.frequency_of_bin(3), Some(100_003.0));
     }
+
+    #[test]
+    fn trace_window_accepts_only_bounded_grid_variation() {
+        assert_eq!(
+            trace_window(&[100_000, 200_001, 300_000]),
+            Some((200_000, 200_000.0))
+        );
+        assert_eq!(trace_window(&[100_000, 200_002, 300_000]), None);
+    }
 }

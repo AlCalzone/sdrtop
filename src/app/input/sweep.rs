@@ -111,13 +111,13 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                     _ => None,
                 }
             };
-            if let Some(hz) = target {
+            if let (Some(hz), Some(preset)) = (target, trace_preset_after_sweep(ctx.engine)) {
                 {
                     let mut m = metrics(state);
                     m.sweep.pending_tune = Some(hz);
                 }
                 ctx.engine.clear_focus();
-                ctx.engine.set_preset("spectrum_waterfall");
+                ctx.engine.set_preset(&preset);
                 let mut m = metrics(state);
                 m.ui.focused_panel = None;
                 m.ui.focused_panel_bindings = &[];
@@ -127,4 +127,31 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         _ => return global::handle(key, ctx),
     }
     KeyAction::Continue
+}
+
+fn trace_preset_after_sweep(engine: &crate::ui::LayoutEngine) -> Option<String> {
+    for preferred in ["spectrum_waterfall", "spectrum", "waterfall"] {
+        if engine.has_preset(preferred) {
+            return Some(preferred.to_string());
+        }
+    }
+    let mut compatible: Vec<String> = engine
+        .config
+        .presets
+        .iter()
+        .filter(|(_, preset)| {
+            let has_trace = preset
+                .panels
+                .iter()
+                .any(|panel| matches!(panel.name.as_str(), "spectrum" | "waterfall"));
+            let has_sweep = preset
+                .panels
+                .iter()
+                .any(|panel| matches!(panel.name.as_str(), "sweep_panel" | "micro_sweep_panel"));
+            has_trace && !has_sweep
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    compatible.sort();
+    compatible.into_iter().next()
 }

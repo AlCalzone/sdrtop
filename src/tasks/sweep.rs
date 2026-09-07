@@ -209,6 +209,7 @@ fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDev
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
                 saved_freq = m.radio.frequency;
                 saved_rx_enabled = m.radio.rx_enabled;
+                m.sweep.pre_sweep_hz = Some(saved_freq);
                 m.radio.rx_enabled = true;
                 m.sweep.cycle_count = 0;
                 m.sweep.generation = m.sweep.generation.wrapping_add(1);
@@ -259,26 +260,22 @@ fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDev
                 was_active = false;
                 applied = None;
                 failed = None;
-                let target = {
+                let exit = {
                     let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                    m.sweep.pending_tune.take().unwrap_or(saved_freq)
+                    m.sweep.end(saved_freq)
                 };
+                let target = exit.tune_hz;
                 let sweep_result = device.set_direct_sweep(None);
                 let tune_result = device.set_frequency(target);
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
                 m.radio.frequency = target;
-                m.radio.rx_enabled = if target != saved_freq {
-                    true
-                } else {
-                    saved_rx_enabled
-                };
-                m.sweep.cursor_frac = None;
+                m.radio.rx_enabled = if exit.jumped { true } else { saved_rx_enabled };
                 for result in [sweep_result, tune_result] {
                     if let Err(error) = result {
                         m.push_log(format!("Sweep restore error: {error}"));
                     }
                 }
-                m.push_log(if target != saved_freq {
+                m.push_log(if exit.jumped {
                     format!("Tuned to {:.3} MHz from sweep", target as f64 / 1e6)
                 } else {
                     "Sweep stopped".to_string()

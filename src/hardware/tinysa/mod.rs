@@ -4,7 +4,7 @@
 mod discovery;
 mod protocol;
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -232,6 +232,12 @@ enum ByteEvent {
     Command(Command),
 }
 
+#[derive(Clone, Copy)]
+enum ScanDrain {
+    Records(u32),
+    FrameClosed,
+}
+
 fn worker_entry(
     mut port: Box<dyn SerialPort>,
     command_rx: Receiver<Command>,
@@ -314,22 +320,19 @@ impl Worker {
                 }
                 Ok(ScanResult::Interrupted(command, abort_result)) => {
                     if let Err(error) = abort_result {
-                        let shutting_down = matches!(&command, Command::Shutdown(_));
                         let message = error.to_string();
                         self.stop_acquisition(&message);
                         reject_command(command, anyhow!(message));
-                        if shutting_down {
-                            return;
-                        }
-                        continue;
+                        return;
                     }
                     if !self.handle_command(command) || !self.drain_commands() {
                         return;
                     }
                 }
                 Err(error) => {
-                    let _ = abort_active_scan(&mut *self.port);
+                    best_effort_abort(&mut *self.port);
                     self.stop_acquisition(&error.to_string());
+                    return;
                 }
             }
         }
@@ -618,16 +621,11 @@ fn scan_segment(
     expected.extend_from_slice(b"\r\n{");
     let mut frame = Vec::with_capacity(2 + segment.points as usize * 3);
     for (index, expected_byte) in expected.into_iter().enumerate() {
-        match next_scan_byte(port, command_rx, inactivity_timeout)? {
-            ByteEvent::Byte(byte) if byte == expected_byte => {}
-            ByteEvent::Byte(byte) => {
-                bail!(
-                    "tinySA scan prelude byte {index} was 0x{byte:02x}, expected 0x{expected_byte:02x}"
-                )
-            }
-            ByteEvent::Command(command) => {
-                return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
-            }
+        let byte = next_port_byte(port, inactivity_timeout)?;
+        if byte != expected_byte {
+            bail!(
+                "tinySA scan prelude byte {index} was 0x{byte:02x}, expected 0x{expected_byte:02x}"
+            );
         }
     }
     frame.push(b'{');
@@ -635,7 +633,14 @@ fn scan_segment(
         let tag = match next_scan_byte(port, command_rx, inactivity_timeout)? {
             ByteEvent::Byte(byte) => byte,
             ByteEvent::Command(command) => {
-                return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
+                return Ok(ScanResult::Interrupted(
+                    command,
+                    abort_active_scan(
+                        port,
+                        ScanDrain::Records(segment.points - index),
+                        inactivity_timeout,
+                    ),
+                ))
             }
         };
         if tag == b'}' {
@@ -649,28 +654,32 @@ fn scan_segment(
         }
         frame.push(tag);
         for _ in 0..2 {
-            match next_scan_byte(port, command_rx, inactivity_timeout)? {
-                ByteEvent::Byte(byte) => frame.push(byte),
-                ByteEvent::Command(command) => {
-                    return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
-                }
-            }
+            frame.push(next_port_byte(port, inactivity_timeout)?);
         }
     }
     let close = match next_scan_byte(port, command_rx, inactivity_timeout)? {
         ByteEvent::Byte(byte) => byte,
         ByteEvent::Command(command) => {
-            return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
+            return Ok(ScanResult::Interrupted(
+                command,
+                abort_active_scan(port, ScanDrain::Records(0), inactivity_timeout),
+            ))
         }
     };
     frame.push(close);
     let levels_dbm = protocol::parse_scan_frame(&frame, segment.points, zero_dbm)?;
     for expected_byte in PROMPT {
-        match next_port_byte(port)? {
-            byte if byte == *expected_byte => {}
-            byte => bail!(
+        match next_scan_byte(port, command_rx, inactivity_timeout)? {
+            ByteEvent::Byte(byte) if byte == *expected_byte => {}
+            ByteEvent::Byte(byte) => bail!(
                 "tinySA emitted text after a scan frame: 0x{byte:02x} before the shell prompt"
             ),
+            ByteEvent::Command(command) => {
+                return Ok(ScanResult::Interrupted(
+                    command,
+                    abort_active_scan(port, ScanDrain::FrameClosed, inactivity_timeout),
+                ))
+            }
         }
     }
     Ok(ScanResult::Complete {
@@ -724,7 +733,7 @@ fn poll_scan_command(command_rx: &Receiver<Command>) -> anyhow::Result<Option<Co
     }
 }
 
-fn next_port_byte(port: &mut dyn SerialPort) -> anyhow::Result<u8> {
+fn next_port_byte(port: &mut dyn SerialPort, inactivity_timeout: Duration) -> anyhow::Result<u8> {
     let last_byte = Instant::now();
     loop {
         let mut byte = [0u8; 1];
@@ -733,7 +742,7 @@ fn next_port_byte(port: &mut dyn SerialPort) -> anyhow::Result<u8> {
             Ok(0) => bail!("tinySA disconnected during a scan"),
             Ok(_) => unreachable!(),
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                if last_byte.elapsed() >= RESPONSE_TIMEOUT {
+                if last_byte.elapsed() >= inactivity_timeout {
                     bail!("tinySA scan timed out");
                 }
             }
@@ -743,40 +752,91 @@ fn next_port_byte(port: &mut dyn SerialPort) -> anyhow::Result<u8> {
     }
 }
 
-fn abort_active_scan(port: &mut dyn SerialPort) -> anyhow::Result<()> {
+fn abort_active_scan<P>(
+    port: &mut P,
+    progress: ScanDrain,
+    inactivity_timeout: Duration,
+) -> anyhow::Result<()>
+where
+    P: Read + Write + ?Sized,
+{
+    const ABORT_REPLY: &[u8] = b"abort\r\nch> ";
+
     port.write_all(b"abort\r")
         .context("failed to send tinySA scan abort")?;
     port.flush().context("failed to flush tinySA scan abort")?;
-    let started = Instant::now();
+    let mut records = match progress {
+        ScanDrain::Records(records) => Some(records),
+        ScanDrain::FrameClosed => None,
+    };
+    let mut abort_reply_at = 0;
+    let mut bytes_read = 0usize;
     let mut last_byte = Instant::now();
-    let mut response = Vec::new();
+
+    while records.is_some() || abort_reply_at < ABORT_REPLY.len() {
+        let byte = read_abort_byte(port, inactivity_timeout, &mut last_byte, &mut bytes_read)?;
+        if let Some(remaining) = records {
+            match byte {
+                b'x' if remaining > 0 => {
+                    read_abort_byte(port, inactivity_timeout, &mut last_byte, &mut bytes_read)?;
+                    read_abort_byte(port, inactivity_timeout, &mut last_byte, &mut bytes_read)?;
+                    records = Some(remaining - 1);
+                }
+                b'}' => records = None,
+                b'a' => {
+                    for expected in &ABORT_REPLY[1..] {
+                        let byte = read_abort_byte(
+                            port,
+                            inactivity_timeout,
+                            &mut last_byte,
+                            &mut bytes_read,
+                        )?;
+                        if byte != *expected {
+                            bail!("tinySA abort acknowledgement was malformed");
+                        }
+                    }
+                    abort_reply_at = ABORT_REPLY.len();
+                }
+                _ => bail!("tinySA aborted scan frame was malformed"),
+            }
+        } else if byte == ABORT_REPLY[abort_reply_at] {
+            abort_reply_at += 1;
+        } else {
+            abort_reply_at = usize::from(byte == ABORT_REPLY[0]);
+        }
+    }
+    Ok(())
+}
+
+fn read_abort_byte<P>(
+    port: &mut P,
+    inactivity_timeout: Duration,
+    last_byte: &mut Instant,
+    bytes_read: &mut usize,
+) -> anyhow::Result<u8>
+where
+    P: Read + ?Sized,
+{
     loop {
-        let mut buffer = [0u8; 64];
-        match port.read(&mut buffer) {
-            Ok(count) if count > 0 => {
-                response.extend_from_slice(&buffer[..count]);
-                last_byte = Instant::now();
-                if response.len() > MAX_RESPONSE_BYTES {
+        let mut byte = [0u8; 1];
+        match port.read(&mut byte) {
+            Ok(1) => {
+                *last_byte = Instant::now();
+                *bytes_read += 1;
+                if *bytes_read > MAX_RESPONSE_BYTES {
                     bail!("tinySA abort drain exceeded {MAX_RESPONSE_BYTES} bytes");
                 }
+                return Ok(byte[0]);
             }
-            Ok(_) => bail!("tinySA disconnected while aborting a scan"),
+            Ok(0) => bail!("tinySA disconnected while aborting a scan"),
+            Ok(_) => unreachable!(),
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                if last_byte.elapsed() >= DRAIN_QUIET {
-                    if !response
-                        .windows(PROMPT.len())
-                        .any(|window| window == PROMPT)
-                    {
-                        bail!("tinySA abort did not return a shell prompt");
-                    }
-                    return Ok(());
+                if last_byte.elapsed() >= inactivity_timeout {
+                    bail!("timed out draining the tinySA aborted scan");
                 }
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) => return Err(error).context("failed to drain tinySA aborted scan"),
-        }
-        if started.elapsed() >= RESPONSE_TIMEOUT {
-            bail!("timed out draining the tinySA aborted scan");
         }
     }
 }
@@ -938,7 +998,127 @@ fn scan_inactivity_timeout(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+
     use super::*;
+
+    enum ReadStep {
+        Bytes(VecDeque<u8>),
+        Delay(Duration),
+        FrameClose,
+    }
+
+    struct ScriptedPeer {
+        reads: VecDeque<ReadStep>,
+        writes: Vec<u8>,
+        frame_closed: bool,
+    }
+
+    impl ScriptedPeer {
+        fn new(steps: impl IntoIterator<Item = ReadStep>) -> Self {
+            Self {
+                reads: steps.into_iter().collect(),
+                writes: Vec::new(),
+                frame_closed: false,
+            }
+        }
+    }
+
+    impl Read for ScriptedPeer {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            loop {
+                match self.reads.front_mut() {
+                    Some(ReadStep::Bytes(bytes)) => {
+                        let Some(byte) = bytes.pop_front() else {
+                            self.reads.pop_front();
+                            continue;
+                        };
+                        buffer[0] = byte;
+                        return Ok(1);
+                    }
+                    Some(ReadStep::Delay(duration)) => {
+                        let duration = *duration;
+                        self.reads.pop_front();
+                        std::thread::sleep(duration);
+                        return Err(io::Error::new(ErrorKind::TimedOut, "scripted delay"));
+                    }
+                    Some(ReadStep::FrameClose) => {
+                        self.reads.pop_front();
+                        self.frame_closed = true;
+                        buffer[0] = b'}';
+                        return Ok(1);
+                    }
+                    None => return Err(io::Error::new(ErrorKind::TimedOut, "script exhausted")),
+                }
+            }
+        }
+    }
+
+    impl Write for ScriptedPeer {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if buffer == b"next\r" {
+                assert!(
+                    self.frame_closed,
+                    "next request preceded the old frame close"
+                );
+            }
+            self.writes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn bytes(value: &[u8]) -> ReadStep {
+        ReadStep::Bytes(value.iter().copied().collect())
+    }
+
+    #[test]
+    fn cancellation_waits_for_the_delayed_frame_close_before_the_next_request() {
+        let mut peer = ScriptedPeer::new([
+            bytes(b"x}xxch"),
+            bytes(b"abort\r\nch> "),
+            ReadStep::Delay(Duration::from_millis(225)),
+            ReadStep::FrameClose,
+        ]);
+        let started = Instant::now();
+
+        abort_active_scan(&mut peer, ScanDrain::Records(2), Duration::from_secs(1)).unwrap();
+        peer.write_all(b"next\r").unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(peer.writes, b"abort\rnext\r");
+    }
+
+    #[test]
+    fn cancellation_after_the_frame_waits_only_for_the_abort_reply() {
+        let mut peer = ScriptedPeer::new([
+            bytes(PROMPT),
+            ReadStep::Delay(Duration::from_millis(225)),
+            bytes(b"abort\r\nch> "),
+        ]);
+        let started = Instant::now();
+
+        abort_active_scan(&mut peer, ScanDrain::FrameClosed, Duration::from_secs(1)).unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(peer.writes, b"abort\r");
+    }
+
+    #[test]
+    fn cancellation_times_out_when_the_active_frame_never_closes() {
+        let mut peer = ScriptedPeer::new([bytes(b"abort\r\nch> ")]);
+
+        assert!(
+            abort_active_scan(&mut peer, ScanDrain::Records(1), Duration::from_millis(10),)
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+    }
 
     #[test]
     fn crossing_scans_split_at_the_model_path_boundary() {

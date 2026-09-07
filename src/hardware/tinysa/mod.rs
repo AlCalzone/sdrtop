@@ -558,7 +558,12 @@ impl Worker {
             }
             interrupted => return Ok(interrupted),
         }
-        let frequencies_hz = display_frequencies(&frequencies_hz)?;
+        let target = if self.direct_sweep.is_some() {
+            PowerTraceTarget::Sweep
+        } else {
+            PowerTraceTarget::Spectrum
+        };
+        let frequencies_hz = trace_frequencies(frequencies_hz, target)?;
         let (effective_center_hz, effective_span_hz) = effective_window(start_hz, stop_hz);
         Ok(ScanResult::Complete {
             frequencies_hz,
@@ -1090,6 +1095,19 @@ fn display_frequencies(measured_hz: &[u64]) -> anyhow::Result<Vec<u64>> {
         .collect())
 }
 
+fn trace_frequencies(measured_hz: Vec<u64>, target: PowerTraceTarget) -> anyhow::Result<Vec<u64>> {
+    if measured_hz.is_empty() {
+        bail!("tinySA scan returned no frequencies");
+    }
+    if measured_hz.windows(2).any(|pair| pair[1] <= pair[0]) {
+        bail!("tinySA scan returned duplicate or descending frequencies");
+    }
+    match target {
+        PowerTraceTarget::Spectrum => display_frequencies(&measured_hz),
+        PowerTraceTarget::Sweep => Ok(measured_hz),
+    }
+}
+
 fn startup_settings(model: Model) -> (ScanSettings, Vec<&'static str>) {
     let spur = if model.is_ultra() {
         SpurMode::Auto
@@ -1352,6 +1370,22 @@ mod tests {
     fn display_grid_rejects_duplicate_firmware_frequencies() {
         assert!(display_frequencies(&[100_000, 100_000, 100_001]).is_err());
         assert!(display_frequencies(&[100_002, 100_001, 100_000]).is_err());
+    }
+
+    #[test]
+    fn native_sweeps_keep_raw_firmware_frequencies() {
+        let measured = protocol::scan_frequencies(100_000_000, 200_000_000, 450);
+        let sweep =
+            trace_frequencies(measured.clone(), PowerTraceTarget::Sweep).expect("sweep axis");
+        let spectrum =
+            trace_frequencies(measured.clone(), PowerTraceTarget::Spectrum).expect("spectrum axis");
+
+        assert_eq!(sweep, measured);
+        assert_ne!(spectrum, measured);
+        for target in [PowerTraceTarget::Spectrum, PowerTraceTarget::Sweep] {
+            assert!(trace_frequencies(vec![100_000, 100_000, 100_001], target).is_err());
+            assert!(trace_frequencies(vec![100_002, 100_001, 100_000], target).is_err());
+        }
     }
 
     #[test]

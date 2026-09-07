@@ -723,7 +723,13 @@ mod tests {
     #[test]
     fn incompatible_overrides_cannot_leave_a_power_device_without_a_layout() {
         let mut user = HashMap::new();
-        for name in ["spectrum", "waterfall", "spectrum_waterfall"] {
+        for name in [
+            "spectrum",
+            "waterfall",
+            "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
+        ] {
             user.insert(
                 name.to_string(),
                 crate::config::PresetConfig {

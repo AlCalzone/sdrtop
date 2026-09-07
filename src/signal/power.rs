@@ -44,6 +44,7 @@ enum TraceRejection {
     Empty,
     LengthMismatch,
     NonUniformGrid,
+    NonAscendingGrid,
 }
 
 impl TraceRejection {
@@ -52,6 +53,7 @@ impl TraceRejection {
             Self::Empty => "empty trace",
             Self::LengthMismatch => "frequency and level counts differ",
             Self::NonUniformGrid => "frequency grid is not uniform and ascending",
+            Self::NonAscendingGrid => "frequency grid is not strictly ascending",
         }
     }
 }
@@ -216,6 +218,13 @@ impl SweepAccumulator {
         if trace.frequencies_hz.len() != trace.levels_dbm.len() {
             return Err(TraceRejection::LengthMismatch);
         }
+        if trace
+            .frequencies_hz
+            .windows(2)
+            .any(|pair| pair[1] <= pair[0])
+        {
+            return Err(TraceRejection::NonAscendingGrid);
+        }
         if !trace_covers_requested_range(&trace.frequencies_hz, requested.2, requested.3) {
             return Ok(());
         }
@@ -320,10 +329,7 @@ fn trace_covers_requested_range(frequencies_hz: &[u64], start_hz: u64, stop_hz: 
     let Some(&last) = rest.last() else {
         return false;
     };
-    if first != start_hz
-        || last > stop_hz
-        || !frequencies_hz.windows(2).all(|pair| pair[0] <= pair[1])
-    {
+    if first != start_hz || last > stop_hz {
         return false;
     }
     let intervals = frequencies_hz.len().saturating_sub(1) as u64;
@@ -413,6 +419,8 @@ mod tests {
                 .publish(
                     &state,
                     PowerTrace {
+                        target: PowerTraceTarget::Spectrum,
+                        generation: 0,
                         frequencies_hz: vec![100_000_000, 101_000_000],
                         levels_dbm: levels.to_vec(),
                         rbw_hz: None,
@@ -476,6 +484,8 @@ mod tests {
             .publish(
                 &state,
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100_000_000, 101_000_000],
                     levels_dbm: vec![f32::NAN, f32::INFINITY],
                     rbw_hz: None,
@@ -502,6 +512,8 @@ mod tests {
                 .publish(
                     &state,
                     PowerTrace {
+                        target: PowerTraceTarget::Spectrum,
+                        generation: 0,
                         frequencies_hz: vec![100_000_000, 101_000_000],
                         levels_dbm: vec![levels; 2],
                         rbw_hz,
@@ -548,6 +560,8 @@ mod tests {
         let cases = [
             (
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![],
                     levels_dbm: vec![],
                     rbw_hz: None,
@@ -556,6 +570,8 @@ mod tests {
             ),
             (
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100, 200],
                     levels_dbm: vec![-90.0],
                     rbw_hz: None,
@@ -564,6 +580,8 @@ mod tests {
             ),
             (
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100, 200, 350],
                     levels_dbm: vec![-90.0; 3],
                     rbw_hz: None,
@@ -639,9 +657,13 @@ mod tests {
     fn sweep_accumulation_publishes_measured_peak_and_mean() {
         let state = sweeping_state(4);
         let mut accumulator = SweepAccumulator::default();
-        accumulator.push(&state, sweep_trace(4, vec![-80.0, f32::NAN, -60.0]));
+        accumulator
+            .push(&state, sweep_trace(4, vec![-80.0, f32::NAN, -60.0]))
+            .unwrap();
         accumulator.started = Some(Instant::now() - std::time::Duration::from_secs(11));
-        accumulator.push(&state, sweep_trace(4, vec![-70.0, -50.0, -90.0]));
+        accumulator
+            .push(&state, sweep_trace(4, vec![-70.0, -50.0, -90.0]))
+            .unwrap();
 
         let metrics = state.lock().unwrap();
         let frame = metrics.sweep.current_frame.as_ref().unwrap();
@@ -656,19 +678,58 @@ mod tests {
     fn sweep_generations_isolate_queued_traces() {
         let state = sweeping_state(8);
         let mut accumulator = SweepAccumulator::default();
-        accumulator.push(&state, sweep_trace(7, vec![-10.0, -10.0, -10.0]));
+        accumulator
+            .push(&state, sweep_trace(7, vec![-10.0, -10.0, -10.0]))
+            .unwrap();
         assert_eq!(accumulator.traces, 0);
 
-        accumulator.push(&state, sweep_trace(8, vec![-80.0, -70.0, -60.0]));
+        accumulator
+            .push(&state, sweep_trace(8, vec![-80.0, -70.0, -60.0]))
+            .unwrap();
         assert_eq!(accumulator.traces, 1);
         state.lock().unwrap().sweep.generation = 9;
-        accumulator.push(&state, sweep_trace(8, vec![-20.0, -20.0, -20.0]));
+        accumulator
+            .push(&state, sweep_trace(8, vec![-20.0, -20.0, -20.0]))
+            .unwrap();
         assert_eq!(accumulator.traces, 1);
 
-        accumulator.push(&state, sweep_trace(9, vec![-90.0, -80.0, -70.0]));
+        accumulator
+            .push(&state, sweep_trace(9, vec![-90.0, -80.0, -70.0]))
+            .unwrap();
         assert_eq!(accumulator.generation, 9);
         assert_eq!(accumulator.traces, 1);
         assert_eq!(accumulator.sums, [-90.0, -80.0, -70.0]);
+    }
+
+    #[test]
+    fn stale_sweep_traces_are_discarded_before_shape_validation() {
+        let state = sweeping_state(8);
+        let mut accumulator = SweepAccumulator::default();
+        let malformed = PowerTrace {
+            target: PowerTraceTarget::Sweep,
+            generation: 7,
+            frequencies_hz: vec![],
+            levels_dbm: vec![-80.0],
+            rbw_hz: None,
+        };
+        assert_eq!(accumulator.push(&state, malformed), Ok(()));
+
+        let mut matching = sweep_trace(8, vec![-80.0, -70.0, -60.0]);
+        matching.frequencies_hz = vec![100_000_000, 100_000_000, 101_000_000];
+        assert_eq!(
+            accumulator.push(&state, matching),
+            Err(TraceRejection::NonAscendingGrid)
+        );
+
+        state.lock().unwrap().sweep.active = false;
+        let inactive = PowerTrace {
+            target: PowerTraceTarget::Sweep,
+            generation: 8,
+            frequencies_hz: vec![],
+            levels_dbm: vec![-80.0],
+            rbw_hz: None,
+        };
+        assert_eq!(accumulator.push(&state, inactive), Ok(()));
     }
 
     #[test]

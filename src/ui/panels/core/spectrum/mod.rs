@@ -368,6 +368,7 @@ fn draw_instrument(
             state.radio.frequency,
             state.spectrum.step_hz,
             cursor,
+            state.caps.level_unit.label(),
             theme,
         );
     }
@@ -429,6 +430,26 @@ mod zoom_tests {
 
     fn tuned() -> SdrMetrics {
         SdrMetrics::fixture().streaming().with_carrier(0.0, 40.0)
+    }
+
+    #[test]
+    fn level_axis_and_noise_floor_keep_the_iq_readout() {
+        let mut state = tuned();
+        state.ui.active_preset = "lab_signal".into();
+        for (min, max) in [(-120.0, 0.0), (-110.0, -10.0)] {
+            state.spectrum.y_min = min;
+            state.spectrum.y_max = max;
+            let rows = draw(SpectrumPanel, 100, 20, &state);
+            let gutter: String = rows
+                .iter()
+                .skip(1)
+                .take(18)
+                .flat_map(|row| row.chars().skip(1).take(6))
+                .collect();
+            assert!(gutter.contains(&format!("{min:.0}")), "{gutter}");
+            assert!(gutter.contains(&format!("{max:.0}")), "{gutter}");
+            assert!(rows.join("\n").contains("noise floor -100 dBFS"));
+        }
     }
 
     /// The frequency axis has to narrow with the zoom even when the spectrum is

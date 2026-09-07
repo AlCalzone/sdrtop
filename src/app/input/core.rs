@@ -113,14 +113,16 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
             let new_min = (m.spectrum.y_min + 10.0).min(m.spectrum.y_max - 20.0);
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
-            m.push_log(format!("Zoom: {:.0}…{:.0} dBFS", new_min, ymax));
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!("Zoom: {new_min:.0}\u{2026}{ymax:.0} {unit}"));
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.spectrum.y_min - 10.0).max(-120.0);
+            let new_min = (m.spectrum.y_min - 10.0).max(m.caps.level_min_db);
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
-            m.push_log(format!("Zoom: {:.0}…{:.0} dBFS", new_min, ymax));
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!("Zoom: {new_min:.0}\u{2026}{ymax:.0} {unit}"));
         }
         KeyCode::Char('j') => {
             let mut m = metrics(state);
@@ -212,6 +214,7 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
     }
     KeyAction::Continue
 }
+
 // ── Waterfall focus keys ──────────────────────────────────────────────────────
 
 pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
@@ -219,15 +222,23 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
     match key.code {
         KeyCode::Up => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min + 10.0).min(-20.0);
+            let new_min = (m.waterfall.db_min + 10.0).min(m.waterfall.db_max - 20.0);
             m.waterfall.db_min = new_min;
-            m.push_log(format!("Waterfall zoom: {:.0}…0 dBFS", new_min));
+            let max = m.waterfall.db_max;
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!(
+                "Waterfall zoom: {new_min:.0}\u{2026}{max:.0} {unit}"
+            ));
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min - 10.0).max(-120.0);
+            let new_min = (m.waterfall.db_min - 10.0).max(m.caps.level_min_db);
             m.waterfall.db_min = new_min;
-            m.push_log(format!("Waterfall zoom: {:.0}…0 dBFS", new_min));
+            let max = m.waterfall.db_max;
+            let unit = m.caps.level_unit.label();
+            m.push_log(format!(
+                "Waterfall zoom: {new_min:.0}\u{2026}{max:.0} {unit}"
+            ));
         }
         KeyCode::Char('[') => {
             let mut m = metrics(state);
@@ -305,6 +316,11 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use crate::state::SdrMetrics;
+    use crate::ui::{LayoutEngine, PanelRegistry};
 
     #[test]
     fn peak_jump_uses_the_captured_fft_frequency_after_retuning() {
@@ -339,5 +355,78 @@ mod tests {
             strongest_bin_frequency(frame).unwrap_or(state.radio.frequency),
             1_000_000
         );
+    }
+
+    #[test]
+    fn level_zoom_uses_device_bounds_and_preserves_iq_log_text() {
+        for (min, max) in [(-120.0, 0.0), (-110.0, -10.0)] {
+            for is_waterfall in [false, true] {
+                let mut m = SdrMetrics::fixture();
+                Arc::make_mut(&mut m.caps).level_min_db = min;
+                Arc::make_mut(&mut m.caps).level_max_db = max;
+                m.spectrum.y_min = min;
+                m.spectrum.y_max = max;
+                m.waterfall.db_min = min;
+                m.waterfall.db_max = max;
+                let state = Arc::new(Mutex::new(m));
+                let mut engine = LayoutEngine::new(
+                    crate::config::LayoutConfig::default_config(),
+                    PanelRegistry::new(),
+                );
+                let mut show_footer = true;
+                let focus_keys = HashMap::new();
+                let mut ctx = InputCtx {
+                    state: &state,
+                    device: None,
+                    engine: &mut engine,
+                    show_footer: &mut show_footer,
+                    focus_keys: &focus_keys,
+                };
+                let prefix = if is_waterfall {
+                    "Waterfall zoom"
+                } else {
+                    "Zoom"
+                };
+                let mut press = |code| {
+                    let key = KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+                    if is_waterfall {
+                        waterfall(key, &mut ctx);
+                    } else {
+                        spectrum(key, &mut ctx);
+                    }
+                };
+                press(KeyCode::Up);
+                assert_eq!(
+                    metrics(&state).ui.log.back().unwrap().text.as_ref(),
+                    format!("{prefix}: {:.0}\u{2026}{max:.0} dBFS", min + 10.0)
+                );
+                for _ in 0..20 {
+                    press(KeyCode::Up);
+                }
+                {
+                    let m = metrics(&state);
+                    let floor = if is_waterfall {
+                        m.waterfall.db_min
+                    } else {
+                        m.spectrum.y_min
+                    };
+                    assert_eq!(floor, max - 20.0);
+                }
+                for _ in 0..20 {
+                    press(KeyCode::Down);
+                }
+                let m = metrics(&state);
+                let floor = if is_waterfall {
+                    m.waterfall.db_min
+                } else {
+                    m.spectrum.y_min
+                };
+                assert_eq!(floor, min);
+                assert_eq!(
+                    m.ui.log.back().unwrap().text.as_ref(),
+                    format!("{prefix}: {min:.0}\u{2026}{max:.0} dBFS")
+                );
+            }
+        }
     }
 }

@@ -208,13 +208,6 @@ fn contents(
         return;
     }
 
-    // The bonded status cap and the nameplate answer the same question, so they
-    // ask it once. This used to be a second copy of the rule against a local
-    // `STALE_MS = 500` sitting beside `panel::FFT_STALE_MS = 500`: the two agreed
-    // only by coincidence, and disagreed already on "no frame yet" (the copy said
-    // fresh, the plate said stale). Unreachable in practice - `contents` has
-    // returned by then if there are no rows - but two rules for one word is how
-    // the deck starts contradicting itself.
     let stale = Staleness::FftAge.resolve(state);
     // Clamp the reported scroll to what the buffer can actually give, so the
     // bonded status cap never promises history that is not there. The content
@@ -292,6 +285,7 @@ fn contents(
         cursor_col,
         skip_data,
         wf.db_min,
+        wf.db_max,
         wf.palette,
         theme,
     );
@@ -309,6 +303,7 @@ fn contents(
             ..content
         },
         wf.db_min,
+        wf.db_max,
         wf.palette,
         theme,
     );
@@ -394,6 +389,7 @@ mod tests {
                     None,
                     0,
                     wf.db_min,
+                    wf.db_max,
                     wf.palette,
                     &theme,
                 )
@@ -403,6 +399,28 @@ mod tests {
         assert_eq!(buffer.get(0, 0).fg, buffer.get(0, 0).bg);
         assert_ne!(buffer.get(0, 0).fg, buffer.get(1, 0).fg);
         assert_ne!(buffer.get(0, 0).bg, buffer.get(1, 0).bg);
+    }
+
+    #[test]
+    fn the_legend_uses_both_level_bounds() {
+        let mut state = SdrMetrics::fixture().streaming().with_carrier(0.0, 40.0);
+        for (min, max, labels) in [
+            (-120.0, 0.0, ["+0", "-60", "-120"]),
+            (-110.0, -10.0, ["-10", "-60", "-110"]),
+        ] {
+            state.waterfall.db_min = min;
+            state.waterfall.db_max = max;
+            let rows = crate::state::fixture::draw(WaterfallPanel, 100, 20, &state);
+            let gutter: String = rows
+                .iter()
+                .skip(1)
+                .take(18)
+                .flat_map(|row| row.chars().skip(1).take(DB_COL as usize))
+                .collect();
+            for label in labels {
+                assert!(gutter.contains(label), "{label} missing from {gutter}");
+            }
+        }
     }
 
     #[test]

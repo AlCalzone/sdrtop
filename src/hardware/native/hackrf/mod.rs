@@ -332,6 +332,10 @@ pub fn gain_model() -> GainModel {
 /// HackRF One capability descriptor - also used as the observer-mode default.
 pub fn caps() -> DeviceCapabilities {
     DeviceCapabilities {
+        level_unit: crate::hardware::LevelUnit::Dbfs,
+        level_min_db: -120.0,
+        level_max_db: 0.0,
+        trace_stale_ms: crate::hardware::IQ_TRACE_STALE_MS,
         freq_min_hz: 1_000_000,
         freq_max_hz: 6_000_000_000,
         sample_rate_min_hz: 2_000_000.0,

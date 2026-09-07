@@ -240,6 +240,7 @@ impl WaterfallBuffer {
 #[derive(Clone)]
 pub struct WaterfallState {
     pub db_min: f32,
+    pub db_max: f32,
     pub scroll_offset: usize,
     pub cursor_freq: Option<u64>,
     pub hz_zoom: u32,
@@ -253,6 +254,7 @@ impl WaterfallState {
     pub fn new(max_rows: usize, palette: crate::palette::WaterfallPalette) -> Self {
         Self {
             db_min: -120.0,
+            db_max: 0.0,
             scroll_offset: 0,
             cursor_freq: None,
             hz_zoom: 1,

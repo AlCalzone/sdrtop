@@ -361,8 +361,8 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         observer,
         spectrum: SpectrumState {
             step_hz: 100_000,
-            y_min: -120.0,
-            y_max: 0.0,
+            y_min: caps.level_min_db,
+            y_max: caps.level_max_db,
             hold: None,
             cursor_freq: None,
             markers,
@@ -372,10 +372,15 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         // Clamped, not trusted: `save_config` writes the live buffer depth back,
         // so a config written before the floor existed carries a value too small
         // to fill a full-height waterfall. See [`WATERFALL_MIN_ROWS`].
-        waterfall: WaterfallState::new(
-            cfg.display.waterfall_max_rows.max(WATERFALL_MIN_ROWS),
-            cfg.display.waterfall_palette,
-        ),
+        waterfall: {
+            let mut waterfall = WaterfallState::new(
+                cfg.display.waterfall_max_rows.max(WATERFALL_MIN_ROWS),
+                cfg.display.waterfall_palette,
+            );
+            waterfall.db_min = caps.level_min_db;
+            waterfall.db_max = caps.level_max_db;
+            waterfall
+        },
         system: SystemState {
             board_name: Arc::from(identity.board_name.as_str()),
             serial: Arc::from(identity.serial.as_str()),
@@ -574,6 +579,59 @@ mod tests {
             assert!(m.waterfall.last_fft.is_none());
             assert_eq!(m.iq.iq_amplitude_hist, [0u64; 32]);
         }
+    }
+
+    #[test]
+    fn iq_devices_keep_the_existing_startup_defaults() {
+        let cfg = AppConfig::default();
+        for caps in [
+            hardware::native::hackrf::caps(),
+            hardware::native::rtlsdr::observer_caps(),
+        ] {
+            let tuning = resolve_tuning(&cfg.radio, &caps);
+            let metrics = initial_metrics(
+                &cfg,
+                Boot::normal(
+                    &cfg,
+                    Arc::new(caps),
+                    tuning,
+                    &hardware::DeviceInfo::default(),
+                ),
+            );
+            assert!(!metrics.radio.rx_enabled);
+            assert!(!metrics.radio.hw_streaming);
+            assert_eq!(metrics.spectrum.y_min, -120.0);
+            assert_eq!(metrics.spectrum.y_max, 0.0);
+            assert_eq!(metrics.waterfall.db_min, -120.0);
+            assert_eq!(metrics.waterfall.db_max, 0.0);
+            assert_eq!(metrics.caps.level_unit, hardware::LevelUnit::Dbfs);
+            assert_eq!(metrics.caps.level_unit.label(), "dBFS");
+            assert_eq!(metrics.caps.trace_stale_ms, 500);
+        }
+    }
+
+    #[test]
+    fn startup_uses_the_device_level_axis() {
+        let cfg = AppConfig::default();
+        let mut caps = hardware::native::hackrf::caps();
+        caps.level_min_db = -110.0;
+        caps.level_max_db = -10.0;
+        let tuning = resolve_tuning(&cfg.radio, &caps);
+        let metrics = initial_metrics(
+            &cfg,
+            Boot::normal(
+                &cfg,
+                Arc::new(caps),
+                tuning,
+                &hardware::DeviceInfo::default(),
+            ),
+        );
+        assert!(!metrics.radio.rx_enabled);
+        assert!(!metrics.radio.hw_streaming);
+        assert_eq!(metrics.spectrum.y_min, -110.0);
+        assert_eq!(metrics.spectrum.y_max, -10.0);
+        assert_eq!(metrics.waterfall.db_min, -110.0);
+        assert_eq!(metrics.waterfall.db_max, -10.0);
     }
 
     /// A config that asks for less waterfall history than a full-height panel

@@ -160,12 +160,11 @@ impl SdrMetrics {
         self
     }
 
-    /// Age the newest FFT frame past [`crate::ui::panel::FFT_STALE_MS`], so the
-    /// staleness paths can be rendered without a test sleeping.
+    /// Age the newest FFT frame past the IQ trace limit
     pub(crate) fn with_stale_fft(mut self) -> Self {
         if let Some(fr) = self.waterfall.last_fft.as_mut() {
             fr.timestamp = Instant::now()
-                - std::time::Duration::from_millis(crate::ui::panel::FFT_STALE_MS as u64 + 50);
+                - std::time::Duration::from_millis(crate::hardware::IQ_TRACE_STALE_MS as u64 + 50);
         }
         self
     }

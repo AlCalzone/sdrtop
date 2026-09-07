@@ -12,6 +12,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelUnit {
+    Dbfs,
+}
+
+pub const IQ_TRACE_STALE_MS: u128 = 500;
+
+impl LevelUnit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dbfs => "dBFS",
+        }
+    }
+}
+
 /// How raw USB bytes encode each I/Q component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleFormat {
@@ -616,6 +631,10 @@ pub enum DeliveryModel {
 /// truth for every clamp, default, and UI capability check. Built once at open.
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
+    pub level_unit: LevelUnit,
+    pub level_min_db: f32,
+    pub level_max_db: f32,
+    pub trace_stale_ms: u128,
     pub freq_min_hz: u64,
     pub freq_max_hz: u64,
     pub sample_rate_min_hz: f64,

@@ -49,12 +49,15 @@ pub(super) fn tuning(
     freq_hz: u64,
     step_hz: u64,
     cursor: Option<(f64, f32)>,
+    unit: &str,
     theme: &crate::Theme,
 ) {
     let step_str = fmt_spectrum_step(step_hz);
     let freq_str = format!("  {:.3} MHz  ", freq_hz as f64 / 1_000_000.0);
     let readout = match cursor {
-        Some((mhz, pwr)) => format!("  cur: {mhz:.3} MHz  {pwr:.1} dBFS  step {step_str}  J/K"),
+        Some((mhz, pwr)) => {
+            format!("  cur: {mhz:.3} MHz  {pwr:.1} {unit}  step {step_str}  J/K")
+        }
         None => format!("  step {step_str}  [/]"),
     };
 

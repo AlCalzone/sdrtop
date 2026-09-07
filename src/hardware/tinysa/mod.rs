@@ -29,7 +29,6 @@ const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SPAN_HZ: u64 = 10_000_000;
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-const SCAN_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 const DRAIN_QUIET: Duration = Duration::from_millis(200);
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
@@ -469,11 +468,14 @@ impl Worker {
                 return Ok(ScanResult::Interrupted(command, Ok(())));
             }
             self.select_path(segment.path)?;
+            let inactivity_timeout =
+                scan_inactivity_timeout(segment, self.identity.model, &self.options)?;
             match scan_segment(
                 &mut *self.port,
                 &self.command_rx,
                 segment,
                 self.identity.zero_dbm,
+                inactivity_timeout,
             )? {
                 ScanResult::Complete {
                     frequencies_hz: segment_frequencies,
@@ -523,6 +525,7 @@ fn initialize(
     port: &mut dyn SerialPort,
     settings: &TinySaSettings,
 ) -> anyhow::Result<(Identity, Vec<DeviceOption>)> {
+    best_effort_abort(port);
     drain_startup(port)?;
     let mut last_error = None;
     let mut version = None;
@@ -548,11 +551,25 @@ fn initialize(
     let zero = send_text_command(port, "zero")?;
     let identity = protocol::parse_identity(&version, &info, &help, &zero)?;
     send_text_command(port, "abort on")?;
+    send_text_command(port, input_mode_command(identity.model))?;
     let (options, commands) = startup_options(identity.model, settings)?;
     for command in commands {
         send_text_command(port, &command)?;
     }
     Ok((identity, options))
+}
+
+fn best_effort_abort(port: &mut dyn SerialPort) {
+    let _ = port.write_all(b"abort\r");
+    let _ = port.flush();
+}
+
+fn input_mode_command(model: Model) -> &'static str {
+    if model.is_ultra() {
+        "mode input"
+    } else {
+        "mode low input"
+    }
 }
 
 fn send_text_command(port: &mut dyn SerialPort, command: &str) -> anyhow::Result<Vec<u8>> {
@@ -625,6 +642,7 @@ fn scan_segment(
     command_rx: &Receiver<Command>,
     segment: Segment,
     zero_dbm: i32,
+    inactivity_timeout: Duration,
 ) -> anyhow::Result<ScanResult> {
     let command = format!(
         "scanraw {} {} {} 1",
@@ -643,7 +661,7 @@ fn scan_segment(
     expected.extend_from_slice(b"\r\n{");
     let mut frame = Vec::with_capacity(2 + segment.points as usize * 3);
     for (index, expected_byte) in expected.into_iter().enumerate() {
-        match next_scan_byte(port, command_rx)? {
+        match next_scan_byte(port, command_rx, inactivity_timeout)? {
             ByteEvent::Byte(byte) if byte == expected_byte => {}
             ByteEvent::Byte(byte) => {
                 bail!(
@@ -657,7 +675,7 @@ fn scan_segment(
     }
     frame.push(b'{');
     for index in 0..segment.points {
-        let tag = match next_scan_byte(port, command_rx)? {
+        let tag = match next_scan_byte(port, command_rx, inactivity_timeout)? {
             ByteEvent::Byte(byte) => byte,
             ByteEvent::Command(command) => {
                 return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
@@ -674,7 +692,7 @@ fn scan_segment(
         }
         frame.push(tag);
         for _ in 0..2 {
-            match next_scan_byte(port, command_rx)? {
+            match next_scan_byte(port, command_rx, inactivity_timeout)? {
                 ByteEvent::Byte(byte) => frame.push(byte),
                 ByteEvent::Command(command) => {
                     return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
@@ -682,7 +700,7 @@ fn scan_segment(
             }
         }
     }
-    let close = match next_scan_byte(port, command_rx)? {
+    let close = match next_scan_byte(port, command_rx, inactivity_timeout)? {
         ByteEvent::Byte(byte) => byte,
         ByteEvent::Command(command) => {
             return Ok(ScanResult::Interrupted(command, abort_active_scan(port)))
@@ -713,6 +731,7 @@ fn scan_segment(
 fn next_scan_byte(
     port: &mut dyn SerialPort,
     command_rx: &Receiver<Command>,
+    inactivity_timeout: Duration,
 ) -> anyhow::Result<ByteEvent> {
     let last_byte = Instant::now();
     loop {
@@ -725,7 +744,7 @@ fn next_scan_byte(
             Ok(0) => bail!("tinySA disconnected during a scan"),
             Ok(_) => unreachable!(),
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                if last_byte.elapsed() >= SCAN_INACTIVITY_TIMEOUT {
+                if last_byte.elapsed() >= inactivity_timeout {
                     bail!("tinySA scan timed out");
                 }
             }
@@ -1128,10 +1147,42 @@ fn current_rbw_hz(options: &[DeviceOption]) -> Option<u32> {
     if value == "auto" {
         return None;
     }
+
     value
         .parse::<f64>()
         .ok()
         .map(|khz| (khz * 1_000.0).round() as u32)
+}
+
+fn scan_inactivity_timeout(
+    segment: Segment,
+    model: Model,
+    options: &[DeviceOption],
+) -> anyhow::Result<Duration> {
+    let rbw_setting = selected_option_value(options, "rbw").context("tinySA RBW is missing")?;
+    let span_hz = segment.stop_hz.saturating_sub(segment.start_hz) as f64;
+    let (minimum_rbw, maximum_rbw) = if model.is_ultra() {
+        (0.2, 850.0)
+    } else {
+        (3.0, 600.0)
+    };
+    let rbw_khz = if rbw_setting == "auto" {
+        (span_hz * 7e-6).clamp(minimum_rbw, maximum_rbw)
+    } else {
+        rbw_setting
+            .parse::<f64>()
+            .context("tinySA RBW setting is invalid")?
+    };
+    let points = segment.points.max(1) as f64;
+    let mut total_seconds = (span_hz / 20_000.0) / rbw_khz.powi(2) + points / 500.0;
+    let spur = selected_option_value(options, "spur").unwrap_or("off");
+    if (spur == "on" && segment.stop_hz > 800_000_000) || spur == "auto" {
+        total_seconds *= 2.0;
+    }
+    let block_seconds = total_seconds * 20.0 / points + 1.0;
+    Ok(Duration::from_secs_f64(
+        block_seconds.max(RESPONSE_TIMEOUT.as_secs_f64()),
+    ))
 }
 
 #[cfg(test)]
@@ -1359,5 +1410,35 @@ mod tests {
             centered_window(960_000_000, 10_000_000, 100_000, 960_000_000),
             (950_000_000, 960_000_000)
         );
+    }
+
+    #[test]
+    fn startup_forces_every_model_into_input_mode() {
+        assert_eq!(input_mode_command(Model::Basic), "mode low input");
+        for model in [
+            Model::Zs405,
+            Model::Zs406,
+            Model::Zs407,
+            Model::UltraUnknown,
+        ] {
+            assert_eq!(input_mode_command(model), "mode input");
+        }
+    }
+
+    #[test]
+    fn narrow_rbw_expands_the_scan_deadline() {
+        let settings = TinySaSettings {
+            rbw: "0.2".into(),
+            ..TinySaSettings::default()
+        };
+        let (options, _) = startup_options(Model::Zs405, &settings).unwrap();
+        let segment = Segment {
+            start_hz: 400_000_000,
+            stop_hz: 500_000_000,
+            points: 450,
+            path: RfPath::Lower,
+        };
+        let timeout = scan_inactivity_timeout(segment, Model::Zs405, &options).unwrap();
+        assert!(timeout > Duration::from_secs(120), "{timeout:?}");
     }
 }

@@ -49,6 +49,7 @@ pub struct App {
     /// to write back.
     pub(super) theme_config: crate::config::ThemeConfig,
     pub(super) tinysa_config: crate::config::TinySaSettings,
+    pub(super) tinysa_basic_input: Option<crate::hardware::tinysa::BasicInput>,
     pub(super) device_kind: hardware::DeviceKind,
 }
 
@@ -58,7 +59,10 @@ impl App {
         config_path: Option<PathBuf>,
         listing: &hardware::DeviceListing,
     ) -> anyhow::Result<Self> {
-        match hardware::open_device(listing, &cfg.tinysa) {
+        let tinysa_basic_input = (listing.kind == hardware::DeviceKind::TinySa).then(|| {
+            hardware::tinysa::resolve_basic_input(listing.tiny_sa_input, cfg.tinysa.basic_input)
+        });
+        let mut app = match hardware::open_device(listing, &cfg.tinysa) {
             Ok(device) => Self::new_normal(cfg, config_path, device, listing.kind),
             Err(open_err) => {
                 // Device is present but couldn't be opened (e.g. busy) - fall back
@@ -73,7 +77,9 @@ impl App {
                 };
                 Self::new_observer(cfg, config_path, sysinfo, profile, listing.kind)
             }
-        }
+        }?;
+        app.tinysa_basic_input = tinysa_basic_input;
+        Ok(app)
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -421,7 +427,11 @@ impl App {
             return Ok(());
         };
         let tinysa = if self.device_kind == hardware::DeviceKind::TinySa {
-            crate::hardware::tinysa::persisted_settings(&self.tinysa_config, &device.options())?
+            crate::hardware::tinysa::persisted_settings(
+                &self.tinysa_config,
+                &device.options(),
+                self.tinysa_basic_input,
+            )?
         } else {
             self.tinysa_config.clone()
         };

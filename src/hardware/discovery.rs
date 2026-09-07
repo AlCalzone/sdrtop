@@ -263,9 +263,12 @@ pub fn open_device(
             let Some(path) = listing.path.as_deref() else {
                 anyhow::bail!("a tinySA listing with no serial port cannot be opened");
             };
+            let basic_input =
+                tinysa::resolve_basic_input(listing.tiny_sa_input, tinysa_settings.basic_input);
             Ok(Arc::new(tinysa::TinySaDevice::open(
                 path,
-                listing.tiny_sa_input.unwrap_or_default(),
+                basic_input,
+                listing.tiny_sa_input,
                 tinysa_settings,
             )?))
         }

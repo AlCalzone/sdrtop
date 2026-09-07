@@ -345,6 +345,7 @@ impl App {
             focus_keys,
             theme_config: cfg.theme.clone(),
             tinysa_config: cfg.tinysa.clone(),
+            tinysa_basic_input: None,
             device_kind,
             user_presets: cfg.presets,
         })

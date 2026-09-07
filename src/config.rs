@@ -172,12 +172,16 @@ fn default_auto() -> String {
 /// Settings applied when a tinySA backend opens.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct TinySaSettings {
+    #[serde(default)]
+    pub basic_input: crate::hardware::tinysa::BasicInput,
     #[serde(default = "default_tinysa_points")]
     pub points: u32,
     #[serde(default = "default_auto")]
     pub rbw: String,
     #[serde(default = "default_auto")]
     pub attenuation: String,
+    #[serde(default)]
+    pub high_attenuation: bool,
     #[serde(default)]
     pub lna: bool,
     #[serde(default = "default_auto")]
@@ -193,9 +197,11 @@ pub struct TinySaSettings {
 impl Default for TinySaSettings {
     fn default() -> Self {
         Self {
+            basic_input: crate::hardware::tinysa::BasicInput::default(),
             points: default_tinysa_points(),
             rbw: default_auto(),
             attenuation: default_auto(),
+            high_attenuation: false,
             lna: false,
             lna2: default_auto(),
             agc: default_auto(),
@@ -817,9 +823,11 @@ panels = [
 
         let source = r#"
             [tinysa]
+            basic_input = "high"
             points = 900
             rbw = "0.2"
             attenuation = "12"
+            high_attenuation = true
             lna = true
             lna2 = "3"
             agc = "7"
@@ -831,14 +839,21 @@ panels = [
         let restored: AppConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(restored.tinysa, config.tinysa);
         assert!(serialized.contains("[tinysa]"));
+        assert!(serialized.contains("basic_input = \"high\""));
+        assert!(restored.tinysa.high_attenuation);
     }
 
     #[test]
     fn partial_tinysa_settings_fill_field_defaults() {
         let config: AppConfig = toml::from_str("[tinysa]\npoints = 64\n").unwrap();
         assert_eq!(config.tinysa.points, 64);
+        assert_eq!(
+            config.tinysa.basic_input,
+            crate::hardware::tinysa::BasicInput::Low
+        );
         assert_eq!(config.tinysa.rbw, "auto");
         assert_eq!(config.tinysa.attenuation, "auto");
+        assert!(!config.tinysa.high_attenuation);
         assert!(!config.tinysa.lna);
         assert_eq!(config.tinysa.lna2, "auto");
         assert_eq!(config.tinysa.agc, "auto");

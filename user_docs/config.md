@@ -61,9 +61,11 @@ stop_hz  = 500000000       # scanner band end
 dwell_ms = 200             # measure time per step (50–2000)
 
 [tinysa]
+basic_input = "low"        # Basic only: low or high
 points = 450                # 64, 128, 290, 450, 900 or 1800
 rbw = "auto"                # resolution bandwidth in kHz
-attenuation = "auto"        # auto or 0–31 dB
+attenuation = "auto"        # Basic LOW and Ultra: auto or 0–31 dB
+high_attenuation = false    # Basic HIGH coarse attenuation
 lna = false                 # Ultra only
 spur = "auto"               # Basic uses on/off; Ultra also accepts auto
 ext_gain_db = 0             # -100–100 dB
@@ -136,12 +138,29 @@ a safe input baseline. The Options pane updates these values at runtime. They
 are saved from the analyzer's current state on quit. Other backends preserve the
 block unchanged.
 
+`basic_input` selects the Basic model's physical connector for the full session.
+It accepts `low` from 100 kHz to 350 MHz or `high` from 240 MHz to 959 MHz.
+This is a startup-only setting. Restart sdrtop after editing it. An explicit
+`?input=low` or `?input=high` in `--device` takes priority for that session. A
+bare `--device tinysa` or `--device tinysa=PATH` uses `basic_input`.
+
+Basic LOW and Ultra use `attenuation`. Its choices are `auto` or 0–31 dB. Basic
+HIGH uses `high_attenuation`. `false` sends `attenuate 0`. `true` sends
+`attenuate 1`, which enables the firmware's frequency-dependent coarse
+attenuation of roughly 25–40 dB. Each connector's setting is saved separately.
+
+Ultra firmware always selects its input automatically. `basic_input` remains
+unchanged after an Ultra session. An explicit Basic input in `--device` is
+ignored on Ultra and produces a note in the startup log.
+
 Basic analyzers convert `spur = "auto"` to `"on"`. They also convert Ultra-only
 RBW values `0.2`, `1` and `850` to `"auto"`. The Ultra-only LNA value stays in
-the file when a Basic analyzer is used. Legacy `lna2` and `agc` values are
-accepted and preserved without being applied. Verified ZS405 firmware reloads
-its internal LNA2 and AGC values before every scan. Other invalid values are
-reported when a tinySA opens.
+the file when a Basic analyzer is used.
+
+Legacy `lna2` and `agc` fields remain readable and survive config saves. Basic
+sessions ignore them. Ultra sessions accept only `"auto"`. A manual value stops
+the open with an error because Ultra firmware overwrites LNA2 and AGC before
+every scan. Other invalid values are reported when a tinySA opens.
 
 ---
 

@@ -88,20 +88,20 @@ enum SpurMode {
 }
 
 pub fn list(selector: Option<&str>) -> Vec<DeviceListing> {
-    let show_input = selector.is_some_and(|value| value.contains("?input="));
     let (path, input) = match selector {
         Some(selector) => match parse_selector(selector) {
             Ok(selection) => selection,
-            Err(_) => return Vec::new(),
+            Err(error) => {
+                eprintln!("tinySA: invalid device selector: {error}");
+                return Vec::new();
+            }
         },
-        None => (None, BasicInput::Low),
+        None => (None, None),
     };
     if let Some(path) = path {
-        let input_label = if show_input {
-            format!(" · {} input", input.label())
-        } else {
-            String::new()
-        };
+        let input_label = input
+            .map(|input| format!(" · {} input", input.label()))
+            .unwrap_or_default();
         return vec![DeviceListing {
             kind: crate::hardware::DeviceKind::TinySa,
             index: 0,
@@ -109,13 +109,13 @@ pub fn list(selector: Option<&str>) -> Vec<DeviceListing> {
             serial: None,
             args: None,
             path: Some(path),
-            tiny_sa_input: Some(input),
+            tiny_sa_input: input,
         }];
     }
     let mut devices = discovery::list();
     for device in &mut devices {
-        device.tiny_sa_input = Some(input);
-        if show_input {
+        device.tiny_sa_input = input;
+        if let Some(input) = input {
             device
                 .label
                 .push_str(&format!(" · {} input", input.label()));
@@ -124,10 +124,10 @@ pub fn list(selector: Option<&str>) -> Vec<DeviceListing> {
     devices
 }
 
-pub fn parse_selector(selector: &str) -> anyhow::Result<(Option<PathBuf>, BasicInput)> {
+pub fn parse_selector(selector: &str) -> anyhow::Result<(Option<PathBuf>, Option<BasicInput>)> {
     let (path, input) = match selector.rsplit_once("?input=") {
-        Some((path, input)) => (path, BasicInput::parse(input)?),
-        None => (selector, BasicInput::Low),
+        Some((path, input)) => (path, Some(BasicInput::parse(input)?)),
+        None => (selector, None),
     };
     if path.contains('?') {
         bail!("tinySA selector only supports '?input=low' or '?input=high'");
@@ -1320,17 +1320,28 @@ mod tests {
     fn selector_keeps_the_path_and_basic_input_separate() {
         assert_eq!(
             parse_selector("/dev/ttyACM2").unwrap(),
-            (Some(PathBuf::from("/dev/ttyACM2")), BasicInput::Low)
+            (Some(PathBuf::from("/dev/ttyACM2")), None)
         );
         assert_eq!(
             parse_selector("/dev/ttyACM2?input=high").unwrap(),
-            (Some(PathBuf::from("/dev/ttyACM2")), BasicInput::High)
+            (Some(PathBuf::from("/dev/ttyACM2")), Some(BasicInput::High))
         );
         assert_eq!(
             parse_selector("?input=high").unwrap(),
-            (None, BasicInput::High)
+            (None, Some(BasicInput::High))
         );
         assert!(parse_selector("/dev/ttyACM2?input=other").is_err());
+    }
+
+    #[test]
+    fn only_an_explicit_selector_overrides_the_basic_input() {
+        let bare = list(Some("/dev/ttyACM2"));
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].tiny_sa_input, None);
+
+        let high = list(Some("/dev/ttyACM2?input=high"));
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].tiny_sa_input, Some(BasicInput::High));
     }
 
     #[test]

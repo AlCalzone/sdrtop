@@ -21,7 +21,7 @@ impl Model {
 
     pub(super) fn maximum_hz(self) -> u64 {
         match self {
-            Self::Basic => 960_000_000,
+            Self::Basic => 959_000_000,
             Self::Zs405 | Self::Zs406 | Self::UltraUnknown => 6_000_000_000,
             Self::Zs407 => 7_300_000_000,
         }

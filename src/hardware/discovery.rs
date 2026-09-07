@@ -93,7 +93,7 @@ pub struct DeviceListing {
     pub args: Option<String>,
     /// Character-device path for serial backends.
     pub path: Option<PathBuf>,
-    /// Physical input selected for a basic tinySA.
+    /// Explicit physical input override for a basic tinySA.
     pub tiny_sa_input: Option<tinysa::BasicInput>,
 }
 

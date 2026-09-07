@@ -57,7 +57,8 @@ Automatic discovery recognizes the official USB CDC identity on
 `/dev/ttyACM*`. The explicit form selects a path when several devices are
 present or discovery cannot inspect sysfs. A basic tinySA uses the LOW input by
 default from 100 kHz to 350 MHz. Select `input=high` for the HIGH connector from
-240 MHz to 959 MHz. One session stays on the selected connector.
+240 MHz to 959 MHz. The supported firmware defines 959 MHz as the HIGH input
+limit. One session stays on the selected connector.
 
 > **RTL clones vary.** Different tuners, different gain tables, different quirks,
 > and no single person owns them all. If yours behaves oddly, please

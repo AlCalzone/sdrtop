@@ -223,12 +223,15 @@ mod tests {
     /// the menu is not a panel, so it cannot go through
     /// `PanelRegistry::render_panel` and needs its own harness.
     fn draw(w: u16, h: u16, state: &MenuState) -> Vec<String> {
+        draw_with_metrics(w, h, state, &SdrMetrics::fixture())
+    }
+
+    fn draw_with_metrics(w: u16, h: u16, state: &MenuState, metrics: &SdrMetrics) -> Vec<String> {
         let menu = model::build(&LayoutConfig::default_config().presets);
-        let metrics = SdrMetrics::fixture();
         let theme = crate::Theme::sdr();
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| render(f, f.size(), &metrics, &menu, state, &theme))
+            .draw(|f| render(f, f.size(), metrics, &menu, state, &theme))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
@@ -399,6 +402,27 @@ mod tests {
         assert!(all.contains("Settings will live here"), "{all}");
         // And the pane replaces the right column only, the same as Keys.
         assert!(all.contains("Command Rail"), "{all}");
+    }
+
+    #[test]
+    fn a_short_folded_options_pane_keeps_the_selected_option_visible() {
+        let state = MenuState {
+            pane: MenuPane::Options,
+            scroll: 5,
+            ..MenuState::default()
+        };
+        let mut metrics = SdrMetrics::fixture();
+        for index in 0..6 {
+            metrics.device_options.push(crate::hardware::DeviceOption {
+                id: format!("option-{index}"),
+                label: format!("Option {index}"),
+                choices: vec!["Off".into(), "On".into()],
+                selected_choice: "On".into(),
+            });
+        }
+
+        let all = draw_with_metrics(40, 10, &state, &metrics).join("\n");
+        assert!(all.contains("Option 5"), "{all}");
     }
 
     /// Small enough that nothing sensible fits. The requirement is only that it

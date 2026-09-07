@@ -86,9 +86,10 @@ impl App {
         startup_results.push(device.set_amp_enable(cfg.radio.amp_enabled));
         startup_results.push(device.set_tuner_agc(cfg.radio.amp_enabled));
 
+        let (device_options, option_notes) = sanitize_device_options(device.options());
         let mut initial =
             initial_metrics(&cfg, Boot::normal(&cfg, Arc::clone(&caps), tuning, &info))?;
-        initial.device_options = device.options();
+        initial.device_options = device_options;
         let state = Arc::new(Mutex::new(initial));
 
         {
@@ -128,6 +129,9 @@ impl App {
             // ones are computed by `resolve_tuning`, which is pure, and surfaced
             // here.
             for note in &boot_notes {
+                m.push_log(note.clone());
+            }
+            for note in &option_notes {
                 m.push_log(note.clone());
             }
             let names = [
@@ -206,6 +210,7 @@ impl App {
                 );
             }
         }
+
         tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));
         tasks::spawn_sys_resource_task(Arc::clone(&state));
 
@@ -338,5 +343,68 @@ impl App {
             theme_config: cfg.theme.clone(),
             user_presets: cfg.presets,
         })
+    }
+}
+
+fn sanitize_device_options(
+    options: Vec<hardware::DeviceOption>,
+) -> (Vec<hardware::DeviceOption>, Vec<String>) {
+    let mut valid = Vec::with_capacity(options.len());
+    let mut notes = Vec::new();
+    for mut option in options {
+        let name = if option.label.is_empty() {
+            option.id.as_str()
+        } else {
+            option.label.as_str()
+        };
+        let Some(first) = option.choices.first().cloned() else {
+            notes.push(format!(
+                "Warning: device option '{name}' has no choices. Hiding it."
+            ));
+            continue;
+        };
+        if !option.choices.contains(&option.selected_choice) {
+            notes.push(format!(
+                "Warning: device option '{name}' selected unavailable choice '{}'. Using '{first}'.",
+                option.selected_choice
+            ));
+            option.selected_choice = first;
+        }
+        valid.push(option);
+    }
+    (valid, notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option(choices: &[&str], selected: &str) -> hardware::DeviceOption {
+        hardware::DeviceOption {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choices: choices.iter().map(|choice| (*choice).into()).collect(),
+            selected_choice: selected.into(),
+        }
+    }
+
+    #[test]
+    fn startup_hides_options_without_choices_and_reports_them() {
+        let (options, notes) = sanitize_device_options(vec![option(&[], "")]);
+
+        assert!(options.is_empty());
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("Bandwidth"));
+        assert!(notes[0].contains("no choices"));
+    }
+
+    #[test]
+    fn startup_replaces_an_unavailable_selected_choice() {
+        let (options, notes) =
+            sanitize_device_options(vec![option(&["Narrow", "Wide"], "Missing")]);
+
+        assert_eq!(options[0].selected_choice, "Narrow");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("unavailable choice"));
     }
 }

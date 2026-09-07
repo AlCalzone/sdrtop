@@ -66,18 +66,9 @@ fn lines(
     }
 
     let selected = selected.min(m.device_options.len() - 1);
-    let visible = height.saturating_sub(3);
+    let mut out = option_header(iw, height, theme);
+    let visible = height.saturating_sub(out.len());
     let first = scroll_offset(selected, m.device_options.len(), visible);
-    let mut out = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            fit_text("  Device options", iw),
-            Style::default()
-                .fg(theme.value_hi)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
     for (index, option) in m
         .device_options
         .iter()
@@ -85,35 +76,57 @@ fn lines(
         .skip(first)
         .take(visible)
     {
-        let active = index == selected;
-        let marker = if active { "\u{25b8} " } else { "  " };
-        let value_style = Style::default()
-            .fg(if active { theme.value_hi } else { theme.value })
-            .add_modifier(if active {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        if iw < 7 {
-            out.push(Line::from(Span::styled(
-                fit_text(marker, iw),
-                Style::default().fg(theme.border_accent),
-            )));
-            continue;
-        }
-        let content_width = iw - 7;
-        let label_width = content_width.min(18).min(content_width / 2);
-        let choice_width = content_width - label_width;
-        let label = fit_cell(&option.label, label_width);
-        let choice = fit_text(&option.selected_choice, choice_width);
-        out.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(theme.border_accent)),
-            Span::styled(label, Style::default().fg(theme.label)),
-            Span::raw(" "),
-            Span::styled(format!("\u{25c0} {choice} \u{25b6}"), value_style),
-        ]));
+        out.push(option_line(option, index == selected, iw, theme));
     }
     out
+}
+
+fn option_header(iw: usize, height: usize, theme: &crate::Theme) -> Vec<Line<'static>> {
+    let heading = Line::from(Span::styled(
+        fit_text("  Device options", iw),
+        Style::default()
+            .fg(theme.value_hi)
+            .add_modifier(Modifier::BOLD),
+    ));
+    match height {
+        0 | 1 => Vec::new(),
+        2 => vec![heading],
+        3 => vec![heading, Line::from("")],
+        _ => vec![Line::from(""), heading, Line::from("")],
+    }
+}
+
+fn option_line(
+    option: &crate::hardware::DeviceOption,
+    active: bool,
+    iw: usize,
+    theme: &crate::Theme,
+) -> Line<'static> {
+    let marker = if active { "\u{25b8} " } else { "  " };
+    let value_style = Style::default()
+        .fg(if active { theme.value_hi } else { theme.value })
+        .add_modifier(if active {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    if iw < 7 {
+        return Line::from(Span::styled(
+            fit_text(marker, iw),
+            Style::default().fg(theme.border_accent),
+        ));
+    }
+    let content_width = iw - 7;
+    let label_width = content_width.min(18).min(content_width / 2);
+    let choice_width = content_width - label_width;
+    let label = fit_cell(&option.label, label_width);
+    let choice = fit_text(&option.selected_choice, choice_width);
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme.border_accent)),
+        Span::styled(label, Style::default().fg(theme.label)),
+        Span::raw(" "),
+        Span::styled(format!("\u{25c0} {choice} \u{25b6}"), value_style),
+    ])
 }
 
 fn scroll_offset(cursor: usize, total: usize, visible: usize) -> usize {
@@ -239,6 +252,25 @@ mod tests {
             .join("\n");
         assert!(text.contains("Option 5"), "{text}");
         assert!(!text.contains("Option 0"), "{text}");
+    }
+
+    #[test]
+    fn the_selected_option_uses_the_only_available_row() {
+        let mut m = SdrMetrics::fixture();
+        m.device_options.push(crate::hardware::DeviceOption {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choices: vec!["Narrow".into(), "Wide".into()],
+            selected_choice: "Wide".into(),
+        });
+
+        let text = lines(&m, 0, 60, 1, &crate::Theme::sdr())
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Bandwidth"), "{text}");
+        assert!(text.contains("Wide"), "{text}");
     }
 
     #[test]

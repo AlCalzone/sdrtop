@@ -186,9 +186,13 @@ fn adjust_option(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
     let Some(device) = ctx.device else {
         return;
     };
-    apply_option_change(ctx.state, state.scroll, step, |id, choice| {
-        device.set_option(id, choice)
-    });
+    apply_option_change(
+        ctx.state,
+        state.scroll,
+        step,
+        |id, choice| device.set_option(id, choice),
+        || device.options(),
+    );
 }
 
 fn apply_option_change(
@@ -196,6 +200,7 @@ fn apply_option_change(
     option_index: usize,
     step: isize,
     apply: impl FnOnce(&str, &str) -> anyhow::Result<()>,
+    refresh: impl FnOnce() -> Vec<crate::hardware::DeviceOption>,
 ) {
     let requested = {
         let m = metrics(state);
@@ -221,20 +226,25 @@ fn apply_option_change(
         )
     };
 
-    let result = apply(&requested.0, &requested.2);
+    if let Err(error) = apply(&requested.0, &requested.2) {
+        metrics(state).push_log(format!("{} error: {error}", requested.1));
+        return;
+    }
+
+    let (options, notes) = crate::hardware::sanitize_device_options(refresh());
     let mut m = metrics(state);
-    match result {
-        Ok(()) => {
-            if let Some(option) = m
-                .device_options
-                .iter_mut()
-                .find(|option| option.id == requested.0)
-            {
-                option.selected_choice.clone_from(&requested.2);
-            }
-            m.push_log(format!("{} set to {}", requested.1, requested.2));
-        }
-        Err(error) => m.push_log(format!("{} error: {error}", requested.1)),
+    m.device_options = options;
+    let last_option = m.device_options.len().saturating_sub(1);
+    if let Some(menu) =
+        m.ui.menu
+            .as_mut()
+            .filter(|menu| menu.pane == MenuPane::Options)
+    {
+        menu.scroll = menu.scroll.min(last_option);
+    }
+    m.push_log(format!("{} set to {}", requested.1, requested.2));
+    for note in notes {
+        m.push_log(note);
     }
 }
 
@@ -257,6 +267,7 @@ mod tests {
     use crate::state::SdrMetrics;
     use crate::ui::{self, PanelRegistry};
     use crossterm::event::KeyEvent;
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -311,10 +322,14 @@ mod tests {
     }
 
     fn option(id: &str, label: &str, selected: &str) -> DeviceOption {
+        described_option(id, label, &["Narrow", "Wide"], selected)
+    }
+
+    fn described_option(id: &str, label: &str, choices: &[&str], selected: &str) -> DeviceOption {
         DeviceOption {
             id: id.into(),
             label: label.into(),
-            choices: vec!["Narrow".into(), "Wide".into()],
+            choices: choices.iter().map(|choice| (*choice).into()).collect(),
             selected_choice: selected.into(),
         }
     }
@@ -418,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_change_updates_state_after_the_device_call() {
+    fn a_successful_change_refreshes_all_options_without_locking() {
         let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
         state
             .lock()
@@ -426,19 +441,38 @@ mod tests {
             .device_options
             .push(option("bandwidth", "Bandwidth", "Narrow"));
         let mut call = None;
+        let set_called = Cell::new(false);
+        let options_called = Cell::new(false);
 
-        apply_option_change(&state, 0, 1, |id, choice| {
-            assert!(
-                state.try_lock().is_ok(),
-                "state was locked during device call"
-            );
-            call = Some((id.to_string(), choice.to_string()));
-            Ok(())
-        });
+        apply_option_change(
+            &state,
+            0,
+            1,
+            |id, choice| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "state was locked during set_option"
+                );
+                set_called.set(true);
+                call = Some((id.to_string(), choice.to_string()));
+                Ok(())
+            },
+            || {
+                assert!(set_called.get(), "options refreshed before set_option");
+                assert!(state.try_lock().is_ok(), "state was locked during options");
+                options_called.set(true);
+                vec![
+                    option("bandwidth", "Bandwidth", "Wide"),
+                    described_option("attenuation", "Attenuation", &["0 dB", "10 dB"], "0 dB"),
+                ]
+            },
+        );
 
         let m = state.lock().unwrap();
+        assert!(options_called.get());
         assert_eq!(call, Some(("bandwidth".to_string(), "Wide".to_string())));
         assert_eq!(m.device_options[0].selected_choice, "Wide");
+        assert_eq!(m.device_options[1].selected_choice, "0 dB");
         assert!(m
             .ui
             .log
@@ -454,20 +488,62 @@ mod tests {
             .unwrap()
             .device_options
             .push(option("bandwidth", "Bandwidth", "Narrow"));
+        let before = state.lock().unwrap().device_options.clone();
+        let refresh_called = Cell::new(false);
 
-        apply_option_change(&state, 0, 1, |_, _| {
-            assert!(
-                state.try_lock().is_ok(),
-                "state was locked during device call"
-            );
-            anyhow::bail!("device rejected choice")
-        });
+        apply_option_change(
+            &state,
+            0,
+            1,
+            |_, _| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "state was locked during set_option"
+                );
+                anyhow::bail!("device rejected choice")
+            },
+            || {
+                refresh_called.set(true);
+                Vec::new()
+            },
+        );
 
         let m = state.lock().unwrap();
-        assert_eq!(m.device_options[0].selected_choice, "Narrow");
+        assert!(!refresh_called.get());
+        assert_eq!(m.device_options, before);
         assert!(m.ui.log.back().is_some_and(|entry| entry
             .text
             .contains("Bandwidth error: device rejected choice")));
+    }
+
+    #[test]
+    fn refreshed_options_use_the_startup_sanitization_rules() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        state
+            .lock()
+            .unwrap()
+            .device_options
+            .push(option("bandwidth", "Bandwidth", "Narrow"));
+
+        apply_option_change(
+            &state,
+            0,
+            1,
+            |_, _| Ok(()),
+            || {
+                vec![
+                    described_option("empty", "Empty", &[], ""),
+                    described_option("bandwidth", "Bandwidth", &["Narrow", "Wide"], "Missing"),
+                ]
+            },
+        );
+
+        let m = state.lock().unwrap();
+        assert_eq!(m.device_options.len(), 1);
+        assert_eq!(m.device_options[0].selected_choice, "Narrow");
+        let log: Vec<&str> = m.ui.log.iter().map(|entry| entry.text.as_ref()).collect();
+        assert!(log.iter().any(|entry| entry.contains("no choices")));
+        assert!(log.iter().any(|entry| entry.contains("unavailable choice")));
     }
 
     /// A pane is a detour, not a reset: the place you had in the list survives

@@ -34,18 +34,27 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             let mut m = metrics(state);
-            m.sweep.config.dwell_ms = (m.sweep.config.dwell_ms + 50).min(2000);
+            let dwell_ms = (m.sweep.config.dwell_ms + 50).min(2000);
+            if dwell_ms != m.sweep.config.dwell_ms {
+                m.sweep.generation = m.sweep.generation.wrapping_add(1);
+                m.sweep.config.dwell_ms = dwell_ms;
+            }
             let d = m.sweep.config.dwell_ms;
             m.push_log(format!("Sweep dwell → {} ms", d));
         }
         KeyCode::Char('-') => {
             let mut m = metrics(state);
-            m.sweep.config.dwell_ms = m.sweep.config.dwell_ms.saturating_sub(50).max(50);
+            let dwell_ms = m.sweep.config.dwell_ms.saturating_sub(50).max(50);
+            if dwell_ms != m.sweep.config.dwell_ms {
+                m.sweep.generation = m.sweep.generation.wrapping_add(1);
+                m.sweep.config.dwell_ms = dwell_ms;
+            }
             let d = m.sweep.config.dwell_ms;
             m.push_log(format!("Sweep dwell → {} ms", d));
         }
         KeyCode::Char('c') => {
             let m = metrics(state);
+            let unit = m.caps.level_unit.label();
             let msg = if let Some(frame) = m.sweep.current_frame.as_ref() {
                 let curve = if m.sweep.show_peak {
                     &frame.peak_dbfs
@@ -62,7 +71,7 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                         .min_by_key(|(_, &f)| f.abs_diff(hz))
                         .and_then(|(i, _)| curve.get(i).copied().filter(|v| v.is_finite()));
                     let db_str = level
-                        .map(|v| format!("{:.1} dBFS", v))
+                        .map(|v| format!("{v:.1} {unit}"))
                         .unwrap_or_else(|| "\u{2014}".into());
                     format!("cursor {:.3} MHz {} · ", hz as f64 / 1e6, db_str)
                 } else {
@@ -72,7 +81,7 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                     .top_peaks(1, 500_000)
                     .into_iter()
                     .next()
-                    .map(|(f, v)| format!("top {:.3} MHz {:.1} dBFS", f as f64 / 1e6, v))
+                    .map(|(f, v)| format!("top {:.3} MHz {v:.1} {unit}", f as f64 / 1e6))
                     .unwrap_or_else(|| "no data".into());
                 format!(
                     "Sweep snapshot — {}{} · {:.1}–{:.1} MHz ({:.1}s/cycle)",

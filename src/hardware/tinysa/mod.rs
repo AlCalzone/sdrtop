@@ -15,8 +15,9 @@ use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::hardware::{
-    AcquisitionKind, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceListing, GainModel,
-    LevelUnit, PowerTrace, RxContext, SampleFormat, SampleGeometry, SdrDevice, SoftwareStack,
+    AcquisitionKind, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceListing,
+    DirectSweepConfig, GainModel, LevelUnit, PowerTrace, PowerTraceTarget, RxContext, SampleFormat,
+    SampleGeometry, SdrDevice, SoftwareStack,
 };
 
 use super::traits::RateSet;
@@ -242,6 +243,10 @@ impl SdrDevice for TinySaDevice {
         self.request(Command::NoOp)
     }
 
+    fn set_direct_sweep(&self, config: Option<DirectSweepConfig>) -> anyhow::Result<()> {
+        self.request(|reply| Command::SetDirectSweep(config, reply))
+    }
+
     fn open_notes(&self) -> &[String] {
         &self.notes
     }
@@ -270,6 +275,7 @@ enum Command {
     SetFrequency(u64, UnitReply),
     SetSpan(f64, Sender<anyhow::Result<RateSet>>),
     NoOp(UnitReply),
+    SetDirectSweep(Option<DirectSweepConfig>, UnitReply),
     Shutdown(UnitReply),
 }
 
@@ -285,6 +291,7 @@ struct Worker {
     basic_input: BasicInput,
     center_hz: u64,
     span_hz: u64,
+    direct_sweep: Option<DirectSweepConfig>,
     rx_context: Option<Arc<RxContext>>,
 }
 
@@ -346,6 +353,7 @@ fn worker_entry(
         center_hz,
         span_hz: DEFAULT_SPAN_HZ,
         basic_input,
+        direct_sweep: None,
         rx_context: None,
     }
     .run();
@@ -373,10 +381,24 @@ impl Worker {
                     effective_center_hz,
                     effective_span_hz,
                 }) => {
+                    if self.direct_sweep.is_none() {
+                        self.center_hz = effective_center_hz;
+                        self.span_hz = effective_span_hz;
+                    }
                     if let Some(context) = &self.rx_context {
+                        let target = if self.direct_sweep.is_some() {
+                            PowerTraceTarget::Sweep
+                        } else {
+                            PowerTraceTarget::Spectrum
+                        };
                         let published = context
                             .power_tx
                             .try_send(PowerTrace {
+                                target,
+                                generation: self
+                                    .direct_sweep
+                                    .map(|config| config.generation)
+                                    .unwrap_or(0),
                                 frequencies_hz,
                                 levels_dbm,
                                 rbw_hz: self
@@ -385,7 +407,7 @@ impl Worker {
                                     .map(|khz| (khz * 1_000.0).round() as u32),
                             })
                             .is_ok();
-                        if published {
+                        if published && target == PowerTraceTarget::Spectrum {
                             let mut metrics = context
                                 .metrics
                                 .lock()
@@ -469,6 +491,11 @@ impl Worker {
             Command::NoOp(reply) => {
                 let _ = reply.send(Ok(()));
             }
+            Command::SetDirectSweep(config, reply) => {
+                let result = validate_direct_sweep(config, self.identity.model)
+                    .map(|()| self.direct_sweep = config);
+                let _ = reply.send(result);
+            }
             Command::Shutdown(reply) => {
                 self.rx_context = None;
                 let _ = reply.send(Ok(()));
@@ -491,8 +518,12 @@ impl Worker {
 
     fn scan_once(&mut self) -> anyhow::Result<ScanResult> {
         let (minimum_hz, maximum_hz) = frequency_range(self.identity.model, self.basic_input);
-        let (start_hz, stop_hz) =
-            centered_window(self.center_hz, self.span_hz, minimum_hz, maximum_hz);
+        let (start_hz, stop_hz) = self
+            .direct_sweep
+            .map(|config| (config.start_hz, config.stop_hz))
+            .unwrap_or_else(|| {
+                centered_window(self.center_hz, self.span_hz, minimum_hz, maximum_hz)
+            });
         let points = self.settings.points;
         self.center_hz = window_center(start_hz, stop_hz);
         self.span_hz = stop_hz - start_hz;
@@ -911,6 +942,7 @@ fn reject_command(command: Command, error: anyhow::Error) {
         | Command::Stop(reply)
         | Command::SetFrequency(_, reply)
         | Command::NoOp(reply)
+        | Command::SetDirectSweep(_, reply)
         | Command::Shutdown(reply) => {
             let _ = reply.send(Err(anyhow!(message)));
         }
@@ -921,6 +953,23 @@ fn reject_command(command: Command, error: anyhow::Error) {
             let _ = reply.send(Err(anyhow!(message)));
         }
     }
+}
+
+fn validate_direct_sweep(config: Option<DirectSweepConfig>, model: Model) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if config.start_hz < MIN_FREQUENCY_HZ
+        || config.stop_hz > model.maximum_hz()
+        || config.start_hz >= config.stop_hz
+    {
+        bail!(
+            "tinySA sweep must be within {}..{} Hz with start below stop",
+            MIN_FREQUENCY_HZ,
+            model.maximum_hz()
+        );
+    }
+    Ok(())
 }
 
 fn capabilities(model: Model, basic_input: BasicInput) -> DeviceCapabilities {
@@ -1292,6 +1341,35 @@ mod tests {
     }
 
     #[test]
+    fn direct_sweeps_accept_only_ordered_in_range_limits() {
+        let valid = DirectSweepConfig {
+            start_hz: 88_000_000,
+            stop_hz: 108_000_000,
+            dwell_ms: 200,
+            generation: 7,
+        };
+        assert!(validate_direct_sweep(Some(valid), Model::Basic).is_ok());
+        assert!(validate_direct_sweep(None, Model::Basic).is_ok());
+        assert!(validate_direct_sweep(
+            Some(DirectSweepConfig {
+                start_hz: valid.stop_hz,
+                stop_hz: valid.start_hz,
+                ..valid
+            }),
+            Model::Basic
+        )
+        .is_err());
+        assert!(validate_direct_sweep(
+            Some(DirectSweepConfig {
+                stop_hz: Model::Basic.maximum_hz() + 1,
+                ..valid
+            }),
+            Model::Basic
+        )
+        .is_err());
+    }
+
+    #[test]
     fn unknown_ultra_uses_the_conservative_zs405_range() {
         assert_eq!(Model::UltraUnknown.maximum_hz(), 6_000_000_000);
     }
@@ -1404,6 +1482,7 @@ mod tests {
 
             device.start_rx(context).unwrap();
             let spectrum = power_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+            assert_eq!(spectrum.target, PowerTraceTarget::Spectrum);
             assert_eq!(spectrum.frequencies_hz.len(), spectrum.levels_dbm.len());
             assert!(!spectrum.frequencies_hz.is_empty());
             device.stop_rx().unwrap();

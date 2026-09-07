@@ -114,11 +114,9 @@ impl App {
     }
 
     fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
-        // Sweep mode is owned by the `lab_sweep` preset: keep the real state's
-        // `sweep.active` in sync with the active preset so the sweep_task starts
-        // and stops with it, then take the render snapshot.
         let active_preset = self.engine.active_preset().to_string();
-        let sweep_active = active_preset == "lab_sweep" || active_preset == "micro_sweep";
+        let sweep_active = self.engine.is_panel_visible("sweep_panel")
+            || self.engine.is_panel_visible("micro_sweep_panel");
         // The demod is gated on its panel being on screen, not on the preset being
         // called `lab_signal`: presets are data, and a user preset that lists
         // `fm_demod` used to get a panel that never received a block - it sat at

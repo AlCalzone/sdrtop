@@ -4,7 +4,7 @@
 //! `sweep_panel` - the frequency-scanner display for the `lab_sweep` preset.
 //!
 //! The latest completed `SweepFrame` as a braille envelope over the swept band,
-//! with a dBFS gutter, a frequency axis, a band-plan row and a status line. The
+//! with a level gutter, a frequency axis, a band-plan row and a status line. The
 //! cursor and the peak/mean toggle come from the panel's focus mode.
 //!
 //! Split the way `panels/core/spectrum/` is, because it is the same kind of
@@ -70,7 +70,15 @@ impl Panel for SweepPanel {
         // brackets. The scan parameters ride along as the suffix, rebuilt every
         // frame so the band, dwell and cycle number stay live.
         let sw = &state.sweep;
-        let step_mhz = sw.config.effective_step_hz(state.radio.config_sample_rate) as f64 / 1e6;
+        let step_hz = if state.caps.acquisition == crate::hardware::AcquisitionKind::PowerTrace {
+            sw.current_frame
+                .as_ref()
+                .and_then(|frame| frame.point_spacing_hz())
+                .unwrap_or(0)
+        } else {
+            sw.config.effective_step_hz(state.radio.config_sample_rate)
+        };
+        let step_mhz = step_hz as f64 / 1e6;
         PanelChrome::new("Sweep").suffix(format!(
             "  {:.1}\u{2013}{:.1} MHz \u{00b7} step {:.1} MHz \u{00b7} dwell {} ms \u{00b7} cycle #{}",
             sw.config.start_hz as f64 / 1e6,
@@ -138,18 +146,26 @@ impl Panel for SweepPanel {
             return;
         }
 
-        let env = Envelope::project(frame, plot_w, sw.show_peak);
+        let (y_min, y_max) =
+            if state.caps.acquisition == crate::hardware::AcquisitionKind::PowerTrace {
+                (state.spectrum.y_min, state.spectrum.y_max)
+            } else {
+                (scale::Y_MIN, scale::Y_MAX)
+            };
+        let env = Envelope::project(frame, plot_w, sw.show_peak, y_min, y_max);
         let cursor = sw
             .cursor_frac
             .map(|frac| (scale::cursor_x(frac, env.len()), theme.value_hi));
 
-        axes::draw_gutter(f, gutter, plot_h, theme);
+        axes::draw_gutter(f, gutter, plot_h, y_min, y_max, theme);
         trace::draw(
             f,
             canvas,
             env.body.clone(),
-            Gradient::new(plot_h, theme),
+            Gradient::new(plot_h, y_min, y_max, theme),
             cursor,
+            y_min,
+            y_max,
         );
         axes::draw_frequency(f, rows[1], frame.start_hz, frame.stop_hz, plot_w, theme);
         f.render_widget(
@@ -255,5 +271,23 @@ mod tests {
             !out.contains('\u{2588}'),
             "an empty sweep drew filled cells:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_power_sweep_uses_dbm_and_measured_point_spacing() {
+        let mut metrics = swept();
+        let mut caps = (*metrics.caps).clone();
+        caps.acquisition = crate::hardware::AcquisitionKind::PowerTrace;
+        caps.level_unit = crate::hardware::LevelUnit::Dbm;
+        metrics.caps = std::sync::Arc::new(caps);
+        metrics.spectrum.y_min = -120.0;
+        metrics.spectrum.y_max = 20.0;
+        metrics.sweep.cursor_frac = Some(0.5);
+
+        let out = draw(SweepPanel, 100, 16, &metrics).join("\n");
+        assert!(out.contains("step 0.3 MHz"), "{out}");
+        assert!(out.contains("dBm"), "{out}");
+        assert!(out.contains("-120"), "{out}");
+        assert!(out.contains("  20"), "{out}");
     }
 }

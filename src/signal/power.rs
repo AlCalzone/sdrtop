@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
-use crate::hardware::PowerTrace;
-use crate::state::{FftFrame, SdrMetrics};
+use crate::hardware::{PowerTrace, PowerTraceTarget};
+use crate::state::{FftFrame, SdrMetrics, SweepFrame};
 
 const EMA_ALPHA: f32 = 0.2;
 const PEAK_DECAY_DB: f32 = 0.5;
@@ -24,10 +24,15 @@ impl PowerWorker {
     }
 
     pub fn run(self) {
-        let mut accumulator = SpectrumAccumulator::default();
+        let mut spectrum = SpectrumAccumulator::default();
+        let mut sweep = SweepAccumulator::default();
         let mut rejection_reporter = RejectionReporter::default();
         while let Ok(trace) = self.trace_rx.recv() {
-            if let Err(reason) = accumulator.publish(&self.state, trace) {
+            let result = match trace.target {
+                PowerTraceTarget::Spectrum => spectrum.publish(&self.state, trace),
+                PowerTraceTarget::Sweep => sweep.push(&self.state, trace),
+            };
+            if let Err(reason) = result {
                 rejection_reporter.report(&self.state, reason, Instant::now());
             }
         }
@@ -169,6 +174,163 @@ impl SpectrumAccumulator {
     }
 }
 
+#[derive(Default)]
+struct SweepAccumulator {
+    generation: u64,
+    start_hz: u64,
+    stop_hz: u64,
+    frequencies_hz: Vec<u64>,
+    sums: Vec<f64>,
+    samples: Vec<u32>,
+    peak: Vec<f32>,
+    traces: u32,
+    started: Option<Instant>,
+}
+
+impl SweepAccumulator {
+    fn push(
+        &mut self,
+        state: &Arc<Mutex<SdrMetrics>>,
+        trace: PowerTrace,
+    ) -> Result<(), TraceRejection> {
+        let requested = {
+            let metrics = state.lock().unwrap_or_else(|error| error.into_inner());
+            (
+                metrics.sweep.active,
+                metrics.sweep.generation,
+                metrics.sweep.config.start_hz,
+                metrics.sweep.config.stop_hz,
+                metrics.sweep.config.dwell_ms,
+            )
+        };
+        if !requested.0 {
+            self.reset();
+            return Ok(());
+        }
+        if trace.generation != requested.1 {
+            return Ok(());
+        }
+        if trace.frequencies_hz.is_empty() {
+            return Err(TraceRejection::Empty);
+        }
+        if trace.frequencies_hz.len() != trace.levels_dbm.len() {
+            return Err(TraceRejection::LengthMismatch);
+        }
+        if !trace_covers_requested_range(&trace.frequencies_hz, requested.2, requested.3) {
+            return Ok(());
+        }
+
+        let changed = self.generation != trace.generation
+            || self.start_hz != requested.2
+            || self.stop_hz != requested.3
+            || self.frequencies_hz != trace.frequencies_hz;
+        if changed {
+            self.generation = trace.generation;
+            self.start_hz = requested.2;
+            self.stop_hz = requested.3;
+            self.frequencies_hz.clone_from(&trace.frequencies_hz);
+            self.sums = vec![0.0; trace.levels_dbm.len()];
+            self.samples = vec![0; trace.levels_dbm.len()];
+            self.peak = vec![f32::NEG_INFINITY; trace.levels_dbm.len()];
+            self.traces = 0;
+            self.started = Some(Instant::now());
+        }
+
+        for (((sum, samples), peak), level) in self
+            .sums
+            .iter_mut()
+            .zip(self.samples.iter_mut())
+            .zip(self.peak.iter_mut())
+            .zip(trace.levels_dbm.iter().copied())
+        {
+            if level.is_finite() {
+                *sum += level as f64;
+                *samples += 1;
+                *peak = peak.max(level);
+            }
+        }
+        self.traces += 1;
+
+        let elapsed = self
+            .started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        {
+            let mut metrics = state.lock().unwrap_or_else(|error| error.into_inner());
+            metrics.sweep.positions_total = self.frequencies_hz.len();
+            metrics.sweep.positions_done = self.frequencies_hz.len();
+            metrics.sweep.current_hz = *self.frequencies_hz.last().unwrap_or(&self.start_hz);
+        }
+        if elapsed.as_millis() < requested.4 as u128 {
+            return Ok(());
+        }
+
+        let mean = self
+            .sums
+            .iter()
+            .zip(&self.samples)
+            .map(|(sum, samples)| {
+                if *samples == 0 {
+                    f32::NEG_INFINITY
+                } else {
+                    (sum / *samples as f64) as f32
+                }
+            })
+            .collect();
+        let duration_ms = elapsed.as_millis() as u64;
+        let mut metrics = state.lock().unwrap_or_else(|error| error.into_inner());
+        if !metrics.sweep.active
+            || metrics.sweep.generation != self.generation
+            || metrics.sweep.config.start_hz != self.start_hz
+            || metrics.sweep.config.stop_hz != self.stop_hz
+        {
+            return Ok(());
+        }
+        metrics.sweep.cycle_count += 1;
+        metrics.sweep.cycle_duration_ms = duration_ms;
+        metrics.sweep.current_frame = Some(Arc::new(SweepFrame {
+            start_hz: self.start_hz,
+            stop_hz: self.stop_hz,
+            freq_hz: self.frequencies_hz.clone(),
+            peak_dbfs: self.peak.clone(),
+            mean_dbfs: mean,
+            timestamp: Instant::now(),
+            cycle_count: metrics.sweep.cycle_count,
+            cycle_duration_ms: duration_ms,
+        }));
+        drop(metrics);
+
+        self.sums.fill(0.0);
+        self.samples.fill(0);
+        self.peak.fill(f32::NEG_INFINITY);
+        self.traces = 0;
+        self.started = Some(Instant::now());
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn trace_covers_requested_range(frequencies_hz: &[u64], start_hz: u64, stop_hz: u64) -> bool {
+    let Some((&first, rest)) = frequencies_hz.split_first() else {
+        return false;
+    };
+    let Some(&last) = rest.last() else {
+        return false;
+    };
+    if first != start_hz
+        || last > stop_hz
+        || !frequencies_hz.windows(2).all(|pair| pair[0] <= pair[1])
+    {
+        return false;
+    }
+    let intervals = frequencies_hz.len().saturating_sub(1) as u64;
+    let point_spacing = last.saturating_sub(first) / intervals;
+    point_spacing > 0 && stop_hz.saturating_sub(last) <= point_spacing
+}
+
 pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(f64, f64)> {
     let start = *frequencies_hz.first()?;
     let stop = *frequencies_hz.last()?;
@@ -201,6 +363,8 @@ mod tests {
         let worker = std::thread::spawn(move || PowerWorker::new(rx, worker_state).run());
 
         tx.send(PowerTrace {
+            target: PowerTraceTarget::Spectrum,
+            generation: 0,
             frequencies_hz: vec![100_000_000, 101_000_000, 102_000_000],
             levels_dbm: vec![-90.0, -45.0, -80.0],
             rbw_hz: Some(10_000),
@@ -276,6 +440,8 @@ mod tests {
             .publish(
                 &state,
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100_000_000, 101_000_000],
                     levels_dbm: vec![f32::NAN, -90.0],
                     rbw_hz: None,
@@ -286,6 +452,8 @@ mod tests {
             .publish(
                 &state,
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100_000_000, 101_000_000],
                     levels_dbm: vec![-70.0, -80.0],
                     rbw_hz: None,
@@ -442,5 +610,78 @@ mod tests {
         let frame = metrics.waterfall.last_fft.as_ref().unwrap();
         assert_eq!(frame.frequency_of_bin(0), Some(100_000.0));
         assert_eq!(frame.frequency_of_bin(3), Some(100_003.0));
+    }
+
+    fn sweep_trace(generation: u64, levels_dbm: Vec<f32>) -> PowerTrace {
+        PowerTrace {
+            target: PowerTraceTarget::Sweep,
+            generation,
+            frequencies_hz: vec![100_000_000, 100_500_000, 101_000_000],
+            levels_dbm,
+            rbw_hz: None,
+        }
+    }
+
+    fn sweeping_state(generation: u64) -> Arc<Mutex<SdrMetrics>> {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        {
+            let mut metrics = state.lock().unwrap();
+            metrics.sweep.active = true;
+            metrics.sweep.generation = generation;
+            metrics.sweep.config.start_hz = 100_000_000;
+            metrics.sweep.config.stop_hz = 101_000_000;
+            metrics.sweep.config.dwell_ms = 10_000;
+        }
+        state
+    }
+
+    #[test]
+    fn sweep_accumulation_publishes_measured_peak_and_mean() {
+        let state = sweeping_state(4);
+        let mut accumulator = SweepAccumulator::default();
+        accumulator.push(&state, sweep_trace(4, vec![-80.0, f32::NAN, -60.0]));
+        accumulator.started = Some(Instant::now() - std::time::Duration::from_secs(11));
+        accumulator.push(&state, sweep_trace(4, vec![-70.0, -50.0, -90.0]));
+
+        let metrics = state.lock().unwrap();
+        let frame = metrics.sweep.current_frame.as_ref().unwrap();
+        assert_eq!(frame.peak_dbfs, [-70.0, -50.0, -60.0]);
+        assert_eq!(frame.mean_dbfs, [-75.0, -50.0, -75.0]);
+        assert_eq!(frame.freq_hz, [100_000_000, 100_500_000, 101_000_000]);
+        assert_eq!(metrics.sweep.positions_total, 3);
+        assert_eq!(metrics.sweep.positions_done, 3);
+    }
+
+    #[test]
+    fn sweep_generations_isolate_queued_traces() {
+        let state = sweeping_state(8);
+        let mut accumulator = SweepAccumulator::default();
+        accumulator.push(&state, sweep_trace(7, vec![-10.0, -10.0, -10.0]));
+        assert_eq!(accumulator.traces, 0);
+
+        accumulator.push(&state, sweep_trace(8, vec![-80.0, -70.0, -60.0]));
+        assert_eq!(accumulator.traces, 1);
+        state.lock().unwrap().sweep.generation = 9;
+        accumulator.push(&state, sweep_trace(8, vec![-20.0, -20.0, -20.0]));
+        assert_eq!(accumulator.traces, 1);
+
+        accumulator.push(&state, sweep_trace(9, vec![-90.0, -80.0, -70.0]));
+        assert_eq!(accumulator.generation, 9);
+        assert_eq!(accumulator.traces, 1);
+        assert_eq!(accumulator.sums, [-90.0, -80.0, -70.0]);
+    }
+
+    #[test]
+    fn a_trace_from_a_previous_range_is_not_relabelled() {
+        assert!(trace_covers_requested_range(
+            &[100_000_000, 100_499_999, 100_999_998],
+            100_000_000,
+            101_000_000,
+        ));
+        assert!(!trace_covers_requested_range(
+            &[100_000_000, 100_500_000, 101_000_000],
+            90_000_000,
+            110_000_000,
+        ));
     }
 }

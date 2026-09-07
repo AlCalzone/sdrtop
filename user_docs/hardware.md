@@ -10,7 +10,7 @@
 |--------|--------|
 | HackRF One | Fully supported: spectrum, waterfall, every diagnostic |
 | RTL-SDR (R820T / R828D / E4000) | Fully supported: the whole spectrum, waterfall and lab stack, with a single tuner gain plus AGC |
-| tinySA / tinySA Ultra / Ultra+ | Spectrum and waterfall in calibrated dBm. ZS405 is verified on hardware |
+| tinySA / tinySA Ultra / Ultra+ | Spectrum, waterfall and native band sweeps in calibrated dBm. ZS405 is verified on hardware |
 | **Anything with a SoapySDR driver** | Supported, **and not yet confirmed on hardware other than a HackRF**. See [below](#soapysdr-the-honest-version) |
 | PortaPack H4M (Mayhem) | Fully supported (HackRF mode) |
 
@@ -43,9 +43,9 @@ sdrtop uses the tinySA USB console for calibrated power traces. The backend
 supports the basic tinySA and the Ultra family. It was verified on a ZS405
 running `tinySA4_v1.4-236-ge5aa115`.
 
-The device supplies swept power readings without IQ samples. sdrtop therefore
-offers only the spectrum and waterfall layouts. RBW, attenuation, gain, AGC and
-spur handling use safe automatic defaults.
+The device supplies swept power readings without IQ samples. sdrtop offers the
+spectrum, waterfall, full band sweep and micro sweep layouts. RBW, attenuation,
+gain, AGC and spur handling use safe automatic defaults.
 
 ```sh
 sdrtop --device tinysa

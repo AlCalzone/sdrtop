@@ -147,8 +147,10 @@ impl App {
         acquisition: crate::hardware::AcquisitionKind,
     ) -> anyhow::Result<Vec<String>> {
         let mut warnings = Vec::new();
-        if let Some(preset) = config.presets.get_mut("lab_sweep") {
-            preset.panels.retain(|panel| panel.name != "signal_metrics");
+        if acquisition == crate::hardware::AcquisitionKind::PowerTrace {
+            if let Some(preset) = config.presets.get_mut("lab_sweep") {
+                preset.panels.retain(|panel| panel.name != "signal_metrics");
+            }
         }
         config.presets.retain(|name, preset| {
             if preset.panels.is_empty() {
@@ -613,6 +615,20 @@ mod tests {
         engine.set_preset("lab_sweep");
         assert!(engine.is_panel_visible("sweep_panel"));
         assert!(!engine.is_panel_visible("signal_metrics"));
+    }
+
+    #[test]
+    fn an_iq_device_keeps_signal_metrics_in_the_lab_sweep_layout() {
+        let (engine, _) = App::build_ui_for(
+            "lab_sweep",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionKind::IqSamples,
+        )
+        .unwrap();
+        assert_eq!(engine.active_preset(), "lab_sweep");
+        assert!(engine.is_panel_visible("signal_metrics"));
     }
 
     #[test]

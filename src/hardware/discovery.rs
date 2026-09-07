@@ -51,7 +51,7 @@ impl DeviceKind {
         match self {
             Self::HackRf => hackrf::ffi::api().map(|_| ()),
             Self::RtlSdr => rtlsdr::ffi::api().map(|_| ()),
-            Self::Soapy => Ok(()),
+            _ => Ok(()),
         }
     }
 
@@ -287,6 +287,11 @@ pub fn open_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_availability_check_accepts_soapy() {
+        assert!(DeviceKind::Soapy.check_available().is_ok());
+    }
 
     fn listing(
         kind: DeviceKind,

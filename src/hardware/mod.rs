@@ -30,7 +30,8 @@ pub use discovery::{list_all_devices, open_device, DeviceKind, DeviceListing};
 #[cfg(test)]
 pub(crate) use traits::RateSet;
 pub use traits::{
-    AcquisitionKind, Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, DirectSweepConfig,
-    FeedHealth, GainModel, LevelUnit, PowerTrace, PowerTraceTarget, RxContext, SampleFormat,
-    SampleGeometry, SdrDevice, SoftwareStack, StageSpec, StreamBlock, IQ_TRACE_STALE_MS,
+    AcquisitionKind, Boost, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceOption,
+    DirectSweepConfig, FeedHealth, GainModel, LevelUnit, PowerTrace, PowerTraceTarget, RxContext,
+    SampleFormat, SampleGeometry, SdrDevice, SoftwareStack, StageSpec, StreamBlock,
+    IQ_TRACE_STALE_MS,
 };

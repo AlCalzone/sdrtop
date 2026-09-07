@@ -206,9 +206,7 @@ pub enum MenuPane {
     /// The key reference. Replaces the `?` overlay, which had drifted out of
     /// step with the dispatch because nothing checked it.
     Keys,
-    /// Settings. Empty so far, and it says so on screen. The variant exists
-    /// ahead of its first row so that adding one is a row rather than a
-    /// reshuffle of the enum, the column and the dispatch together.
+    /// Settings exposed by the active device.
     Options,
 }
 
@@ -228,11 +226,7 @@ pub struct MenuState {
     pub section: usize,
     pub entry: usize,
     pub pane: MenuPane,
-    /// First visible row of the [`MenuPane::Keys`] list.
-    ///
-    /// Its own field rather than reusing `entry`: the reference is taller than a
-    /// 24 row terminal, so it has to scroll, and one field meaning two things
-    /// depending on the pane is how a cursor ends up somewhere nobody expected.
+    /// Scroll position in Keys or selected row in Options.
     pub scroll: usize,
 }
 

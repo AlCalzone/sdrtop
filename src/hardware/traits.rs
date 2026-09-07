@@ -65,6 +65,15 @@ pub struct DirectSweepConfig {
     pub generation: u64,
 }
 
+/// One configurable choice exposed by a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceOption {
+    pub id: String,
+    pub label: String,
+    pub choices: Vec<String>,
+    pub selected_choice: String,
+}
+
 /// How raw USB bytes encode each I/Q component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleFormat {
@@ -962,6 +971,14 @@ pub trait SdrDevice: Send + Sync {
 
     fn set_direct_sweep(&self, _config: Option<DirectSweepConfig>) -> anyhow::Result<()> {
         anyhow::bail!("this backend does not support direct power sweeps")
+    }
+
+    fn options(&self) -> Vec<DeviceOption> {
+        Vec::new()
+    }
+
+    fn set_option(&self, _id: &str, _choice: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this backend has no device options")
     }
 
     /// Set one stage by position, exactly.

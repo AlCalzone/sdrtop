@@ -21,7 +21,11 @@ use super::{global, metrics, InputCtx, KeyAction};
 pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
     // Nothing to steer. Should not happen, since the caller only routes here
     // while the menu is open, but closing is a better answer than a panic.
-    let Some(state) = metrics(ctx.state).ui.menu else {
+    let (state, has_options) = {
+        let m = metrics(ctx.state);
+        (m.ui.menu, !m.device_options.is_empty())
+    };
+    let Some(state) = state else {
         return KeyAction::Continue;
     };
 
@@ -29,6 +33,12 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         KeyCode::Esc => close(ctx),
         KeyCode::Char('q') => return KeyAction::Quit,
 
+        KeyCode::Right if state.pane == MenuPane::Options && has_options => {
+            adjust_option(ctx, state, 1)
+        }
+        KeyCode::Left if state.pane == MenuPane::Options && has_options => {
+            adjust_option(ctx, state, -1)
+        }
         KeyCode::Tab | KeyCode::Right => move_row(ctx, state, 1),
         KeyCode::BackTab | KeyCode::Left => move_row(ctx, state, -1),
         KeyCode::Down => move_down(ctx, state, 1),
@@ -62,6 +72,7 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                 return open(ctx, &name);
             }
         }
+        KeyCode::Enter if state.pane == MenuPane::Options => adjust_option(ctx, state, 1),
         _ => {}
     }
     KeyAction::Continue
@@ -158,10 +169,72 @@ fn move_down(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
                 ..state
             });
         }
-        // Nothing to move through yet. When the first setting lands this grows a
-        // cursor of its own; until then the arrows are quiet rather than moving
-        // something the reader cannot see.
-        MenuPane::Options => {}
+        MenuPane::Options => {
+            let count = metrics(ctx.state).device_options.len();
+            if count == 0 {
+                return;
+            }
+            metrics(ctx.state).ui.menu = Some(MenuState {
+                scroll: wrap(state.scroll.min(count - 1), step, count),
+                ..state
+            });
+        }
+    }
+}
+
+fn adjust_option(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
+    let Some(device) = ctx.device else {
+        return;
+    };
+    apply_option_change(ctx.state, state.scroll, step, |id, choice| {
+        device.set_option(id, choice)
+    });
+}
+
+fn apply_option_change(
+    state: &std::sync::Arc<std::sync::Mutex<crate::state::SdrMetrics>>,
+    option_index: usize,
+    step: isize,
+    apply: impl FnOnce(&str, &str) -> anyhow::Result<()>,
+) {
+    let requested = {
+        let m = metrics(state);
+        let Some(option) = m.device_options.get(option_index) else {
+            return;
+        };
+        if option.choices.is_empty() {
+            return;
+        }
+        let current = option
+            .choices
+            .iter()
+            .position(|choice| choice == &option.selected_choice);
+        let selected = match current {
+            Some(index) => wrap(index, step, option.choices.len()),
+            None if step >= 0 => 0,
+            None => option.choices.len() - 1,
+        };
+        (
+            option.id.clone(),
+            option.label.clone(),
+            option.choices[selected].clone(),
+        )
+    };
+
+    let result = apply(&requested.0, &requested.2);
+    let mut m = metrics(state);
+    match result {
+        Ok(()) => {
+            if let Some(option) = m
+                .device_options
+                .iter_mut()
+                .find(|option| option.id == requested.0)
+            {
+                option.selected_choice.clone_from(&requested.2);
+            }
+            m.push_log(format!("{} set to {}", requested.1, requested.2));
+        }
+        Err(error) => m.push_log(format!("{} error: {error}", requested.1)),
     }
 }
 
@@ -180,6 +253,7 @@ fn wrap(i: usize, step: isize, len: usize) -> usize {
 mod tests {
     use super::*;
     use crate::config::LayoutConfig;
+    use crate::hardware::DeviceOption;
     use crate::state::SdrMetrics;
     use crate::ui::{self, PanelRegistry};
     use crossterm::event::KeyEvent;
@@ -224,6 +298,24 @@ mod tests {
 
         fn menu(&self) -> MenuState {
             self.state.lock().unwrap().ui.menu.expect("menu is open")
+        }
+
+        fn show_options(&mut self, options: Vec<DeviceOption>) {
+            let mut m = self.state.lock().unwrap();
+            m.device_options = options;
+            m.ui.menu = Some(MenuState {
+                pane: MenuPane::Options,
+                ..MenuState::default()
+            });
+        }
+    }
+
+    fn option(id: &str, label: &str, selected: &str) -> DeviceOption {
+        DeviceOption {
+            id: id.into(),
+            label: label.into(),
+            choices: vec!["Narrow".into(), "Wide".into()],
+            selected_choice: selected.into(),
         }
     }
 
@@ -276,6 +368,106 @@ mod tests {
             "command_rail",
             "no key in Options may load a layout"
         );
+    }
+
+    #[test]
+    fn options_move_up_and_down_through_device_settings() {
+        let mut h = Harness::new();
+        h.show_options(vec![
+            option("bandwidth", "Bandwidth", "Narrow"),
+            option("mode", "Mode", "Wide"),
+        ]);
+
+        h.key(KeyCode::Down);
+        assert_eq!(h.menu().scroll, 1);
+        h.key(KeyCode::Down);
+        assert_eq!(h.menu().scroll, 0);
+        h.key(KeyCode::Up);
+        assert_eq!(h.menu().scroll, 1);
+    }
+
+    #[test]
+    fn horizontal_value_keys_do_not_leave_options_when_values_exist() {
+        let mut h = Harness::new();
+        h.show_options(vec![option("bandwidth", "Bandwidth", "Narrow")]);
+        let before = h.menu();
+
+        h.key(KeyCode::Right);
+
+        assert_eq!(h.menu(), before);
+    }
+
+    #[test]
+    fn horizontal_keys_keep_the_old_navigation_for_empty_devices() {
+        let mut h = Harness::new();
+        h.state.lock().unwrap().ui.menu = Some(MenuState {
+            pane: MenuPane::Options,
+            ..MenuState::default()
+        });
+
+        h.key(KeyCode::Left);
+        assert_eq!(h.menu().pane, MenuPane::Keys);
+
+        h.state.lock().unwrap().ui.menu = Some(MenuState {
+            pane: MenuPane::Options,
+            ..MenuState::default()
+        });
+        h.key(KeyCode::Right);
+        assert_eq!(h.menu().pane, MenuPane::Views);
+        assert_eq!(h.menu().section, 0);
+    }
+
+    #[test]
+    fn a_successful_change_updates_state_after_the_device_call() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        state
+            .lock()
+            .unwrap()
+            .device_options
+            .push(option("bandwidth", "Bandwidth", "Narrow"));
+        let mut call = None;
+
+        apply_option_change(&state, 0, 1, |id, choice| {
+            assert!(
+                state.try_lock().is_ok(),
+                "state was locked during device call"
+            );
+            call = Some((id.to_string(), choice.to_string()));
+            Ok(())
+        });
+
+        let m = state.lock().unwrap();
+        assert_eq!(call, Some(("bandwidth".to_string(), "Wide".to_string())));
+        assert_eq!(m.device_options[0].selected_choice, "Wide");
+        assert!(m
+            .ui
+            .log
+            .back()
+            .is_some_and(|entry| entry.text.contains("Bandwidth set to Wide")));
+    }
+
+    #[test]
+    fn a_failed_change_keeps_state_and_surfaces_the_error() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        state
+            .lock()
+            .unwrap()
+            .device_options
+            .push(option("bandwidth", "Bandwidth", "Narrow"));
+
+        apply_option_change(&state, 0, 1, |_, _| {
+            assert!(
+                state.try_lock().is_ok(),
+                "state was locked during device call"
+            );
+            anyhow::bail!("device rejected choice")
+        });
+
+        let m = state.lock().unwrap();
+        assert_eq!(m.device_options[0].selected_choice, "Narrow");
+        assert!(m.ui.log.back().is_some_and(|entry| entry
+            .text
+            .contains("Bandwidth error: device rejected choice")));
     }
 
     /// A pane is a detour, not a reset: the place you had in the list survives

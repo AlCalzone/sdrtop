@@ -15,7 +15,7 @@
 //! - [`sections`]: the left column.
 //! - [`entries`]: the right column, a section's layouts.
 //! - [`keys`]: the right column, the key reference.
-//! - [`options`]: the right column, settings. Empty for now, and honest about it.
+//! - [`options`]: the right column, device settings.
 //!
 //! [`render`] is the orchestrator. It resolves the frame, carves the rows and
 //! columns, and calls each part once. **The parts do not call each other.**
@@ -84,7 +84,7 @@ pub fn render(
         .split(inner);
 
     header(f, rows[0], m, theme);
-    footer(f, rows[2], theme);
+    footer(f, rows[2], state.pane, !m.device_options.is_empty(), theme);
 
     // The cursor is cloned into the frame snapshot and arrives here without the
     // engine, so it is clamped rather than trusted. An out of range index would
@@ -159,7 +159,7 @@ fn right_pane(
     match state.pane {
         MenuPane::Views => entries::render(f, body, &menu.sections[section], cursor, theme),
         MenuPane::Keys => keys::render(f, body, &m.caps, state.scroll, theme),
-        MenuPane::Options => options::render(f, body, theme),
+        MenuPane::Options => options::render(f, body, m, state.scroll, theme),
     }
 }
 
@@ -183,19 +183,30 @@ fn header(f: &mut Frame, area: Rect, m: &SdrMetrics, theme: &crate::Theme) {
 }
 
 /// The keys, in the order the design's "Moving around" table lists them.
-fn footer(f: &mut Frame, area: Rect, theme: &crate::Theme) {
+fn footer(f: &mut Frame, area: Rect, pane: MenuPane, has_options: bool, theme: &crate::Theme) {
     let key = Style::default().fg(theme.border_accent);
     let what = Style::default().fg(theme.label);
     let mut spans = Vec::new();
-    for (k, w) in [
-        ("Tab", "section"),
-        ("\u{2191}\u{2193}", "move"),
-        ("1-9", "open"),
-        ("Enter", "open"),
-        ("Esc", "close"),
-    ] {
+    let bindings: &[(&str, &str)] = if pane == MenuPane::Options && has_options {
+        &[
+            ("Tab", "section"),
+            ("\u{2191}\u{2193}", "option"),
+            ("\u{2190}\u{2192}", "value"),
+            ("Enter", "next"),
+            ("Esc", "close"),
+        ]
+    } else {
+        &[
+            ("Tab", "section"),
+            ("\u{2191}\u{2193}", "move"),
+            ("1-9", "open"),
+            ("Enter", "open"),
+            ("Esc", "close"),
+        ]
+    };
+    for (k, w) in bindings {
         spans.push(Span::styled(format!(" {k} "), key));
-        spans.push(Span::styled(w, what));
+        spans.push(Span::styled(*w, what));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

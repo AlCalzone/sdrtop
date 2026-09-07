@@ -86,10 +86,10 @@ impl App {
         startup_results.push(device.set_amp_enable(cfg.radio.amp_enabled));
         startup_results.push(device.set_tuner_agc(cfg.radio.amp_enabled));
 
-        let state = Arc::new(Mutex::new(initial_metrics(
-            &cfg,
-            Boot::normal(&cfg, Arc::clone(&caps), tuning, &info),
-        )?));
+        let mut initial =
+            initial_metrics(&cfg, Boot::normal(&cfg, Arc::clone(&caps), tuning, &info))?;
+        initial.device_options = device.options();
+        let state = Arc::new(Mutex::new(initial));
 
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());

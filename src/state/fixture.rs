@@ -108,6 +108,7 @@ impl SdrMetrics {
             demod: DemodState::default(),
             net: crate::state::NetState::default(),
             caps,
+            device_options: Vec::new(),
             acc: Accumulators::default(),
         }
     }

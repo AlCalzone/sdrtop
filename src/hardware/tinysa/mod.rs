@@ -1510,7 +1510,8 @@ fn manual_attenuation_commands(choice: &str) -> Vec<String> {
     let target: u8 = choice
         .parse()
         .expect("validated tinySA attenuation choice must be numeric");
-    let transition = if target == 0 { 1 } else { 0 };
+    // Use a high attenuation transition because firmware ignores an equal numeric value
+    let transition = if target == 31 { 30 } else { 31 };
     vec![
         format!("attenuate {transition}"),
         format!("attenuate {target}"),
@@ -1955,7 +1956,7 @@ mod tests {
             commands,
             [
                 "rbw 0.2",
-                "attenuate 1",
+                "attenuate 31",
                 "attenuate 0",
                 "lna on",
                 "spur off",
@@ -2078,6 +2079,7 @@ mod tests {
 
         for (high_input, target, commands) in [
             (false, 30, manual_attenuation_commands("30")),
+            (false, 31, manual_attenuation_commands("31")),
             (true, 0, high_attenuation_commands("off")),
             (true, 1, high_attenuation_commands("on")),
         ] {
@@ -2106,7 +2108,7 @@ mod tests {
             startup,
             [
                 "rbw auto",
-                "attenuate 0",
+                "attenuate 31",
                 "attenuate 30",
                 "spur on",
                 "ext_gain 0",
@@ -2131,7 +2133,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(commands, ["attenuate 1", "attenuate 0", "lna on"]);
+        assert_eq!(commands, ["attenuate 31", "attenuate 0", "lna on"]);
         assert_eq!(selected_option_value(&options, "attenuation"), Some("0"));
         assert!(
             prepare_option_update(&options, Model::Zs407, "attenuation", "auto", 10_000, None,)
@@ -2151,7 +2153,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             prepared.commands,
-            ["lna off", "attenuate 1", "attenuate 0", "lna on",]
+            ["lna off", "attenuate 31", "attenuate 0", "lna on",]
         );
     }
 
@@ -2186,7 +2188,7 @@ mod tests {
             Ok(())
         });
         assert!(result.is_err());
-        assert_eq!(commands, ["attenuate 1", "attenuate 0", "lna on"]);
+        assert_eq!(commands, ["attenuate 31", "attenuate 0", "lna on"]);
         assert_eq!(options, before);
     }
 
@@ -2205,7 +2207,7 @@ mod tests {
             [
                 "lna off",
                 "rbw 30",
-                "attenuate 0",
+                "attenuate 31",
                 "attenuate 12",
                 "spur off",
                 "ext_gain -7",
@@ -2222,7 +2224,7 @@ mod tests {
             [
                 "lna off",
                 "rbw 30",
-                "attenuate 1",
+                "attenuate 31",
                 "attenuate 0",
                 "lna on",
                 "spur off",

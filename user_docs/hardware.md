@@ -46,8 +46,10 @@ running `tinySA4_v1.4-236-ge5aa115`.
 The device supplies swept power readings without IQ samples. sdrtop offers the
 spectrum, waterfall, full band sweep and micro sweep layouts. The Options pane
 controls scan points, RBW, attenuation, spur removal and external gain. Ultra
-models also expose LNA, LNA2 and AGC. Scan points are a host-side setting. The
-other controls use the matching tinySA console commands.
+models also expose the external front-end LNA. Scan points are a host-side
+setting. The other controls use the matching tinySA console commands. LNA2 and
+AGC are hidden because the verified ZS405 firmware reloads its internal values
+before every scan.
 
 sdrtop disables output and aborts pending work during startup. It then forces
 input mode and applies a safe automatic baseline before restoring `[tinysa]`

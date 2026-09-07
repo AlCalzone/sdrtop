@@ -1220,6 +1220,40 @@ fn validate_settings_shape(settings: &TinySaSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn persisted_settings(
+    loaded: &TinySaSettings,
+    options: &[DeviceOption],
+) -> anyhow::Result<TinySaSettings> {
+    let mut settings = loaded.clone();
+    for option in options {
+        let value = option.selected_choice.as_str();
+        validate_option_choice(options, &option.id, value)?;
+        match option.id.as_str() {
+            "points" => {
+                settings.points = value.parse().context("tinySA point setting is invalid")?;
+            }
+            "rbw" => settings.rbw = value.to_string(),
+            "attenuation" => settings.attenuation = value.to_string(),
+            "lna" => {
+                settings.lna = match value {
+                    "off" => false,
+                    "on" => true,
+                    _ => bail!("tinySA LNA setting is invalid"),
+                };
+            }
+            "spur" => settings.spur = value.to_string(),
+            "ext_gain" => {
+                settings.ext_gain_db = value
+                    .parse()
+                    .context("tinySA external gain setting is invalid")?;
+            }
+            id => bail!("unknown tinySA option {id}"),
+        }
+    }
+    validate_settings_shape(&settings)?;
+    Ok(settings)
+}
+
 fn startup_options(
     model: Model,
     settings: &TinySaSettings,
@@ -1248,11 +1282,7 @@ fn startup_options(
         ("attenuation", attenuation.to_string()),
     ];
     if model.is_ultra() {
-        values.extend([
-            ("lna", if settings.lna { "on" } else { "off" }.to_string()),
-            ("lna2", settings.lna2.clone()),
-            ("agc", settings.agc.clone()),
-        ]);
+        values.push(("lna", if settings.lna { "on" } else { "off" }.to_string()));
     }
     values.extend([
         ("spur", spur.to_string()),
@@ -1278,8 +1308,6 @@ fn baseline_commands(model: Model) -> &'static [&'static str] {
             "rbw auto",
             "lna off",
             "attenuate auto",
-            "lna2 auto",
-            "agc auto",
             "spur auto",
             "ext_gain 0",
         ]
@@ -1315,23 +1343,7 @@ fn option_definitions(model: Model) -> Vec<DeviceOption> {
         ),
     ];
     if model.is_ultra() {
-        options.extend([
-            option("lna", "LNA", strings(&["off", "on"])),
-            option(
-                "lna2",
-                "LNA2",
-                std::iter::once("auto".to_string())
-                    .chain((0..=7).map(|value| value.to_string()))
-                    .collect(),
-            ),
-            option(
-                "agc",
-                "AGC",
-                std::iter::once("auto".to_string())
-                    .chain((0..=7).map(|value| value.to_string()))
-                    .collect(),
-            ),
-        ]);
+        options.push(option("lna", "LNA", strings(&["off", "on"])));
     }
     options.push(option(
         "spur",
@@ -1411,8 +1423,6 @@ fn option_command(
         "rbw" => format!("rbw {choice}"),
         "attenuation" => format!("attenuate {choice}"),
         "lna" if model.is_ultra() => format!("lna {choice}"),
-        "lna2" if model.is_ultra() => format!("lna2 {choice}"),
-        "agc" if model.is_ultra() => format!("agc {choice}"),
         "spur" => format!("spur {choice}"),
         "ext_gain" => format!("ext_gain {choice}"),
         _ => bail!("unknown tinySA option {id}"),
@@ -1531,7 +1541,7 @@ fn restore_option_commands(model: Model, options: &[DeviceOption]) -> anyhow::Re
     if selected_option_value(options, "lna") == Some("on") {
         commands.push("lna on".to_string());
     }
-    for id in ["lna2", "agc", "spur", "ext_gain"] {
+    for id in ["spur", "ext_gain"] {
         let choice = selected_option_value(options, id)
             .with_context(|| format!("tinySA {id} is missing"))?;
         if let Some(command) = option_command(model, options, id, choice)? {
@@ -1769,9 +1779,9 @@ mod tests {
                 .choices,
             ["auto", "0.2", "1", "3", "10", "30", "100", "300", "600", "850"]
         );
-        for id in ["lna", "lna2", "agc"] {
-            assert!(ultra.iter().any(|option| option.id == id));
-        }
+        assert!(ultra.iter().any(|option| option.id == "lna"));
+        assert!(!ultra.iter().any(|option| option.id == "lna2"));
+        assert!(!ultra.iter().any(|option| option.id == "agc"));
         assert_eq!(
             ultra
                 .iter()
@@ -1793,8 +1803,6 @@ mod tests {
                 "rbw auto",
                 "lna off",
                 "attenuate auto",
-                "lna2 auto",
-                "agc auto",
                 "spur auto",
                 "ext_gain 0",
             ]
@@ -1821,8 +1829,6 @@ mod tests {
                 "rbw 0.2",
                 "attenuate 0",
                 "lna on",
-                "lna2 3",
-                "agc 7",
                 "spur off",
                 "ext_gain -7",
             ]
@@ -1978,8 +1984,6 @@ mod tests {
                 "lna off",
                 "rbw 30",
                 "attenuate 12",
-                "lna2 3",
-                "agc 7",
                 "spur off",
                 "ext_gain -7",
             ]
@@ -1997,12 +2001,73 @@ mod tests {
                 "rbw 30",
                 "attenuate 0",
                 "lna on",
-                "lna2 3",
-                "agc 7",
                 "spur off",
                 "ext_gain -7",
             ]
         );
+    }
+
+    #[test]
+    fn ultra_persistence_uses_authoritative_dependent_settings() {
+        let loaded = TinySaSettings {
+            attenuation: "12".into(),
+            lna: true,
+            lna2: "5".into(),
+            agc: "4".into(),
+            ..TinySaSettings::default()
+        };
+        let (mut options, _) = startup_options(Model::Zs407, &loaded).unwrap();
+        for (id, choice) in [
+            ("points", "900"),
+            ("rbw", "0.2"),
+            ("attenuation", "0"),
+            ("lna", "on"),
+            ("spur", "off"),
+            ("ext_gain", "-12"),
+        ] {
+            set_selected_option(&mut options, id, choice).unwrap();
+        }
+
+        let saved = persisted_settings(&loaded, &options).unwrap();
+
+        assert_eq!(saved.points, 900);
+        assert_eq!(saved.rbw, "0.2");
+        assert_eq!(saved.attenuation, "0");
+        assert!(saved.lna);
+        assert_eq!(saved.lna2, "5");
+        assert_eq!(saved.agc, "4");
+        assert_eq!(saved.spur, "off");
+        assert_eq!(saved.ext_gain_db, -12);
+    }
+
+    #[test]
+    fn basic_persistence_preserves_ultra_settings() {
+        let loaded = TinySaSettings {
+            lna: true,
+            lna2: "5".into(),
+            agc: "4".into(),
+            ..TinySaSettings::default()
+        };
+        let options = option_definitions(Model::Basic);
+        let saved = persisted_settings(&loaded, &options).unwrap();
+
+        assert!(saved.lna);
+        assert_eq!(saved.lna2, "5");
+        assert_eq!(saved.agc, "4");
+    }
+
+    #[test]
+    fn persistence_rejects_malformed_option_state() {
+        for id in ["points", "ext_gain"] {
+            let mut options = option_definitions(Model::Zs407);
+            options
+                .iter_mut()
+                .find(|option| option.id == id)
+                .unwrap()
+                .selected_choice = "invalid".into();
+
+            assert!(persisted_settings(&TinySaSettings::default(), &options).is_err());
+        }
     }
 
     #[test]

@@ -108,7 +108,7 @@ impl App {
                                         return Err(self.forced_option_quit_error());
                                     }
                                 } else {
-                                    self.finish_session();
+                                    self.finish_session()?;
                                     return Ok(());
                                 }
                             }
@@ -123,7 +123,7 @@ impl App {
                 AppEvent::Tick => true,
                 AppEvent::DeviceOptionComplete(completion) => {
                     if input::complete_device_option(&self.state, completion) {
-                        self.finish_session();
+                        self.finish_session()?;
                         return Ok(());
                     }
                     true
@@ -192,10 +192,10 @@ impl App {
         )
     }
 
-    fn finish_session(&self) {
+    fn finish_session(&self) -> io::Result<()> {
         self.restore_noise_sweep();
         self.restore_sweep_tuning();
-        self.save_config();
+        self.save_config().map_err(io::Error::other)
     }
 
     fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -413,17 +413,17 @@ impl App {
         let _ = device.set_frequency(hz);
     }
 
-    fn save_config(&self) {
-        if self.device.is_none() {
-            return;
-        }
-        let Some(path) = &self.config_path else {
-            return;
+    fn save_config(&self) -> anyhow::Result<()> {
+        let Some(device) = self.device.as_ref() else {
+            return Ok(());
         };
-        let tinysa_options = if self.device_kind == hardware::DeviceKind::TinySa {
-            self.device.as_ref().map(|device| device.options())
+        let Some(path) = &self.config_path else {
+            return Ok(());
+        };
+        let tinysa = if self.device_kind == hardware::DeviceKind::TinySa {
+            crate::hardware::tinysa::persisted_settings(&self.tinysa_config, &device.options())?
         } else {
-            None
+            self.tinysa_config.clone()
         };
         let (freq, rate, gains, amp, wf_rows, wf_palette, spec_style, markers, sweep_cfg, recall) = {
             let m = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -440,11 +440,6 @@ impl App {
                 crate::state::recall_to_hz(&m.ui.recall),
             )
         };
-        let tinysa = persisted_tinysa_settings(
-            self.device_kind,
-            &self.tinysa_config,
-            tinysa_options.as_deref(),
-        );
         let cfg = AppConfig {
             radio: RadioConfig {
                 frequency_hz: freq,
@@ -480,42 +475,8 @@ impl App {
             tinysa,
             presets: self.user_presets.clone(),
         };
-        let _ = cfg.save(path);
+        cfg.save(path)
     }
-}
-
-fn persisted_tinysa_settings(
-    device_kind: hardware::DeviceKind,
-    loaded: &crate::config::TinySaSettings,
-    options: Option<&[crate::hardware::DeviceOption]>,
-) -> crate::config::TinySaSettings {
-    if device_kind != hardware::DeviceKind::TinySa {
-        return loaded.clone();
-    }
-    let mut settings = loaded.clone();
-    for option in options.unwrap_or_default() {
-        let value = option.selected_choice.as_str();
-        match option.id.as_str() {
-            "points" => {
-                if let Ok(points) = value.parse() {
-                    settings.points = points;
-                }
-            }
-            "rbw" => settings.rbw = value.to_string(),
-            "attenuation" => settings.attenuation = value.to_string(),
-            "lna" => settings.lna = value == "on",
-            "lna2" => settings.lna2 = value.to_string(),
-            "agc" => settings.agc = value.to_string(),
-            "spur" => settings.spur = value.to_string(),
-            "ext_gain" => {
-                if let Ok(db) = value.parse() {
-                    settings.ext_gain_db = db;
-                }
-            }
-            _ => {}
-        }
-    }
-    settings
 }
 
 #[cfg(test)]
@@ -526,83 +487,6 @@ mod tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
-
-    fn device_option(id: &str, choice: &str) -> crate::hardware::DeviceOption {
-        crate::hardware::DeviceOption {
-            id: id.into(),
-            label: id.into(),
-            choices: vec![choice.into()],
-            selected_choice: choice.into(),
-        }
-    }
-
-    #[test]
-    fn non_tinysa_backends_preserve_loaded_tinysa_settings() {
-        let loaded = crate::config::TinySaSettings {
-            points: 1800,
-            rbw: "custom".into(),
-            attenuation: "31".into(),
-            lna: true,
-            lna2: "7".into(),
-            agc: "6".into(),
-            spur: "off".into(),
-            ext_gain_db: 99,
-        };
-        let options = [device_option("points", "64")];
-        assert_eq!(
-            persisted_tinysa_settings(hardware::DeviceKind::HackRf, &loaded, Some(&options),),
-            loaded
-        );
-    }
-
-    #[test]
-    fn tinysa_persistence_uses_authoritative_dependent_settings() {
-        let loaded = crate::config::TinySaSettings::default();
-        let options = [
-            device_option("points", "900"),
-            device_option("rbw", "0.2"),
-            device_option("attenuation", "0"),
-            device_option("lna", "on"),
-            device_option("lna2", "3"),
-            device_option("agc", "7"),
-            device_option("spur", "off"),
-            device_option("ext_gain", "-12"),
-        ];
-        let saved =
-            persisted_tinysa_settings(hardware::DeviceKind::TinySa, &loaded, Some(&options));
-        assert_eq!(saved.points, 900);
-        assert_eq!(saved.rbw, "0.2");
-        assert_eq!(saved.attenuation, "0");
-        assert!(saved.lna);
-        assert_eq!(saved.lna2, "3");
-        assert_eq!(saved.agc, "7");
-        assert_eq!(saved.spur, "off");
-        assert_eq!(saved.ext_gain_db, -12);
-    }
-
-    #[test]
-    fn basic_tinysa_persistence_preserves_ultra_fields() {
-        let loaded = crate::config::TinySaSettings {
-            lna: true,
-            lna2: "5".into(),
-            agc: "4".into(),
-            ..crate::config::TinySaSettings::default()
-        };
-        let options = [
-            device_option("points", "64"),
-            device_option("rbw", "3"),
-            device_option("attenuation", "12"),
-            device_option("spur", "on"),
-            device_option("ext_gain", "7"),
-        ];
-        let saved =
-            persisted_tinysa_settings(hardware::DeviceKind::TinySa, &loaded, Some(&options));
-        assert_eq!(saved.points, 64);
-        assert!(saved.lna);
-        assert_eq!(saved.lna2, "5");
-        assert_eq!(saved.agc, "4");
-    }
-
     struct QuitDevice {
         caps: DeviceCapabilities,
         tuned_hz: AtomicU64,
@@ -702,6 +586,7 @@ mod tests {
             Some(device.clone()),
             None,
             None,
+            hardware::DeviceKind::HackRf,
         )
         .unwrap();
         let (tx, rx) = mpsc::channel();

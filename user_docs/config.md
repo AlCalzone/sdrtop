@@ -65,8 +65,6 @@ points = 450                # 64, 128, 290, 450, 900 or 1800
 rbw = "auto"                # resolution bandwidth in kHz
 attenuation = "auto"        # auto or 0–31 dB
 lna = false                 # Ultra only
-lna2 = "auto"               # Ultra only: auto or 0–7
-agc = "auto"                # Ultra only: auto or 0–7
 spur = "auto"               # Basic uses on/off; Ultra also accepts auto
 ext_gain_db = 0             # -100–100 dB
 ```
@@ -139,9 +137,11 @@ are saved from the analyzer's current state on quit. Other backends preserve the
 block unchanged.
 
 Basic analyzers convert `spur = "auto"` to `"on"`. They also convert Ultra-only
-RBW values `0.2`, `1` and `850` to `"auto"`. Ultra-only LNA, LNA2 and AGC values
-stay in the file when a Basic analyzer is used. Other invalid values are reported
-when a tinySA opens.
+RBW values `0.2`, `1` and `850` to `"auto"`. The Ultra-only LNA value stays in
+the file when a Basic analyzer is used. Legacy `lna2` and `agc` values are
+accepted and preserved without being applied. Verified ZS405 firmware reloads
+its internal LNA2 and AGC values before every scan. Other invalid values are
+reported when a tinySA opens.
 
 ---
 

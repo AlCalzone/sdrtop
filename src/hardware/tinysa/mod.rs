@@ -714,7 +714,7 @@ fn initialize(
     send_setter_command(port, input_mode_command(identity.model, basic_input))?;
     send_setter_command(port, "abort on")?;
     for command in baseline_commands(identity.model, basic_input) {
-        send_setter_command(port, command)?;
+        send_setter_command(port, &command)?;
     }
     for command in saved_commands {
         send_setter_command(port, &command)?;
@@ -1341,9 +1341,7 @@ fn startup_options(
     let mut commands = Vec::new();
     for (id, choice) in values {
         let option_index = validate_option_choice(&options, id, &choice)?;
-        if let Some(command) = option_command(model, &options, id, &choice)? {
-            commands.push(command);
-        }
+        commands.extend(option_commands(model, &options, id, &choice)?);
         options[option_index].selected_choice = choice;
     }
     Ok((options, commands))
@@ -1361,9 +1359,9 @@ fn validate_legacy_diagnostics(model: Model, settings: &TinySaSettings) -> anyho
     Ok(())
 }
 
-fn baseline_commands(model: Model, basic_input: BasicInput) -> &'static [&'static str] {
+fn baseline_commands(model: Model, basic_input: BasicInput) -> Vec<String> {
     if model.is_ultra() {
-        &[
+        strings(&[
             "ultra on",
             "ultra auto",
             "rbw auto",
@@ -1371,11 +1369,14 @@ fn baseline_commands(model: Model, basic_input: BasicInput) -> &'static [&'stati
             "attenuate auto",
             "spur auto",
             "ext_gain 0",
-        ]
+        ])
     } else if basic_input == BasicInput::High {
-        &["rbw auto", "attenuate 0", "spur on", "ext_gain 0"]
+        let mut commands = vec!["rbw auto".to_string()];
+        commands.extend(high_attenuation_commands("off"));
+        commands.extend(strings(&["spur on", "ext_gain 0"]));
+        commands
     } else {
-        &["rbw auto", "attenuate auto", "spur on", "ext_gain 0"]
+        strings(&["rbw auto", "attenuate auto", "spur on", "ext_gain 0"])
     }
 }
 
@@ -1482,31 +1483,46 @@ fn set_selected_option(options: &mut [DeviceOption], id: &str, choice: &str) -> 
     Ok(())
 }
 
-fn option_command(
+fn option_commands(
     model: Model,
     options: &[DeviceOption],
     id: &str,
     choice: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Vec<String>> {
     validate_option_choice(options, id, choice)?;
-    let command = match id {
-        "points" => return Ok(None),
-        "rbw" => format!("rbw {choice}"),
-        "attenuation" => format!("attenuate {choice}"),
-        "high_attenuation" => format!(
-            "attenuate {}",
-            match choice {
-                "off" => "0",
-                "on" => "1",
-                _ => unreachable!("validated tinySA HIGH attenuation choice"),
-            }
-        ),
-        "lna" if model.is_ultra() => format!("lna {choice}"),
-        "spur" => format!("spur {choice}"),
-        "ext_gain" => format!("ext_gain {choice}"),
+    let commands = match id {
+        "points" => Vec::new(),
+        "rbw" => vec![format!("rbw {choice}")],
+        "attenuation" => manual_attenuation_commands(choice),
+        "high_attenuation" => high_attenuation_commands(choice),
+        "lna" if model.is_ultra() => vec![format!("lna {choice}")],
+        "spur" => vec![format!("spur {choice}")],
+        "ext_gain" => vec![format!("ext_gain {choice}")],
         _ => bail!("unknown tinySA option {id}"),
     };
-    Ok(Some(command))
+    Ok(commands)
+}
+
+fn manual_attenuation_commands(choice: &str) -> Vec<String> {
+    if choice == "auto" {
+        return vec!["attenuate auto".to_string()];
+    }
+    let target: u8 = choice
+        .parse()
+        .expect("validated tinySA attenuation choice must be numeric");
+    let transition = if target == 0 { 1 } else { 0 };
+    vec![
+        format!("attenuate {transition}"),
+        format!("attenuate {target}"),
+    ]
+}
+
+fn high_attenuation_commands(choice: &str) -> Vec<String> {
+    let mut commands = vec!["attenuate 1".to_string(), "attenuate 0".to_string()];
+    if choice == "on" {
+        commands.push("attenuate 1".to_string());
+    }
+    commands
 }
 
 struct PreparedOption {
@@ -1535,12 +1551,17 @@ fn prepare_option_update(
             bail!("tinySA sweep span is too narrow for {points} points");
         }
     }
+    let lna_is_on = selected_option_value(options, "lna") == Some("on");
     let mut commands = Vec::new();
     if id == "lna" && choice == "on" {
-        commands.push("attenuate 0".to_string());
+        commands.extend(manual_attenuation_commands("0"));
     }
-    if let Some(command) = option_command(model, options, id, choice)? {
-        commands.push(command);
+    if id == "attenuation" && lna_is_on {
+        commands.push("lna off".to_string());
+        commands.extend(option_commands(model, options, id, choice)?);
+        commands.push("lna on".to_string());
+    } else {
+        commands.extend(option_commands(model, options, id, choice)?);
     }
     Ok(PreparedOption {
         option_index,
@@ -1602,9 +1623,7 @@ fn basic_option_commands(options: &[DeviceOption]) -> anyhow::Result<Vec<String>
     for id in ["rbw", attenuation_id, "spur", "ext_gain"] {
         let choice = selected_option_value(options, id)
             .with_context(|| format!("tinySA {id} is missing"))?;
-        if let Some(command) = option_command(Model::Basic, options, id, choice)? {
-            commands.push(command);
-        }
+        commands.extend(option_commands(Model::Basic, options, id, choice)?);
     }
     Ok(commands)
 }
@@ -1618,9 +1637,7 @@ fn restore_option_commands(model: Model, options: &[DeviceOption]) -> anyhow::Re
     for id in ["rbw", "attenuation"] {
         let choice = selected_option_value(options, id)
             .with_context(|| format!("tinySA {id} is missing"))?;
-        if let Some(command) = option_command(model, options, id, choice)? {
-            commands.push(command);
-        }
+        commands.extend(option_commands(model, options, id, choice)?);
     }
     if selected_option_value(options, "lna") == Some("on") {
         commands.push("lna on".to_string());
@@ -1628,9 +1645,7 @@ fn restore_option_commands(model: Model, options: &[DeviceOption]) -> anyhow::Re
     for id in ["spur", "ext_gain"] {
         let choice = selected_option_value(options, id)
             .with_context(|| format!("tinySA {id} is missing"))?;
-        if let Some(command) = option_command(model, options, id, choice)? {
-            commands.push(command);
-        }
+        commands.extend(option_commands(model, options, id, choice)?);
     }
     Ok(commands)
 }
@@ -1646,7 +1661,7 @@ fn recover_option_state(
     send_setter_command(port, input_mode_command(model, basic_input))?;
     send_setter_command(port, "abort on")?;
     for command in baseline_commands(model, basic_input) {
-        send_setter_command(port, command)?;
+        send_setter_command(port, &command)?;
     }
     for command in restore_option_commands(model, options)? {
         send_setter_command(port, &command)?;
@@ -1913,7 +1928,13 @@ mod tests {
         );
         assert_eq!(
             baseline_commands(Model::Basic, BasicInput::High),
-            ["rbw auto", "attenuate 0", "spur on", "ext_gain 0"]
+            [
+                "rbw auto",
+                "attenuate 1",
+                "attenuate 0",
+                "spur on",
+                "ext_gain 0",
+            ]
         );
 
         let settings = TinySaSettings {
@@ -1934,6 +1955,7 @@ mod tests {
             commands,
             [
                 "rbw 0.2",
+                "attenuate 1",
                 "attenuate 0",
                 "lna on",
                 "spur off",
@@ -2004,27 +2026,96 @@ mod tests {
     fn option_commands_are_whitelisted_after_choice_validation() {
         let basic = option_definitions(Model::Basic, BasicInput::Low);
         assert_eq!(
-            option_command(Model::Basic, &basic, "points", "450").unwrap(),
-            None
+            option_commands(Model::Basic, &basic, "points", "450").unwrap(),
+            Vec::<String>::new()
         );
         assert_eq!(
-            option_command(Model::Basic, &basic, "rbw", "10").unwrap(),
-            Some("rbw 10".into())
+            option_commands(Model::Basic, &basic, "rbw", "10").unwrap(),
+            ["rbw 10"]
         );
-        assert!(option_command(Model::Basic, &basic, "rbw", "10; reset").is_err());
-        assert!(option_command(Model::Basic, &basic, "lna", "on").is_err());
-        assert!(option_command(Model::Basic, &basic, "missing", "on").is_err());
+        assert!(option_commands(Model::Basic, &basic, "rbw", "10; reset").is_err());
+        assert!(option_commands(Model::Basic, &basic, "lna", "on").is_err());
+        assert!(option_commands(Model::Basic, &basic, "missing", "on").is_err());
 
         let high = option_definitions(Model::Basic, BasicInput::High);
         assert_eq!(
-            option_command(Model::Basic, &high, "high_attenuation", "off").unwrap(),
-            Some("attenuate 0".into())
+            option_commands(Model::Basic, &high, "high_attenuation", "off").unwrap(),
+            ["attenuate 1", "attenuate 0"]
         );
         assert_eq!(
-            option_command(Model::Basic, &high, "high_attenuation", "on").unwrap(),
-            Some("attenuate 1".into())
+            option_commands(Model::Basic, &high, "high_attenuation", "on").unwrap(),
+            ["attenuate 1", "attenuate 0", "attenuate 1"]
         );
-        assert!(option_command(Model::Basic, &high, "high_attenuation", "auto").is_err());
+        assert!(option_commands(Model::Basic, &high, "high_attenuation", "auto").is_err());
+    }
+
+    #[test]
+    fn manual_attenuation_plans_clear_firmware_auto_mode() {
+        struct FirmwareAttenuation {
+            value: u8,
+            automatic: bool,
+            high_input: bool,
+        }
+
+        impl FirmwareAttenuation {
+            fn apply(&mut self, command: &str) {
+                let choice = command.strip_prefix("attenuate ").unwrap();
+                if choice == "auto" {
+                    self.value = if self.high_input { 0 } else { 30 };
+                    self.automatic = true;
+                    return;
+                }
+                let value = choice.parse().unwrap();
+                if self.value == value {
+                    return;
+                }
+                self.value = value;
+                if !self.high_input || value == 0 {
+                    self.automatic = false;
+                }
+            }
+        }
+
+        for (high_input, target, commands) in [
+            (false, 30, manual_attenuation_commands("30")),
+            (true, 0, high_attenuation_commands("off")),
+            (true, 1, high_attenuation_commands("on")),
+        ] {
+            let mut firmware = FirmwareAttenuation {
+                value: if high_input { 0 } else { 30 },
+                automatic: true,
+                high_input,
+            };
+            for command in commands {
+                firmware.apply(&command);
+            }
+            assert_eq!(firmware.value, target);
+            assert!(!firmware.automatic);
+        }
+    }
+
+    #[test]
+    fn basic_low_startup_and_recovery_force_manual_attenuation() {
+        let settings = TinySaSettings {
+            attenuation: "30".into(),
+            ..TinySaSettings::default()
+        };
+        let (options, startup) = startup_options(Model::Basic, BasicInput::Low, &settings).unwrap();
+
+        assert_eq!(
+            startup,
+            [
+                "rbw auto",
+                "attenuate 0",
+                "attenuate 30",
+                "spur on",
+                "ext_gain 0",
+            ]
+        );
+        assert_eq!(
+            restore_option_commands(Model::Basic, &options).unwrap(),
+            startup
+        );
     }
 
     #[test]
@@ -2040,7 +2131,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(commands, ["attenuate 0", "lna on"]);
+        assert_eq!(commands, ["attenuate 1", "attenuate 0", "lna on"]);
         assert_eq!(selected_option_value(&options, "attenuation"), Some("0"));
         assert!(
             prepare_option_update(&options, Model::Zs407, "attenuation", "auto", 10_000, None,)
@@ -2053,6 +2144,14 @@ mod tests {
         assert!(
             prepare_option_update(&options, Model::Zs407, "attenuation", "0", 10_000, None,)
                 .is_ok()
+        );
+
+        let prepared =
+            prepare_option_update(&options, Model::Zs407, "attenuation", "0", 10_000, None)
+                .unwrap();
+        assert_eq!(
+            prepared.commands,
+            ["lna off", "attenuate 1", "attenuate 0", "lna on",]
         );
     }
 
@@ -2087,7 +2186,7 @@ mod tests {
             Ok(())
         });
         assert!(result.is_err());
-        assert_eq!(commands, ["attenuate 0", "lna on"]);
+        assert_eq!(commands, ["attenuate 1", "attenuate 0", "lna on"]);
         assert_eq!(options, before);
     }
 
@@ -2106,6 +2205,7 @@ mod tests {
             [
                 "lna off",
                 "rbw 30",
+                "attenuate 0",
                 "attenuate 12",
                 "spur off",
                 "ext_gain -7",
@@ -2122,6 +2222,7 @@ mod tests {
             [
                 "lna off",
                 "rbw 30",
+                "attenuate 1",
                 "attenuate 0",
                 "lna on",
                 "spur off",
@@ -2201,7 +2302,14 @@ mod tests {
         assert!(commands.iter().any(|command| command == "attenuate 1"));
         assert_eq!(
             restore_option_commands(Model::Basic, &options).unwrap(),
-            ["rbw auto", "attenuate 1", "spur on", "ext_gain 0"]
+            [
+                "rbw auto",
+                "attenuate 1",
+                "attenuate 0",
+                "attenuate 1",
+                "spur on",
+                "ext_gain 0",
+            ]
         );
     }
 

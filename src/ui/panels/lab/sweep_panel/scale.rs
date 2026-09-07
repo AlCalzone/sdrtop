@@ -12,13 +12,16 @@ use ratatui::style::Color;
 
 use crate::palette::{magnitude_to_color_themed, ColorDepth};
 
+/// dBFS window for the vertical axis.
+pub(super) const Y_MIN: f32 = -100.0;
+pub(super) const Y_MAX: f32 = 0.0;
 /// Width of the left dBFS-label gutter.
 pub(super) const AXIS_W: u16 = 5;
 
 /// Height of the window in dB, floored at 1 so nothing divides by zero if the
 /// constants are ever brought together.
-pub(super) fn span_db(y_min: f32, y_max: f32) -> f32 {
-    (y_max - y_min).max(1.0)
+pub(super) fn span_db() -> f32 {
+    (Y_MAX - Y_MIN).max(1.0)
 }
 
 /// Dim a truecolor toward black by factor `f` (256/16 pass through). Matches the
@@ -50,15 +53,13 @@ pub(super) struct Gradient {
     body: Vec<Color>,
     /// Full brightness, for the top edge.
     edge: Vec<Color>,
-    y_min: f32,
-    y_max: f32,
 }
 
 impl Gradient {
     /// Four steps per character row, capped: enough that the shading is smooth on
     /// a tall pane, bounded so a very tall one does not spend the frame drawing
     /// bands nobody can distinguish.
-    pub(super) fn new(plot_h: usize, y_min: f32, y_max: f32, theme: &crate::Theme) -> Self {
+    pub(super) fn new(plot_h: usize, theme: &crate::Theme) -> Self {
         let steps = (plot_h * 4).clamp(1, 512);
         let depth = ColorDepth::detect();
         let level: Vec<f32> = (0..steps)
@@ -68,21 +69,15 @@ impl Gradient {
                 } else {
                     0.0
                 };
-                y_min + f * span_db(y_min, y_max)
+                Y_MIN + f * span_db()
             })
             .collect();
         let edge: Vec<Color> = level
             .iter()
-            .map(|&y| magnitude_to_color_themed(y, y_min, y_max, depth, theme))
+            .map(|&y| magnitude_to_color_themed(y, Y_MIN, Y_MAX, depth, theme))
             .collect();
         let body = edge.iter().map(|&c| dim(c, BODY_DIM)).collect();
-        Self {
-            level,
-            body,
-            edge,
-            y_min,
-            y_max,
-        }
+        Self { level, body, edge }
     }
 
     pub(super) fn steps(&self) -> usize {
@@ -99,7 +94,7 @@ impl Gradient {
 
     /// The edge colour for a level, clamped into the window.
     pub(super) fn edge_at(&self, level_db: f32) -> Color {
-        let frac = ((level_db - self.y_min) / span_db(self.y_min, self.y_max)).clamp(0.0, 1.0);
+        let frac = ((level_db - Y_MIN) / span_db()).clamp(0.0, 1.0);
         let last = self.steps() - 1;
         self.edge[((frac * last as f32) as usize).min(last)]
     }
@@ -134,15 +129,13 @@ pub(super) fn cursor_bucket(frac: f64, n: usize) -> usize {
 mod tests {
     use super::*;
     use crate::Theme;
-    const Y_MIN: f32 = -100.0;
-    const Y_MAX: f32 = 0.0;
 
     #[test]
     fn the_window_runs_the_right_way_up() {
         // A `const` block: the window running the wrong way up would draw the
         // whole plot inverted, and that is worth failing the build for.
         const { assert!(Y_MIN < Y_MAX, "the dBFS window must run bottom to top") };
-        assert!((span_db(Y_MIN, Y_MAX) - 100.0).abs() < 1e-6);
+        assert!((span_db() - 100.0).abs() < 1e-6);
     }
 
     /// A level at the bottom of the window and one at the top must not get the
@@ -150,7 +143,7 @@ mod tests {
     #[test]
     fn the_gradient_distinguishes_the_ends_of_the_window() {
         let t = Theme::sdr();
-        let g = Gradient::new(10, Y_MIN, Y_MAX, &t);
+        let g = Gradient::new(10, &t);
         assert!(g.steps() > 1);
         assert_ne!(g.edge_at(Y_MIN), g.edge_at(Y_MAX));
         assert_eq!(g.level(0), Y_MIN);
@@ -161,7 +154,7 @@ mod tests {
     #[test]
     fn a_level_outside_the_window_still_has_a_colour() {
         let t = Theme::sdr();
-        let g = Gradient::new(10, Y_MIN, Y_MAX, &t);
+        let g = Gradient::new(10, &t);
         assert_eq!(g.edge_at(-500.0), g.edge_at(Y_MIN));
         assert_eq!(g.edge_at(50.0), g.edge_at(Y_MAX));
     }
@@ -170,7 +163,7 @@ mod tests {
     #[test]
     fn a_single_row_plot_has_at_least_one_band() {
         let t = Theme::sdr();
-        let g = Gradient::new(0, Y_MIN, Y_MAX, &t);
+        let g = Gradient::new(0, &t);
         assert_eq!(g.steps(), 1);
         // And `edge_at` must not divide by `steps - 1 == 0`.
         let _ = g.edge_at(-50.0);

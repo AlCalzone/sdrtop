@@ -20,18 +20,14 @@ checkpoint instead of by version.
 
 - **Native tinySA support.** Basic tinySA, tinySA Ultra and Ultra+ devices are
   discovered through their USB CDC serial port. Their calibrated sweeps feed the
-  spectrum, waterfall and band-sweep views in dBm.
-- **Device options.** The menu's Options pane now controls tinySA point count,
-  RBW, attenuation, LNA, LNA2, AGC, spur rejection and external-gain correction.
+  spectrum and waterfall views in dBm.
 
 ### Changed
 
 - Layouts that need IQ samples are hidden when a swept spectrum analyzer is
-  selected. Spectrum, waterfall and both sweep layouts remain available.
+  selected. Spectrum and waterfall layouts remain available.
 - The `s` input controls span on a tinySA. It continues to control sample rate on
   IQ radios.
-- Missing HackRF or RTL-SDR development libraries no longer block a build for a
-  tinySA. Each unavailable native backend is omitted with a build warning.
 
 ## [0.5.1] - 2026-09-04
 

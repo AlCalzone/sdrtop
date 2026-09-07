@@ -171,7 +171,6 @@ Piping a script into `sh` means running code you haven't read. You should read i
 sdrtop is on [crates.io](https://crates.io/crates/sdrtop). Cargo compiles it *on your machine*, so it links what your machine actually has and doesn't care about your architecture or distribution.
 
 ```sh
-# Add these only for the native HackRF and RTL-SDR backends.
 sudo apt install libhackrf-dev librtlsdr-dev pkg-config          # Debian / Ubuntu / Mint
 sudo pacman -S hackrf rtl-sdr pkgconf                            # Arch / Manjaro
 sudo dnf install hackrf-devel rtl-sdr-devel pkgconf-pkg-config   # Fedora
@@ -179,10 +178,9 @@ sudo dnf install hackrf-devel rtl-sdr-devel pkgconf-pkg-config   # Fedora
 cargo install sdrtop --locked
 ```
 
-You can skip the radio libraries for a tinySA-only build. sdrtop includes each
-native SDR backend whose development library is present. It wants **Rust 1.88+**,
-and your distro's Rust is quite possibly ancient (Debian 12 ships 1.63, bless
-it), which [rustup](https://rustup.rs) fixes in one line.
+You need both libraries at build time even if you only own one radio. Sorry.
+Wants **Rust 1.88+**, and your distro's Rust is quite possibly ancient (Debian
+12 ships 1.63, bless it), which [rustup](https://rustup.rs) fixes in one line.
 
 Then go make coffee: a few minutes on a laptop, considerably more on a Raspberry Pi. It's not frozen, it's just Rust.
 
@@ -275,7 +273,7 @@ The whole story, in order: [What's new](user_docs/whats-new.md).
 |---|---|---|
 | HackRF One | ✅ Full support | All diagnostics, gain stages, ADC metrics |
 | RTL-SDR (R820T, E4000, R828D) | ✅ Full support | Single tuner gain + AGC; no VGA, no BB filter, no Friis NF |
-| tinySA / Ultra / Ultra+ | ✅ Spectrum support | ZS405 verified; calibrated dBm spectrum, waterfall and native band sweeps |
+| tinySA / Ultra / Ultra+ | ✅ Spectrum support | ZS405 verified; calibrated dBm spectrum and waterfall |
 | **Anything with a SoapySDR driver** | 🧪 **Beta** | Airspy, SDRplay, Pluto, Lime, bladeRF, USRP, SoapyRemote. Unconfirmed on anything but a HackRF |
 | PortaPack H4M (Mayhem) | ✅ Full support | HackRF mode: all HackRF diagnostics apply |
 | HackRF Pro | 🔲 Planned | Needs hardware |

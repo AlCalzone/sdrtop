@@ -90,11 +90,6 @@ impl App {
             &cfg,
             Boot::normal(&cfg, Arc::clone(&caps), tuning, &info),
         )));
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .device_options = device.options();
-
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
             // Read the identity back out of the state rather than off `info`
@@ -335,7 +330,6 @@ impl App {
             theme,
             focus_keys,
             theme_config: cfg.theme.clone(),
-            tinysa_config: cfg.tinysa.clone(),
             user_presets: cfg.presets,
         }
     }

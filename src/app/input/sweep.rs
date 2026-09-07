@@ -46,7 +46,6 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Char('c') => {
             let m = metrics(state);
-            let unit = m.caps.level_unit.label();
             let msg = if let Some(frame) = m.sweep.current_frame.as_ref() {
                 let curve = if m.sweep.show_peak {
                     &frame.peak_dbfs
@@ -63,7 +62,7 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                         .min_by_key(|(_, &f)| f.abs_diff(hz))
                         .and_then(|(i, _)| curve.get(i).copied().filter(|v| v.is_finite()));
                     let db_str = level
-                        .map(|v| format!("{v:.1} {unit}"))
+                        .map(|v| format!("{:.1} dBFS", v))
                         .unwrap_or_else(|| "\u{2014}".into());
                     format!("cursor {:.3} MHz {} · ", hz as f64 / 1e6, db_str)
                 } else {
@@ -73,7 +72,7 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                     .top_peaks(1, 500_000)
                     .into_iter()
                     .next()
-                    .map(|(f, v)| format!("top {:.3} MHz {v:.1} {unit}", f as f64 / 1e6))
+                    .map(|(f, v)| format!("top {:.3} MHz {:.1} dBFS", f as f64 / 1e6, v))
                     .unwrap_or_else(|| "no data".into());
                 format!(
                     "Sweep snapshot — {}{} · {:.1}–{:.1} MHz ({:.1}s/cycle)",
@@ -111,13 +110,13 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                     _ => None,
                 }
             };
-            if let (Some(hz), Some(preset)) = (target, trace_preset_after_sweep(ctx.engine)) {
+            if let Some(hz) = target {
                 {
                     let mut m = metrics(state);
                     m.sweep.pending_tune = Some(hz);
                 }
                 ctx.engine.clear_focus();
-                ctx.engine.set_preset(&preset);
+                ctx.engine.set_preset("spectrum_waterfall");
                 let mut m = metrics(state);
                 m.ui.focused_panel = None;
                 m.ui.focused_panel_bindings = &[];
@@ -127,31 +126,4 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         _ => return global::handle(key, ctx),
     }
     KeyAction::Continue
-}
-
-fn trace_preset_after_sweep(engine: &crate::ui::LayoutEngine) -> Option<String> {
-    for preferred in ["spectrum_waterfall", "spectrum", "waterfall"] {
-        if engine.has_preset(preferred) {
-            return Some(preferred.to_string());
-        }
-    }
-    let mut compatible: Vec<String> = engine
-        .config
-        .presets
-        .iter()
-        .filter(|(_, preset)| {
-            let has_trace = preset
-                .panels
-                .iter()
-                .any(|panel| matches!(panel.name.as_str(), "spectrum" | "waterfall"));
-            let has_sweep = preset
-                .panels
-                .iter()
-                .any(|panel| matches!(panel.name.as_str(), "sweep_panel" | "micro_sweep_panel"));
-            has_trace && !has_sweep
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    compatible.sort();
-    compatible.into_iter().next()
 }

@@ -60,15 +60,6 @@ start_hz = 400000000       # scanner band start
 stop_hz  = 500000000       # scanner band end
 dwell_ms = 200             # measure time per step (50–2000)
 
-[tinysa]
-points        = 450         # 64, 128, 290, 450, 900 or 1800
-rbw           = "auto"      # auto, or a supported value in kHz
-attenuation   = "auto"      # auto, or 0 through 31 dB
-lna           = false       # Ultra and Ultra+ only
-lna2          = "auto"      # Ultra and Ultra+: auto, or 0 through 7
-agc           = "auto"      # Ultra and Ultra+: auto, or 0 through 7
-spur          = "auto"      # basic: off/on; Ultra: off/on/auto
-ext_gain_db   = 0           # external gain correction, -100 through +100 dB
 ```
 
 Each waterfall cell shows two rows of history, so `waterfall_max_rows` is twice
@@ -184,9 +175,6 @@ frequency. Your last band and dwell are saved on quit.
 
 A sweep cycle takes a couple of seconds, so it's for *finding* signals rather than
 real-time monitoring. Once you spot one, `Enter` tunes to it.
-
-On a tinySA, the analyzer scans the requested band directly. `dwell_ms` is the
-minimum time used to accumulate each published peak and mean cycle.
 
 ---
 ## Custom layout presets

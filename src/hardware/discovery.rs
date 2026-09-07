@@ -77,7 +77,6 @@ impl DeviceKind {
 #[derive(Clone, Debug)]
 pub struct DeviceListing {
     pub kind: DeviceKind,
-    #[cfg_attr(not(any(has_hackrf, has_rtlsdr)), allow(dead_code))]
     pub index: usize,
     pub label: String,
     /// The device's serial as its own backend spells it, when it has one.
@@ -250,31 +249,10 @@ fn offer_soapy(
 }
 
 /// Opens the device a listing points at, as a trait object.
-pub fn open_device(
-    listing: &DeviceListing,
-    tinysa_settings: &crate::config::TinySaSettings,
-) -> anyhow::Result<Arc<dyn SdrDevice>> {
+pub fn open_device(listing: &DeviceListing) -> anyhow::Result<Arc<dyn SdrDevice>> {
     match listing.kind {
-        DeviceKind::HackRf => {
-            #[cfg(has_hackrf)]
-            {
-                Ok(Arc::new(hackrf::HackRfDevice::open(listing.index)?))
-            }
-            #[cfg(not(has_hackrf))]
-            {
-                anyhow::bail!("HackRF support was not built; install libhackrf-dev and rebuild")
-            }
-        }
-        DeviceKind::RtlSdr => {
-            #[cfg(has_rtlsdr)]
-            {
-                Ok(Arc::new(rtlsdr::RtlDevice::open(listing.index)?))
-            }
-            #[cfg(not(has_rtlsdr))]
-            {
-                anyhow::bail!("RTL-SDR support was not built; install librtlsdr-dev and rebuild")
-            }
-        }
+        DeviceKind::HackRf => Ok(Arc::new(hackrf::HackRfDevice::open(listing.index)?)),
+        DeviceKind::RtlSdr => Ok(Arc::new(rtlsdr::RtlDevice::open(listing.index)?)),
         DeviceKind::Soapy => {
             let Some(args) = listing.args.as_deref() else {
                 anyhow::bail!("a SoapySDR listing with no device arguments cannot be opened");
@@ -285,7 +263,7 @@ pub fn open_device(
             let Some(path) = listing.path.as_deref() else {
                 anyhow::bail!("a tinySA listing with no serial port cannot be opened");
             };
-            Ok(Arc::new(tinysa::TinySaDevice::open(path, tinysa_settings)?))
+            Ok(Arc::new(tinysa::TinySaDevice::open(path)?))
         }
     }
 }

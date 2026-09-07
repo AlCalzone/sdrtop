@@ -47,7 +47,6 @@ pub struct App {
     /// and never touches again - so without a copy of them there is nothing left
     /// to write back.
     pub(super) theme_config: crate::config::ThemeConfig,
-    pub(super) tinysa_config: crate::config::TinySaSettings,
 }
 
 impl App {
@@ -56,7 +55,7 @@ impl App {
         config_path: Option<PathBuf>,
         listing: &hardware::DeviceListing,
     ) -> anyhow::Result<Self> {
-        match hardware::open_device(listing, &cfg.tinysa) {
+        match hardware::open_device(listing) {
             Ok(device) => Self::new_normal(cfg, config_path, device),
             Err(open_err) => {
                 // Device is present but couldn't be opened (e.g. busy) - fall back
@@ -119,8 +118,7 @@ impl App {
         // `sweep.active` in sync with the active preset so the sweep_task starts
         // and stops with it, then take the render snapshot.
         let active_preset = self.engine.active_preset().to_string();
-        let sweep_active = self.engine.is_panel_visible("sweep_panel")
-            || self.engine.is_panel_visible("micro_sweep_panel");
+        let sweep_active = active_preset == "lab_sweep" || active_preset == "micro_sweep";
         // The demod is gated on its panel being on screen, not on the preset being
         // called `lab_signal`: presets are data, and a user preset that lists
         // `fm_demod` used to get a panel that never received a block - it sat at
@@ -299,27 +297,6 @@ impl App {
                 crate::state::recall_to_hz(&m.ui.recall),
             )
         };
-        let mut tinysa = self.tinysa_config.clone();
-        {
-            let m = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            for option in &m.device_options {
-                let Some(value) = option.selected_value() else {
-                    continue;
-                };
-                match option.id.as_str() {
-                    "points" => tinysa.points = value.parse().unwrap_or(tinysa.points),
-                    "rbw" => tinysa.rbw = value.to_string(),
-                    "attenuation" => tinysa.attenuation = value.to_string(),
-                    "lna" => tinysa.lna = value == "on",
-                    "lna2" => tinysa.lna2 = value.to_string(),
-                    "agc" => tinysa.agc = value.to_string(),
-                    "spur" => tinysa.spur = value.to_string(),
-                    "ext_gain" => tinysa.ext_gain_db = value.parse().unwrap_or(tinysa.ext_gain_db),
-                    _ => {}
-                }
-            }
-        }
-
         let cfg = AppConfig {
             radio: RadioConfig {
                 frequency_hz: freq,
@@ -352,7 +329,6 @@ impl App {
                 stop_hz: sweep_cfg.stop_hz,
                 dwell_ms: sweep_cfg.dwell_ms,
             },
-            tinysa,
             presets: self.user_presets.clone(),
         };
         let _ = cfg.save(path);

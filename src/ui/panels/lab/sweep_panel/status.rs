@@ -25,23 +25,17 @@ pub(super) fn line(
     theme: &crate::Theme,
 ) -> Line<'static> {
     match state.sweep.cursor_frac {
-        Some(frac) => cursor(frac, frame, env, state.caps.level_unit.label(), theme),
+        Some(frac) => cursor(frac, frame, env, theme),
         None => cycle(state, frame, theme),
     }
 }
 
-fn cursor(
-    frac: f64,
-    frame: &SweepFrame,
-    env: &Envelope,
-    unit: &str,
-    theme: &crate::Theme,
-) -> Line<'static> {
+fn cursor(frac: f64, frame: &SweepFrame, env: &Envelope, theme: &crate::Theme) -> Line<'static> {
     let hz = frame.freq_at_fraction(frac);
     // A bucket the sweep never reached reads as a dash, not as the window floor:
     // "no measurement here" and "−100 dBFS here" are different answers.
     let level = match env.level_at(cursor_bucket(frac, env.len())) {
-        Some(v) => format!("{v:.1} {unit}"),
+        Some(v) => format!("{v:.1} dBFS"),
         None => "\u{2014}".to_string(),
     };
     let band = band_at(hz).map(|b| format!("  [{b}]")).unwrap_or_default();

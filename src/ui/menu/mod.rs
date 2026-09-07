@@ -84,7 +84,7 @@ pub fn render(
         .split(inner);
 
     header(f, rows[0], m, theme);
-    footer(f, rows[2], state.pane, theme);
+    footer(f, rows[2], theme);
 
     // The cursor is cloned into the frame snapshot and arrives here without the
     // engine, so it is clamped rather than trusted. An out of range index would
@@ -159,7 +159,7 @@ fn right_pane(
     match state.pane {
         MenuPane::Views => entries::render(f, body, &menu.sections[section], cursor, theme),
         MenuPane::Keys => keys::render(f, body, &m.caps.gain, state.scroll, theme),
-        MenuPane::Options => options::render(f, body, m, state.scroll, theme),
+        MenuPane::Options => options::render(f, body, theme),
     }
 }
 
@@ -183,29 +183,19 @@ fn header(f: &mut Frame, area: Rect, m: &SdrMetrics, theme: &crate::Theme) {
 }
 
 /// The keys, in the order the design's "Moving around" table lists them.
-fn footer(f: &mut Frame, area: Rect, pane: MenuPane, theme: &crate::Theme) {
+fn footer(f: &mut Frame, area: Rect, theme: &crate::Theme) {
     let key = Style::default().fg(theme.border_accent);
     let what = Style::default().fg(theme.label);
     let mut spans = Vec::new();
-    let bindings: &[(&str, &str)] = if pane == MenuPane::Options {
-        &[
-            ("Tab", "section"),
-            ("\u{2191}\u{2193}", "select"),
-            ("\u{2190}\u{2192}", "change"),
-            ("Esc", "close"),
-        ]
-    } else {
-        &[
-            ("Tab", "section"),
-            ("\u{2191}\u{2193}", "move"),
-            ("1-9", "open"),
-            ("Enter", "open"),
-            ("Esc", "close"),
-        ]
-    };
-    for (k, w) in bindings {
+    for (k, w) in [
+        ("Tab", "section"),
+        ("\u{2191}\u{2193}", "move"),
+        ("1-9", "open"),
+        ("Enter", "open"),
+        ("Esc", "close"),
+    ] {
         spans.push(Span::styled(format!(" {k} "), key));
-        spans.push(Span::styled(*w, what));
+        spans.push(Span::styled(w, what));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -379,7 +369,9 @@ mod tests {
         assert_ne!(top, down);
     }
 
-    /// A device with no backend settings says so.
+    /// The Options pane is empty by design, so what is being pinned is that the
+    /// emptiness is stated on screen. A pane that opens to blank space reads as
+    /// a bug; one that says why it is blank reads as a decision.
     #[test]
     fn the_options_pane_admits_it_is_empty() {
         let state = MenuState {
@@ -393,7 +385,7 @@ mod tests {
             all.contains("Options"),
             "the left column needs the row:\n{all}"
         );
-        assert!(all.contains("no configurable options"), "{all}");
+        assert!(all.contains("Settings will live here"), "{all}");
         // And the pane replaces the right column only, the same as Keys.
         assert!(all.contains("Command Rail"), "{all}");
     }

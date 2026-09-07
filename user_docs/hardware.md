@@ -10,7 +10,7 @@
 |--------|--------|
 | HackRF One | Fully supported: spectrum, waterfall, every diagnostic |
 | RTL-SDR (R820T / R828D / E4000) | Fully supported: the whole spectrum, waterfall and lab stack, with a single tuner gain plus AGC |
-| tinySA / tinySA Ultra / Ultra+ | Spectrum, waterfall and native band sweeps in calibrated dBm. ZS405 is verified on hardware |
+| tinySA / tinySA Ultra / Ultra+ | Spectrum and waterfall in calibrated dBm. ZS405 is verified on hardware |
 | **Anything with a SoapySDR driver** | Supported, **and not yet confirmed on hardware other than a HackRF**. See [below](#soapysdr-the-honest-version) |
 | PortaPack H4M (Mayhem) | Fully supported (HackRF mode) |
 
@@ -46,14 +46,11 @@ the ZS405 Ultra and the ZS406/ZS407 Ultra+ families. The backend was tested on a
 ZS405 running `tinySA4_v1.4-236-ge5aa115`.
 
 The tinySA is a swept spectrum analyzer. It returns frequency and calibrated
-power pairs. It does not return IQ samples. sdrtop therefore offers the spectrum,
-waterfall, full band sweep and micro sweep layouts. The IQ, demodulation, RF-chain
-and host-timing layouts are hidden.
-
-The menu's **Options** pane controls the point count, RBW, attenuation, spur
-handling and external-gain correction. Ultra devices also expose LNA, LNA2 and
-AGC. sdrtop owns low/high input-path switching when a requested range crosses a
-hardware boundary.
+power pairs. It does not return IQ samples. sdrtop therefore offers the spectrum
+and waterfall layouts. The IQ, sweep, demodulation, RF-chain and host-timing
+layouts are hidden. Automatic RBW and attenuation keep the first integration
+small. sdrtop owns low/high input-path switching when a requested range crosses
+a hardware boundary.
 
 Acquisition starts when the tinySA opens. `Space` stops it and starts it again.
 
@@ -217,9 +214,10 @@ which is the honest answer rather than a guess dressed as two.
 | Raspberry Pi (Pi 2 and newer, 64-bit Raspberry Pi OS Bookworm) | Supported, with lower sample rates on older Pis |
 | ARM / Android (Termux) | Builds and runs; needs a root-capable USB stack to reach the device |
 
-sdrtop uses **libhackrf 2023.01.1 or newer** for HackRF and **librtlsdr** for
-RTL-SDR. A source build includes each native backend whose development library is
-present. Neither library is required for tinySA.
+sdrtop needs **libhackrf 2023.01.1 or newer**, which is what ships in Raspberry Pi
+OS Bookworm and Ubuntu 24.04. Older distributions need it built from source. It
+also links **librtlsdr** (`librtlsdr-dev` on Debian and Ubuntu, `rtl-sdr` on
+Arch), and both are needed at build time regardless of which radio you own.
 
 **libSoapySDR is not needed to build and not needed to run.** It is opened at
 runtime if it happens to be there, which is why the same binary serves people who

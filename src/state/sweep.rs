@@ -154,8 +154,6 @@ pub struct SweepState {
     pub positions_done: usize,
     pub cycle_count: u64,
     pub cycle_duration_ms: u64,
-    /// Changes each time a direct-power sweep session starts.
-    pub generation: u64,
     /// Render the peak curve (`true`) or the mean curve (`false`); toggled by `[M]`.
     pub show_peak: bool,
     /// Cursor position as a 0..1 fraction across the band, set in the panel's
@@ -199,7 +197,6 @@ impl Default for SweepState {
             positions_done: 0,
             cycle_count: 0,
             cycle_duration_ms: 0,
-            generation: 0,
             show_peak: true,
             cursor_frac: None,
             pending_tune: None,

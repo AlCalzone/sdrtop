@@ -107,47 +107,25 @@ impl App {
     }
 
     fn filter_power_sweep_layouts(config: &mut LayoutConfig) {
-        const UNSUPPORTED_BUILTINS: &[&str] = &[
-            "command_rail",
-            "main",
-            "lab_iq",
-            "lab_rf",
-            "lab_timing",
-            "lab_signal",
-            "micro_main",
-            "micro_signal",
-            "micro_gain",
-            "micro_health",
-            "observer",
-        ];
-        const COMMON: &[&str] = &[
+        const SUPPORTED: &[&str] = &[
             "header",
             "header_slim",
             "spectrum",
             "waterfall",
-            "sweep_panel",
-            "sweep_strip",
-            "micro_sweep_panel",
             "log",
             "footer",
         ];
-        const INSTRUMENTS: &[&str] = &["spectrum", "waterfall", "sweep_panel", "micro_sweep_panel"];
+        const INSTRUMENTS: &[&str] = &["spectrum", "waterfall"];
 
-        let builtins = LayoutConfig::default_config().presets;
-        config.presets.retain(|name, preset| {
-            !UNSUPPORTED_BUILTINS.contains(&name.as_str())
-                || builtins.get(name).is_none_or(|builtin| builtin != preset)
-        });
-        for preset in config.presets.values_mut() {
-            preset
-                .panels
-                .retain(|panel| COMMON.contains(&panel.name.as_str()));
-        }
         config.presets.retain(|_, preset| {
             preset
                 .panels
                 .iter()
-                .any(|panel| INSTRUMENTS.contains(&panel.name.as_str()))
+                .all(|panel| SUPPORTED.contains(&panel.name.as_str()))
+                && preset
+                    .panels
+                    .iter()
+                    .any(|panel| INSTRUMENTS.contains(&panel.name.as_str()))
         });
         if !config.presets.contains_key(&config.active_preset) {
             let fallback = [
@@ -167,9 +145,6 @@ impl App {
             });
             if let Some(fallback) = fallback {
                 config.active_preset = fallback;
-            } else if let Some(spectrum) = builtins.get("spectrum").cloned() {
-                config.presets.insert("spectrum".into(), spectrum);
-                config.active_preset = "spectrum".into();
             }
         }
     }
@@ -461,13 +436,7 @@ mod tests {
             false,
             crate::hardware::AcquisitionModel::PowerSweep,
         );
-        for available in [
-            "spectrum",
-            "waterfall",
-            "spectrum_waterfall",
-            "lab_sweep",
-            "micro_sweep",
-        ] {
+        for available in ["spectrum", "waterfall", "spectrum_waterfall"] {
             assert!(engine.has_preset(available), "{available} was hidden");
         }
         for unavailable in [
@@ -476,76 +445,12 @@ mod tests {
             "lab_rf",
             "lab_timing",
             "lab_signal",
+            "lab_sweep",
+            "micro_sweep",
         ] {
             assert!(!engine.has_preset(unavailable), "{unavailable} survived");
         }
         assert_eq!(engine.active_preset(), "spectrum_waterfall");
-    }
-
-    #[test]
-    fn a_trace_compatible_override_of_a_builtin_name_survives() {
-        let mut user = HashMap::new();
-        user.insert(
-            "main".to_string(),
-            crate::config::PresetConfig {
-                panels: vec![
-                    crate::config::PanelSpec {
-                        name: "header_slim".into(),
-                        position: crate::config::Position::Top,
-                        height: Some(4),
-                        width_pct: None,
-                    },
-                    crate::config::PanelSpec {
-                        name: "spectrum".into(),
-                        position: crate::config::Position::Body,
-                        height: None,
-                        width_pct: None,
-                    },
-                ],
-                ..Default::default()
-            },
-        );
-        let (engine, _) = App::build_ui_for(
-            "main",
-            &user,
-            None,
-            false,
-            crate::hardware::AcquisitionModel::PowerSweep,
-        );
-        assert!(engine.has_preset("main"));
-        assert_eq!(engine.active_preset(), "main");
-        assert!(engine.is_panel_visible("header_slim"));
-    }
-
-    #[test]
-    fn an_unsupported_override_of_the_default_falls_back_to_a_live_layout() {
-        let mut user = HashMap::new();
-        user.insert(
-            "spectrum_waterfall".to_string(),
-            crate::config::PresetConfig {
-                panels: vec![crate::config::PanelSpec {
-                    name: "iq_constellation".into(),
-                    position: crate::config::Position::Body,
-                    height: None,
-                    width_pct: None,
-                }],
-                ..Default::default()
-            },
-        );
-        let (engine, _) = App::build_ui_for(
-            "spectrum_waterfall",
-            &user,
-            None,
-            false,
-            crate::hardware::AcquisitionModel::PowerSweep,
-        );
-        assert!(engine.has_preset(engine.active_preset()));
-        assert!(
-            engine.is_panel_visible("spectrum")
-                || engine.is_panel_visible("waterfall")
-                || engine.is_panel_visible("sweep_panel")
-                || engine.is_panel_visible("micro_sweep_panel")
-        );
     }
 
     /// A full-height waterfall must reach its own bottom border.

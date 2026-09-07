@@ -14,8 +14,8 @@ cargo install sdrtop --locked
 
 sdrtop is on [crates.io](https://crates.io/crates/sdrtop), so cargo compiles it
 on your machine and links whatever your machine actually has. Works on every
-architecture and every distribution. Native HackRF and RTL-SDR support needs
-their matching development libraries. A tinySA-only build does not.
+architecture and every distribution. You still need the two libraries first,
+which is the "What you need" section below.
 
 ## The shorter way, if you don't want to think about it
 
@@ -89,7 +89,7 @@ Everything below is the same job done by hand.
 
 - A Linux machine
 - A HackRF One, RTL-SDR dongle or tinySA connected via USB
-- The matching development library for each native SDR backend you want
+- The `libhackrf` and `librtlsdr` libraries
 - Rust stable 1.88 or newer. Most distributions ship something older, so
   install it with [rustup](https://rustup.rs) rather than from your package
   manager
@@ -117,8 +117,10 @@ sudo emerge net-wireless/hackrf net-wireless/rtl-sdr
 nix-shell -p hackrf rtl-sdr pkg-config
 ```
 
-You can skip this package list for a tinySA-only build. If a native SDR library
-is absent, the build prints a warning and omits that backend.
+> **Install both libraries even if you only own one radio.** sdrtop links both
+> backends at build time, so a missing `librtlsdr` breaks the build for a HackRF
+> owner and vice versa. At runtime it's perfectly happy with whichever radio you
+> actually plug in.
 
 A tinySA needs no additional native library. Its USB console appears as
 `/dev/ttyACM*`. Add your account to the serial-device group if opening it reports

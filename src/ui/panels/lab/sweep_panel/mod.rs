@@ -70,21 +70,7 @@ impl Panel for SweepPanel {
         // brackets. The scan parameters ride along as the suffix, rebuilt every
         // frame so the band, dwell and cycle number stay live.
         let sw = &state.sweep;
-        let step_hz = if state.caps.acquisition == crate::hardware::AcquisitionModel::PowerSweep {
-            sw.current_frame
-                .as_ref()
-                .and_then(|frame| {
-                    frame
-                        .freq_hz
-                        .get(1)
-                        .zip(frame.freq_hz.first())
-                        .map(|(second, first)| second.saturating_sub(*first))
-                })
-                .unwrap_or(0)
-        } else {
-            sw.config.effective_step_hz(state.radio.config_sample_rate)
-        };
-        let step_mhz = step_hz as f64 / 1e6;
+        let step_mhz = sw.config.effective_step_hz(state.radio.config_sample_rate) as f64 / 1e6;
         PanelChrome::new("Sweep").suffix(format!(
             "  {:.1}\u{2013}{:.1} MHz \u{00b7} step {:.1} MHz \u{00b7} dwell {} ms \u{00b7} cycle #{}",
             sw.config.start_hz as f64 / 1e6,
@@ -152,22 +138,18 @@ impl Panel for SweepPanel {
             return;
         }
 
-        let y_min = state.spectrum.y_min;
-        let y_max = state.spectrum.y_max;
-        let env = Envelope::project(frame, plot_w, sw.show_peak, y_min, y_max);
+        let env = Envelope::project(frame, plot_w, sw.show_peak);
         let cursor = sw
             .cursor_frac
             .map(|frac| (scale::cursor_x(frac, env.len()), theme.value_hi));
 
-        axes::draw_gutter(f, gutter, plot_h, y_min, y_max, theme);
+        axes::draw_gutter(f, gutter, plot_h, theme);
         trace::draw(
             f,
             canvas,
             env.body.clone(),
-            Gradient::new(plot_h, y_min, y_max, theme),
+            Gradient::new(plot_h, theme),
             cursor,
-            y_min,
-            y_max,
         );
         axes::draw_frequency(f, rows[1], frame.start_hz, frame.stop_hz, plot_w, theme);
         f.render_widget(

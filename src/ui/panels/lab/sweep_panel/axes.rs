@@ -15,22 +15,22 @@ use ratatui::{
     Frame,
 };
 
-use super::scale::AXIS_W;
+use super::scale::{AXIS_W, Y_MAX, Y_MIN};
 
 /// Below this many rows there is no room for a middle label without it crowding
 /// the top or bottom one.
 const MID_LABEL_MIN_H: usize = 5;
 
 /// The gutter column, top to bottom: `Y_MAX`, optionally the midpoint, `Y_MIN`.
-pub(super) fn gutter_labels(plot_h: usize, y_min: f32, y_max: f32) -> Vec<String> {
+pub(super) fn gutter_labels(plot_h: usize) -> Vec<String> {
     (0..plot_h)
         .map(|r| {
             if r == 0 {
-                format!("{:>4} ", y_max as i32)
+                format!("{:>4} ", Y_MAX as i32)
             } else if r == plot_h - 1 {
-                format!("{:>4} ", y_min as i32)
+                format!("{:>4} ", Y_MIN as i32)
             } else if plot_h >= MID_LABEL_MIN_H && r == plot_h / 2 {
-                format!("{:>4} ", ((y_max + y_min) / 2.0) as i32)
+                format!("{:>4} ", ((Y_MAX + Y_MIN) / 2.0) as i32)
             } else {
                 " ".repeat(AXIS_W as usize)
             }
@@ -54,15 +54,8 @@ pub(super) fn frequency_row(start_hz: u64, stop_hz: u64, plot_w: usize) -> Strin
     )
 }
 
-pub(super) fn draw_gutter(
-    f: &mut Frame,
-    area: Rect,
-    plot_h: usize,
-    y_min: f32,
-    y_max: f32,
-    theme: &crate::Theme,
-) {
-    let lines: Vec<Line> = gutter_labels(plot_h, y_min, y_max)
+pub(super) fn draw_gutter(f: &mut Frame, area: Rect, plot_h: usize, theme: &crate::Theme) {
+    let lines: Vec<Line> = gutter_labels(plot_h)
         .into_iter()
         .map(|s| Line::from(Span::styled(s, Style::default().fg(theme.label))))
         .collect();
@@ -89,12 +82,10 @@ pub(super) fn draw_frequency(
 #[cfg(test)]
 mod tests {
     use super::*;
-    const Y_MIN: f32 = -100.0;
-    const Y_MAX: f32 = 0.0;
 
     #[test]
     fn the_gutter_labels_the_ends_of_the_window() {
-        let g = gutter_labels(9, Y_MIN, Y_MAX);
+        let g = gutter_labels(9);
         assert_eq!(g.len(), 9);
         assert!(g[0].trim() == "0", "top should be Y_MAX: {:?}", g[0]);
         assert!(g[8].trim() == "-100", "bottom should be Y_MIN: {:?}", g[8]);
@@ -111,7 +102,7 @@ mod tests {
     /// four rows.
     #[test]
     fn a_short_gutter_keeps_only_the_two_ends() {
-        let g = gutter_labels(4, Y_MIN, Y_MAX);
+        let g = gutter_labels(4);
         assert_eq!(g.len(), 4);
         assert_eq!(g[0].trim(), "0");
         assert_eq!(g[3].trim(), "-100");
@@ -120,11 +111,11 @@ mod tests {
 
     #[test]
     fn a_one_row_gutter_does_not_panic() {
-        let g = gutter_labels(1, Y_MIN, Y_MAX);
+        let g = gutter_labels(1);
         assert_eq!(g.len(), 1);
         // Row 0 is both the first and the last; the first branch wins.
         assert_eq!(g[0].trim(), "0");
-        assert!(gutter_labels(0, Y_MIN, Y_MAX).is_empty());
+        assert!(gutter_labels(0).is_empty());
     }
 
     /// The frequency row spans the swept band and starts past the gutter, so the

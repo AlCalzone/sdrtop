@@ -11,10 +11,13 @@ const MAN_DIR: &str = "target/man";
 fn main() {
     emit_version();
     generate_man_page();
-    println!("cargo:rustc-check-cfg=cfg(has_hackrf)");
-    println!("cargo:rustc-check-cfg=cfg(has_rtlsdr)");
 
-    // docs.rs builds every published crate and cannot install system packages.
+    // docs.rs builds every published crate and cannot install system packages,
+    // so the probe below would panic there and leave a red build badge on the
+    // crates.io page of a binary-only crate whose docs nobody reads. docs.rs
+    // announces itself with DOCS_RS=1. Skipping the link directives costs
+    // nothing there: `cargo doc` documents the crate, it never links the
+    // binary.
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     if std::env::var_os("DOCS_RS").is_some() {
         return;
@@ -28,36 +31,21 @@ fn main() {
     // Install: apt install libhackrf-dev  (Bookworm / Ubuntu 24.04+)
     // Older distros: build from source at
     // https://github.com/greatscottgadgets/hackrf
-    if pkg_config::probe_library("libhackrf").is_ok() {
-        println!("cargo:rustc-cfg=has_hackrf");
-    } else {
-        println!("cargo:warning=libhackrf not found; building without the HackRF backend");
+    if let Err(e) = pkg_config::probe_library("libhackrf") {
+        panic!(
+            "libhackrf not found ({}). \
+             Install: apt install libhackrf-dev  \
+             (requires Raspberry Pi OS Bookworm or Ubuntu 24.04+)",
+            e
+        );
     }
 
-    // Some distros ship librtlsdr without a .pc file.
-    if pkg_config::probe_library("librtlsdr").is_ok() {
-        println!("cargo:rustc-cfg=has_rtlsdr");
-    } else if linker_has("rtlsdr") {
+    // librtlsdr powers the RTL-SDR backend. Some distros ship the library
+    // without a .pc file, so fall back to a bare link directive (and let the
+    // linker error if it is genuinely missing) rather than failing the probe.
+    if pkg_config::probe_library("librtlsdr").is_err() {
         println!("cargo:rustc-link-lib=rtlsdr");
-        println!("cargo:rustc-cfg=has_rtlsdr");
-    } else {
-        println!("cargo:warning=librtlsdr not found; building without the RTL-SDR backend");
     }
-}
-
-fn linker_has(name: &str) -> bool {
-    let library = format!("lib{name}.so");
-    let argument = format!("-print-file-name={library}");
-    std::process::Command::new("cc")
-        .arg(argument)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|path| {
-            let path = path.trim();
-            !path.is_empty() && path != library
-        })
 }
 
 /// Render `sdrtop.1` from the CLI definition.

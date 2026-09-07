@@ -411,7 +411,6 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         demod: crate::state::DemodState::default(),
         net: crate::state::NetState::default(),
         caps,
-        device_options: Vec::new(),
         acc: Accumulators::default(),
     }
 }

@@ -1277,6 +1277,7 @@ mod tests {
     #[test]
     fn display_grid_rejects_duplicate_firmware_frequencies() {
         assert!(display_frequencies(&[100_000, 100_000, 100_001]).is_err());
+        assert!(display_frequencies(&[100_002, 100_001, 100_000]).is_err());
     }
 
     #[test]

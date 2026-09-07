@@ -69,7 +69,7 @@ Automatic discovery recognizes the official USB CDC identity on
 present or discovery cannot inspect sysfs. A Basic tinySA uses the persisted
 `[tinysa].basic_input` value. The default is LOW from 100 kHz to 350 MHz. HIGH
 covers 240 MHz to 959 MHz. The supported firmware defines 959 MHz as the HIGH
-limit. `?input=low` or `?input=high` overrides the config for one session. A bare
+limit. `?input=low` or `?input=high` overrides the config at startup. A bare
 `--device tinysa` or `tinysa=PATH` uses the config value.
 
 Connector selection happens only during startup. Restart sdrtop to use an edited

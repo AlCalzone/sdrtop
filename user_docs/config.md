@@ -141,7 +141,7 @@ block unchanged.
 `basic_input` selects the Basic model's physical connector for the full session.
 It accepts `low` from 100 kHz to 350 MHz or `high` from 240 MHz to 959 MHz.
 This is a startup-only setting. Restart sdrtop after editing it. An explicit
-`?input=low` or `?input=high` in `--device` takes priority for that session. A
+`?input=low` or `?input=high` in `--device` takes priority at startup. A
 bare `--device tinysa` or `--device tinysa=PATH` uses `basic_input`.
 
 Basic LOW and Ultra use `attenuation`. Its choices are `auto` or 0–31 dB. Basic

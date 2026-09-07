@@ -495,7 +495,7 @@ impl Worker {
                 let _ = reply.send(Ok(()));
             }
             Command::SetDirectSweep(config, reply) => {
-                let result = validate_direct_sweep(config, self.identity.model)
+                let result = validate_direct_sweep(config, self.identity.model, self.basic_input)
                     .map(|()| self.direct_sweep = config);
                 let _ = reply.send(result);
             }
@@ -958,18 +958,23 @@ fn reject_command(command: Command, error: anyhow::Error) {
     }
 }
 
-fn validate_direct_sweep(config: Option<DirectSweepConfig>, model: Model) -> anyhow::Result<()> {
+fn validate_direct_sweep(
+    config: Option<DirectSweepConfig>,
+    model: Model,
+    basic_input: BasicInput,
+) -> anyhow::Result<()> {
     let Some(config) = config else {
         return Ok(());
     };
-    if config.start_hz < MIN_FREQUENCY_HZ
-        || config.stop_hz > model.maximum_hz()
+    let (minimum_hz, maximum_hz) = frequency_range(model, basic_input);
+    if config.start_hz < minimum_hz
+        || config.stop_hz > maximum_hz
         || config.start_hz >= config.stop_hz
     {
         bail!(
             "tinySA sweep must be within {}..{} Hz with start below stop",
-            MIN_FREQUENCY_HZ,
-            model.maximum_hz()
+            minimum_hz,
+            maximum_hz
         );
     }
     Ok(())
@@ -1399,23 +1404,55 @@ mod tests {
             stop_hz: 108_000_000,
             generation: 7,
         };
-        assert!(validate_direct_sweep(Some(valid), Model::Basic).is_ok());
-        assert!(validate_direct_sweep(None, Model::Basic).is_ok());
+        assert!(validate_direct_sweep(Some(valid), Model::Basic, BasicInput::Low).is_ok());
+        assert!(validate_direct_sweep(None, Model::Basic, BasicInput::Low).is_ok());
         assert!(validate_direct_sweep(
             Some(DirectSweepConfig {
                 start_hz: valid.stop_hz,
                 stop_hz: valid.start_hz,
                 ..valid
             }),
-            Model::Basic
+            Model::Basic,
+            BasicInput::Low
         )
         .is_err());
         assert!(validate_direct_sweep(
             Some(DirectSweepConfig {
-                stop_hz: Model::Basic.maximum_hz() + 1,
+                stop_hz: BASIC_LOW_MAX_HZ + 1,
                 ..valid
             }),
-            Model::Basic
+            Model::Basic,
+            BasicInput::Low
+        )
+        .is_err());
+        assert!(validate_direct_sweep(
+            Some(DirectSweepConfig {
+                start_hz: BASIC_HIGH_MIN_HZ,
+                stop_hz: BASIC_HIGH_MAX_HZ,
+                ..valid
+            }),
+            Model::Basic,
+            BasicInput::High
+        )
+        .is_ok());
+        assert!(validate_direct_sweep(
+            Some(DirectSweepConfig {
+                start_hz: MIN_FREQUENCY_HZ,
+                stop_hz: BASIC_HIGH_MAX_HZ,
+                ..valid
+            }),
+            Model::Basic,
+            BasicInput::High
+        )
+        .is_err());
+        assert!(validate_direct_sweep(
+            Some(DirectSweepConfig {
+                start_hz: MIN_FREQUENCY_HZ,
+                stop_hz: BASIC_HIGH_MAX_HZ,
+                ..valid
+            }),
+            Model::Basic,
+            BasicInput::Low
         )
         .is_err());
     }

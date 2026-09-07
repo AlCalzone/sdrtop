@@ -560,6 +560,12 @@ mod tests {
                         width_pct: None,
                     },
                     crate::config::PanelSpec {
+                        name: "system_resources".into(),
+                        position: crate::config::Position::Right,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
                         name: "footer".into(),
                         position: crate::config::Position::Bottom,
                         height: None,
@@ -603,6 +609,10 @@ mod tests {
         assert_eq!(engine.active_preset(), "my_trace");
         engine.set_preset("my_sweep");
         assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(engine.is_panel_visible("system_resources"));
+        engine.set_preset("lab_sweep");
+        assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(!engine.is_panel_visible("signal_metrics"));
     }
 
     #[test]

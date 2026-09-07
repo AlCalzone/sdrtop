@@ -20,6 +20,18 @@ use crate::ui::widgets::micro_common::fmt_bw;
 
 use super::{global, metrics, InputCtx, KeyAction};
 
+fn strongest_bin_frequency(frame: &crate::state::FftFrame) -> Option<u64> {
+    let peak_bin = frame
+        .bins_dbfs
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(index, _)| index)?;
+    frame
+        .frequency_of_bin(peak_bin)
+        .map(|frequency| frequency.round() as u64)
+}
+
 // ── Spectrum focus keys ───────────────────────────────────────────────────────
 
 pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
@@ -131,16 +143,7 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                 let freq = if let Some(f) = m.spectrum.cursor_freq {
                     f
                 } else if let Some(frame) = &m.waterfall.last_fft {
-                    let peak_bin = frame
-                        .bins_dbfs
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(i, _)| i)
-                        .unwrap_or(frame.bins_dbfs.len() / 2);
-                    let left_hz = m.radio.frequency as f64 - frame.sample_rate / 2.0;
-                    (left_hz + peak_bin as f64 / frame.bins_dbfs.len() as f64 * frame.sample_rate)
-                        .round() as u64
+                    strongest_bin_frequency(frame).unwrap_or(m.radio.frequency)
                 } else {
                     m.radio.frequency
                 };
@@ -296,4 +299,30 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         _ => return global::handle_no_device(key, ctx),
     }
     KeyAction::Continue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peak_jump_uses_the_captured_fft_frequency_after_retuning() {
+        let mut state = crate::state::SdrMetrics::fixture();
+        state.radio.frequency = 100_000_000;
+        state.radio.config_sample_rate = 32_000_000.0;
+        let mut state = state.with_carrier(8_000_000.0, 70.0);
+        state.radio.frequency = 200_000_000;
+        let frame = state.waterfall.last_fft.as_ref().unwrap();
+        assert_eq!(strongest_bin_frequency(frame), Some(108_000_000));
+        assert_eq!(frame.bin_axis, crate::state::BinAxis::FftBins);
+        assert_eq!(frame.window(4).unwrap().span_hz, 8_000_000.0);
+    }
+
+    #[test]
+    fn peak_jump_rejects_an_empty_frame() {
+        let state = crate::state::SdrMetrics::fixture().with_carrier(0.0, 70.0);
+        let mut frame = state.waterfall.last_fft.unwrap();
+        frame.bins_dbfs = std::sync::Arc::new(Vec::new());
+        assert_eq!(strongest_bin_frequency(&frame), None);
+    }
 }

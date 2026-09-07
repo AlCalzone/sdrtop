@@ -167,6 +167,7 @@ mod tests {
             channel_power_dbfs: -22.0,
             occupied_bw_hz: 180_000,
             enbw_hz: 1_000.0,
+            bin_axis: crate::state::BinAxis::FftBins,
         }
     }
 

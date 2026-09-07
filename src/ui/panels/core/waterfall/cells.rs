@@ -22,6 +22,7 @@ use ratatui::{
 };
 
 use crate::palette::{magnitude_to_color_palette, ColorDepth, WaterfallPalette};
+use crate::state::BinAxis;
 
 /// Top of the colour scale. The waterfall is always referenced to full scale;
 /// only the floor (`db_min`) moves, under `↑`/`↓`.
@@ -51,29 +52,39 @@ pub(super) struct Columns {
     visible_n: usize,
     row_bins: usize,
     cols: usize,
+    bin_axis: BinAxis,
 }
 
 impl Columns {
-    pub fn new(row_bins: usize, zoom: u32, cols: usize) -> Self {
-        // A zero-bin row would underflow the `row_bins - 1` clamp below. It should
-        // not happen, but a malformed row must not take the TUI down with it.
+    pub fn new(
+        row_bins: usize,
+        first_bin: usize,
+        visible_n: usize,
+        cols: usize,
+        bin_axis: BinAxis,
+    ) -> Self {
         let row_bins = row_bins.max(1);
-        let visible_n = (row_bins / (zoom as usize).max(1)).max(1);
+        let visible_n = visible_n.max(1).min(row_bins);
         Self {
-            lo_bin: (row_bins / 2).saturating_sub(visible_n / 2),
+            lo_bin: first_bin.min(row_bins - visible_n),
             visible_n,
             row_bins,
             cols: cols.max(1),
+            bin_axis,
         }
     }
 
     /// The `[start, end)` bin span column `col` reads. Always non-empty, so a
     /// wide panel over few bins still gets one bin per column rather than none.
     pub fn range(&self, col: usize) -> (usize, usize) {
-        let start = (self.lo_bin + col * self.visible_n / self.cols).min(self.row_bins - 1);
-        let end = (self.lo_bin + ((col + 1) * self.visible_n) / self.cols)
-            .max(start + 1)
-            .min(self.row_bins);
+        let (start, end) = match self.bin_axis {
+            BinAxis::FftBins => (
+                col * self.visible_n / self.cols,
+                (col + 1) * self.visible_n / self.cols,
+            ),
+        };
+        let start = (self.lo_bin + start).min(self.row_bins - 1);
+        let end = (self.lo_bin + end).max(start + 1).min(self.row_bins);
         (start, end)
     }
 }
@@ -148,7 +159,7 @@ mod tests {
 
     #[test]
     fn unzoomed_columns_cover_every_bin_exactly_once() {
-        let c = Columns::new(1024, 1, 128);
+        let c = Columns::new(1024, 0, 1024, 128, BinAxis::FftBins);
         let (first, _) = c.range(0);
         let (_, last) = c.range(127);
         assert_eq!(first, 0, "the first column starts at the first bin");
@@ -165,7 +176,7 @@ mod tests {
 
     #[test]
     fn zoom_keeps_the_centre_slice() {
-        let c = Columns::new(1024, 4, 128);
+        let c = Columns::new(1024, 384, 256, 128, BinAxis::FftBins);
         let (first, _) = c.range(0);
         let (_, last) = c.range(127);
         assert_eq!(first, 384, "a quarter of the way in");
@@ -173,10 +184,26 @@ mod tests {
     }
 
     #[test]
+    fn columns_follow_the_bin_window_at_uneven_zoom() {
+        let axis = BinAxis::FftBins;
+        let window = axis.window(100, 10.0, 10, 3).unwrap();
+        let columns = Columns::new(10, window.first_bin, window.bin_count, 3, axis);
+        assert_eq!(columns.range(0), (4, 5));
+        assert_eq!(columns.range(1), (5, 6));
+        assert_eq!(columns.range(2), (6, 7));
+        for col in 0..3 {
+            assert_eq!(
+                axis.frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, col),
+                Some(99.0 + col as f64)
+            );
+        }
+    }
+
+    #[test]
     fn a_column_is_never_empty_however_odd_the_geometry() {
         // More columns than bins: every column still reads at least one bin,
         // rather than an empty span that would paint the whole plot at the floor.
-        let c = Columns::new(8, 1, 200);
+        let c = Columns::new(8, 0, 8, 200, BinAxis::FftBins);
         for col in 0..200 {
             let (lo, hi) = c.range(col);
             assert!(hi > lo, "column {col} is empty");
@@ -194,12 +221,12 @@ mod tests {
         let (row_bins, cols) = (1024usize, 128usize);
         let naive = |col: usize| col * row_bins / cols;
 
-        let unzoomed = Columns::new(row_bins, 1, cols);
+        let unzoomed = Columns::new(row_bins, 0, row_bins, cols, BinAxis::FftBins);
         for col in 0..cols {
             assert_eq!(unzoomed.range(col).0, naive(col), "zoom 1 hides the bug");
         }
 
-        let zoomed = Columns::new(row_bins, 4, cols);
+        let zoomed = Columns::new(row_bins, 384, 256, cols, BinAxis::FftBins);
         assert_eq!(zoomed.range(0).0, 384);
         assert_eq!(
             naive(0),
@@ -212,12 +239,10 @@ mod tests {
 
     #[test]
     fn degenerate_input_does_not_underflow() {
-        // A zero-bin row and a zero zoom are both nonsense, and both used to be
-        // one subtraction away from panicking.
-        let c = Columns::new(0, 0, 40);
+        let c = Columns::new(0, 0, 0, 40, BinAxis::FftBins);
         let (lo, hi) = c.range(0);
         assert!(hi > lo);
-        let zero_cols = Columns::new(1024, 4, 0);
+        let zero_cols = Columns::new(1024, 384, 256, 0, BinAxis::FftBins);
         let _ = zero_cols.range(0);
     }
 }

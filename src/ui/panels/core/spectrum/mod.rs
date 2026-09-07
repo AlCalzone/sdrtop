@@ -166,6 +166,7 @@ fn contents(
         fft.center_freq_hz,
         fft.sample_rate,
         zoom,
+        fft.bin_axis,
     ) else {
         return;
     };

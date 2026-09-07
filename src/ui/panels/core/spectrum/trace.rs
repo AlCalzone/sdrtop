@@ -183,7 +183,7 @@ pub(super) fn draw(
 
     f.render_widget(
         Canvas::default()
-            .x_bounds([0.0, (n - 1.0).max(0.0)])
+            .x_bounds([0.0, n.max(0.0)])
             .y_bounds([y_min, y_max])
             .paint(move |ctx| {
                 let bright_at = |level: f32| band_bright[band_of(level, v_min, span, steps)];
@@ -201,7 +201,7 @@ pub(super) fn draw(
                         ctx.draw(&CanvasLine {
                             x1: 0.0,
                             y1: y,
-                            x2: n - 1.0,
+                            x2: n,
                             y2: y,
                             color,
                         });
@@ -223,7 +223,7 @@ pub(super) fn draw(
                 //    so only the parts above the signal show through.
                 for i in 0..=4 {
                     level_line(ctx, y_min + (y_max - y_min) * (i as f64 / 4.0), pal.grid);
-                    rule(ctx, (n - 1.0).max(0.0) * (i as f64 / 4.0), pal.grid);
+                    rule(ctx, n.max(0.0) * (i as f64 / 4.0), pal.grid);
                 }
                 // 1. Hold ghost - the entire frozen spectrum as a soft outline.
                 if let Some(ref h) = held {

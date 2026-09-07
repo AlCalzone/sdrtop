@@ -4,7 +4,7 @@
 //! Coordinate mapping and the frequency ruler.
 //!
 //! The spectrum works in three coordinate systems at once and they are easy to
-//! confuse: hertz, canvas x (`0..n-1`, as wide as the FFT has bins) and terminal
+//! confuse: hertz, canvas x (one unit per bin interval) and terminal
 //! columns (bounded by the panel). Everything that converts between them lives
 //! here, alone, with tests.
 
@@ -25,32 +25,25 @@ pub(super) fn dim(c: Color, f: f32) -> Color {
     }
 }
 
-/// Map a frequency to a canvas x-coordinate in `[0, n-1]`, or `None` if out of view.
-pub(super) fn freq_to_canvas_x(freq_hz: f64, left_hz: f64, bw: f64, n: f64) -> Option<f64> {
-    if bw <= 0.0 {
+/// Map a frequency to a canvas x-coordinate, or `None` if out of view
+pub(super) fn freq_to_canvas_x(freq_hz: f64, left_hz: f64, bw: f64, max_x: f64) -> Option<f64> {
+    if bw <= 0.0 || max_x <= 0.0 {
         return None;
     }
     let frac = (freq_hz - left_hz) / bw;
     if (0.0..=1.0).contains(&frac) {
-        Some(frac * (n - 1.0))
+        Some(frac * max_x)
     } else {
         None
     }
 }
 
-/// A canvas x - the units [`freq_to_canvas_x`] returns, spanning `0..n-1` - as a
-/// terminal column inside `width`.
-///
-/// The two coordinate systems cost nothing to mix up silently: the canvas is as
-/// wide as the spectrum has bins, typically 2048, while the column is bounded by
-/// the panel, typically under 200. Using one as the other clamps every position
-/// to the right-hand edge, which is exactly what the OBW label did at every
-/// terminal size it was tried at.
-pub(super) fn canvas_x_to_col(x: f64, n: f64, width: u16) -> u16 {
-    if n <= 1.0 || width == 0 {
+/// Map a canvas x-coordinate to a terminal column inside `width`
+pub(super) fn canvas_x_to_col(x: f64, max_x: f64, width: u16) -> u16 {
+    if max_x <= 0.0 || width == 0 {
         return 0;
     }
-    let frac = (x / (n - 1.0)).clamp(0.0, 1.0);
+    let frac = (x / max_x).clamp(0.0, 1.0);
     ((frac * width as f64).round() as u16).min(width - 1)
 }
 
@@ -159,24 +152,21 @@ mod tests {
 
     #[test]
     fn canvas_x_and_column_are_not_interchangeable() {
-        // The bug this guards: a 2048-bin canvas x used directly as a column.
-        // Three quarters across a 2048-bin canvas is column 120 of 160, not 160.
-        let n = 2048.0;
-        assert_eq!(canvas_x_to_col(0.0, n, 160), 0);
+        let max_x = 2048.0;
+        assert_eq!(canvas_x_to_col(0.0, max_x, 160), 0);
         assert_eq!(
-            canvas_x_to_col(n - 1.0, n, 160),
+            canvas_x_to_col(max_x, max_x, 160),
             159,
-            "the last bin is the last column"
+            "the right edge is the last column"
         );
-        assert_eq!(canvas_x_to_col((n - 1.0) * 0.75, n, 160), 120);
-        // Degenerate geometry answers 0 rather than dividing by zero.
-        assert_eq!(canvas_x_to_col(500.0, 1.0, 160), 0);
-        assert_eq!(canvas_x_to_col(500.0, n, 0), 0);
+        assert_eq!(canvas_x_to_col(max_x * 0.75, max_x, 160), 120);
+        assert_eq!(canvas_x_to_col(500.0, 0.0, 160), 0);
+        assert_eq!(canvas_x_to_col(500.0, max_x, 0), 0);
     }
 
     #[test]
     fn freq_to_canvas_x_rejects_what_is_off_screen() {
-        let (left, bw, n) = (92_000_000.0, 2_000_000.0, 1001.0);
+        let (left, bw, n) = (92_000_000.0, 2_000_000.0, 1000.0);
         assert_eq!(freq_to_canvas_x(92_000_000.0, left, bw, n), Some(0.0));
         assert_eq!(freq_to_canvas_x(94_000_000.0, left, bw, n), Some(1000.0));
         assert_eq!(freq_to_canvas_x(93_000_000.0, left, bw, n), Some(500.0));

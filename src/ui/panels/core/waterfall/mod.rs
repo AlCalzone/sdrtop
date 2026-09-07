@@ -253,15 +253,14 @@ fn contents(
     let cols = plot.width as usize;
 
     // The frequency window, narrowed by the shared zoom around the tuned centre.
-    let window = wf
+    let bin_window = wf
         .last_fft
         .as_ref()
-        .map(|fr| {
-            let visible = fr.sample_rate / wf.hz_zoom as f64;
-            Window {
-                left_hz: fr.center_freq_hz as f64 - visible / 2.0,
-                bw: visible,
-            }
+        .and_then(|frame| frame.window(wf.hz_zoom as usize));
+    let window = bin_window
+        .map(|window| Window {
+            left_hz: window.left_hz,
+            bw: window.span_hz,
         })
         .unwrap_or(Window {
             left_hz: 0.0,
@@ -286,7 +285,20 @@ fn contents(
     let skip_data = wf.scroll_offset.min(max_scroll) * 2;
 
     let row_bins = buf.rows.front().map(|(_, r)| r.len()).unwrap_or(1);
-    let columns = Columns::new(row_bins, wf.hz_zoom, cols);
+    let columns = bin_window
+        .zip(wf.last_fft.as_ref())
+        .map(|(window, frame)| {
+            Columns::new(
+                row_bins,
+                window.first_bin,
+                window.bin_count,
+                cols,
+                frame.bin_axis,
+            )
+        })
+        .unwrap_or_else(|| {
+            Columns::new(row_bins, 0, row_bins, cols, crate::state::BinAxis::FftBins)
+        });
 
     cells::draw(
         f, plot, &buf.rows, &columns, cursor_col, skip_data, wf.db_min, wf.palette, theme,

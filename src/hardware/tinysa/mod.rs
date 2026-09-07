@@ -525,9 +525,8 @@ impl Worker {
                 centered_window(self.center_hz, self.span_hz, minimum_hz, maximum_hz)
             });
         let points = self.settings.points;
-        self.center_hz = window_center(start_hz, stop_hz);
-        self.span_hz = stop_hz - start_hz;
-        if self.span_hz < points as u64 {
+        let scan_span_hz = stop_hz - start_hz;
+        if scan_span_hz < points as u64 {
             bail!("tinySA scan span is too narrow for {points} points");
         }
         let mut frequencies_hz = Vec::with_capacity(points as usize);

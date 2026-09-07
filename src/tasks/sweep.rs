@@ -231,6 +231,13 @@ impl DirectSweepController {
             (metrics.sweep.active, metrics.sweep.config.clone())
         };
 
+        if self.pending_exit.is_some() {
+            self.leave(state, device, now);
+            if self.pending_exit.is_some() || !active {
+                return;
+            }
+        }
+
         if active && !self.was_active {
             self.was_active = true;
             let mut metrics = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -416,6 +423,7 @@ mod direct_tests {
         requests: Mutex<Vec<Option<DirectSweepConfig>>>,
         frequencies: Mutex<Vec<u64>>,
         failures: Mutex<usize>,
+        frequency_failures: Mutex<usize>,
     }
 
     impl DirectSweepControl for TestDevice {
@@ -431,6 +439,11 @@ mod direct_tests {
 
         fn set_frequency(&self, hz: u64) -> anyhow::Result<()> {
             self.frequencies.lock().unwrap().push(hz);
+            let mut failures = self.frequency_failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                anyhow::bail!("temporary frequency failure");
+            }
             Ok(())
         }
     }
@@ -556,5 +569,29 @@ mod direct_tests {
         assert_eq!(metrics.radio.frequency, 433_920_001);
         assert!(metrics.radio.rx_enabled);
         assert_eq!(metrics.sweep.pre_sweep_hz, None);
+    }
+
+    #[test]
+    fn reactivation_finishes_a_pending_exit_before_restarting() {
+        let state = active_state(false);
+        let device = TestDevice::default();
+        let mut controller = DirectSweepController::default();
+        let now = Instant::now();
+        controller.update(&state, &device, now);
+
+        *device.frequency_failures.lock().unwrap() = 1;
+        state.lock().unwrap().sweep.active = false;
+        controller.update(&state, &device, now);
+        assert!(controller.pending_exit.is_some());
+
+        state.lock().unwrap().sweep.active = true;
+        controller.update(&state, &device, now + DIRECT_SWEEP_RETRY);
+        assert!(controller.pending_exit.is_none());
+        assert!(controller.was_active);
+        let requests = device.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].is_some());
+        assert_eq!(requests[1], None);
+        assert!(requests[2].is_some());
     }
 }

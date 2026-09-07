@@ -459,20 +459,19 @@ impl Worker {
     }
 
     fn select_path(&mut self, path: RfPath) -> anyhow::Result<()> {
+        if self.identity.model.is_ultra() {
+            return Ok(());
+        }
         if self.active_path == Some(path) {
             return Ok(());
         }
-        let command = match (self.identity.model.is_ultra(), path) {
-            (false, RfPath::Lower) => "mode low input",
-            (false, RfPath::Upper) => "mode high input",
-            (true, RfPath::Lower) => "ultra off",
-            (true, RfPath::Upper) => "ultra on",
+        let command = match path {
+            RfPath::Lower => "mode low input",
+            RfPath::Upper => "mode high input",
         };
         send_text_command(&mut *self.port, command)?;
-        if !self.identity.model.is_ultra() {
-            send_text_command(&mut *self.port, "abort on")?;
-            apply_scan_settings(&mut *self.port, self.identity.model)?;
-        }
+        send_text_command(&mut *self.port, "abort on")?;
+        apply_scan_settings(&mut *self.port, self.identity.model)?;
         self.active_path = Some(path);
         Ok(())
     }
@@ -914,6 +913,14 @@ fn normalize_span(hz: f64, maximum_hz: u64, points: u32) -> anyhow::Result<u64> 
 }
 
 fn scan_segments(model: Model, start_hz: u64, stop_hz: u64, points: u32) -> Vec<Segment> {
+    if model.is_ultra() {
+        return vec![Segment {
+            start_hz,
+            stop_hz,
+            points,
+            path: RfPath::Lower,
+        }];
+    }
     let boundary = model.path_boundary_hz();
     if start_hz < boundary && boundary < stop_hz && points >= 2 {
         let total_span = stop_hz - start_hz;
@@ -953,7 +960,11 @@ fn startup_settings(model: Model) -> (ScanSettings, Vec<&'static str>) {
     } else {
         SpurMode::On
     };
-    let mut commands = vec!["rbw auto", "attenuate auto"];
+    let mut commands = Vec::new();
+    if model.is_ultra() {
+        commands.extend(["ultra on", "ultra auto"]);
+    }
+    commands.extend(["rbw auto", "attenuate auto"]);
     if model.is_ultra() {
         commands.extend(["lna off", "lna2 auto", "agc auto", "spur auto"]);
     } else {
@@ -1121,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn crossing_scans_split_at_the_model_path_boundary() {
+    fn basic_crossing_scans_split_at_the_model_path_boundary() {
         assert_eq!(
             scan_segments(Model::Basic, 300_000_000, 400_000_000, 290),
             vec![
@@ -1139,25 +1150,30 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn ultra_scans_leave_path_selection_to_the_firmware() {
         assert_eq!(
-            scan_segments(Model::Zs405, 700_000_000, 900_000_000, 450)[0].stop_hz,
-            800_000_000
+            scan_segments(Model::Zs405, 700_000_000, 900_000_000, 450),
+            vec![Segment {
+                start_hz: 700_000_000,
+                stop_hz: 900_000_000,
+                points: 450,
+                path: RfPath::Lower,
+            }]
         );
         assert_eq!(
-            scan_segments(Model::Zs407, 800_000_000, 1_000_000_000, 450)[0].stop_hz,
-            900_000_000
+            scan_segments(Model::Zs407, 100_000, 7_300_000_000, 450).len(),
+            1
         );
     }
 
     #[test]
-    fn unsplit_scans_select_the_expected_path() {
+    fn basic_unsplit_scans_select_the_expected_path() {
         assert_eq!(
             scan_segments(Model::Basic, 100_000, 200_000_000, 64)[0].path,
             RfPath::Lower
-        );
-        assert_eq!(
-            scan_segments(Model::UltraUnknown, 1_000_000_000, 2_000_000_000, 64)[0].path,
-            RfPath::Upper
         );
     }
 
@@ -1169,6 +1185,8 @@ mod tests {
         assert_eq!(
             commands,
             [
+                "ultra on",
+                "ultra auto",
                 "rbw auto",
                 "attenuate auto",
                 "lna off",

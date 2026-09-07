@@ -59,6 +59,16 @@ base = "nord"                        # see themes.md for the six palettes
 start_hz = 400000000       # scanner band start
 stop_hz  = 500000000       # scanner band end
 dwell_ms = 200             # measure time per step (50–2000)
+
+[tinysa]
+points = 450                # 64, 128, 290, 450, 900 or 1800
+rbw = "auto"                # resolution bandwidth in kHz
+attenuation = "auto"        # auto or 0–31 dB
+lna = false                 # Ultra only
+lna2 = "auto"               # Ultra only: auto or 0–7
+agc = "auto"                # Ultra only: auto or 0–7
+spur = "auto"               # Basic uses on/off; Ultra also accepts auto
+ext_gain_db = 0             # -100–100 dB
 ```
 
 Each waterfall cell shows two rows of history, so `waterfall_max_rows` is twice
@@ -122,6 +132,16 @@ spectrum focus, and both persist once you've picked one.
 [Themes](themes.md).
 
 **`[sweep]`** configures the band scanner, described below.
+
+**`[tinysa]`** sets the controls applied after the backend resets the analyzer to
+a safe input baseline. The Options pane updates these values at runtime. They
+are saved from the analyzer's current state on quit. Other backends preserve the
+block unchanged.
+
+Basic analyzers convert `spur = "auto"` to `"on"`. They also convert Ultra-only
+RBW values `0.2`, `1` and `850` to `"auto"`. Ultra-only LNA, LNA2 and AGC values
+stay in the file when a Basic analyzer is used. Other invalid values are reported
+when a tinySA opens.
 
 ---
 

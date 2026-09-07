@@ -69,6 +69,13 @@ pub(super) fn parse_text_frame(frame: &[u8], command: &str) -> anyhow::Result<Ve
     Ok(body.to_vec())
 }
 
+pub(super) fn validate_setter_body(body: &[u8], command: &str) -> anyhow::Result<()> {
+    if !body.is_empty() {
+        bail!("tinySA {command} command returned an unexpected response");
+    }
+    Ok(())
+}
+
 pub(super) fn parse_identity(
     version: &[u8],
     info: &[u8],
@@ -194,6 +201,19 @@ mod tests {
         assert!(parse_text_frame(b"tinySA_v1.4\r\nch> ", "version").is_err());
         assert!(parse_text_frame(b"version\r\ntinySA_v1.4\r\n", "version").is_err());
         assert!(parse_text_frame(b"frobnicate\r\nfrobnicate?\r\nch> ", "frobnicate").is_err());
+    }
+
+    #[test]
+    fn setters_require_an_empty_response_body() {
+        assert!(validate_setter_body(b"", "rbw 10").is_ok());
+        for body in [
+            b"usage: rbw {auto|3|10}\r\n".as_slice(),
+            b"error: invalid value\r\n".as_slice(),
+            b"ok\r\n".as_slice(),
+            b"\r\n".as_slice(),
+        ] {
+            assert!(validate_setter_body(body, "rbw 10").is_err());
+        }
     }
 
     #[test]

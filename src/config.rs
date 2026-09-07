@@ -161,6 +161,50 @@ impl Default for SweepSettings {
     }
 }
 
+fn default_tinysa_points() -> u32 {
+    450
+}
+
+fn default_auto() -> String {
+    "auto".into()
+}
+
+/// Settings applied when a tinySA backend opens.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct TinySaSettings {
+    #[serde(default = "default_tinysa_points")]
+    pub points: u32,
+    #[serde(default = "default_auto")]
+    pub rbw: String,
+    #[serde(default = "default_auto")]
+    pub attenuation: String,
+    #[serde(default)]
+    pub lna: bool,
+    #[serde(default = "default_auto")]
+    pub lna2: String,
+    #[serde(default = "default_auto")]
+    pub agc: String,
+    #[serde(default = "default_auto")]
+    pub spur: String,
+    #[serde(default)]
+    pub ext_gain_db: i32,
+}
+
+impl Default for TinySaSettings {
+    fn default() -> Self {
+        Self {
+            points: default_tinysa_points(),
+            rbw: default_auto(),
+            attenuation: default_auto(),
+            lna: false,
+            lna2: default_auto(),
+            agc: default_auto(),
+            spur: default_auto(),
+            ext_gain_db: 0,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -171,6 +215,8 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub sweep: SweepSettings,
+    #[serde(default)]
+    pub tinysa: TinySaSettings,
     /// User-defined layout presets, merged into the built-in set at startup.
     /// A preset here with the same name as a built-in overrides it. Preserved
     /// verbatim across save so hand-written presets survive a quit.
@@ -762,6 +808,42 @@ panels = [
         let restored: AppConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(restored.radio.gain.as_deref(), Some("LNA=24,VGA=30"));
         assert_eq!(restored.display.active_preset, "spectrum");
+    }
+
+    #[test]
+    fn tinysa_settings_default_and_round_trip() {
+        let defaults: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(defaults.tinysa, TinySaSettings::default());
+
+        let source = r#"
+            [tinysa]
+            points = 900
+            rbw = "0.2"
+            attenuation = "12"
+            lna = true
+            lna2 = "3"
+            agc = "7"
+            spur = "off"
+            ext_gain_db = -8
+        "#;
+        let config: AppConfig = toml::from_str(source).unwrap();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let restored: AppConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.tinysa, config.tinysa);
+        assert!(serialized.contains("[tinysa]"));
+    }
+
+    #[test]
+    fn partial_tinysa_settings_fill_field_defaults() {
+        let config: AppConfig = toml::from_str("[tinysa]\npoints = 64\n").unwrap();
+        assert_eq!(config.tinysa.points, 64);
+        assert_eq!(config.tinysa.rbw, "auto");
+        assert_eq!(config.tinysa.attenuation, "auto");
+        assert!(!config.tinysa.lna);
+        assert_eq!(config.tinysa.lna2, "auto");
+        assert_eq!(config.tinysa.agc, "auto");
+        assert_eq!(config.tinysa.spur, "auto");
+        assert_eq!(config.tinysa.ext_gain_db, 0);
     }
 
     #[test]

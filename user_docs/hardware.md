@@ -44,8 +44,15 @@ supports the basic tinySA and the Ultra family. It was verified on a ZS405
 running `tinySA4_v1.4-236-ge5aa115`.
 
 The device supplies swept power readings without IQ samples. sdrtop offers the
-spectrum, waterfall, full band sweep and micro sweep layouts. RBW, attenuation,
-gain, AGC and spur handling use safe automatic defaults.
+spectrum, waterfall, full band sweep and micro sweep layouts. The Options pane
+controls scan points, RBW, attenuation, spur removal and external gain. Ultra
+models also expose LNA, LNA2 and AGC. Scan points are a host-side setting. The
+other controls use the matching tinySA console commands.
+
+sdrtop disables output and aborts pending work during startup. It then forces
+input mode and applies a safe automatic baseline before restoring `[tinysa]`
+settings. Basic input-path changes restore the active RBW, attenuation, spur and
+external gain settings after the firmware resets them.
 
 ```sh
 sdrtop --device tinysa

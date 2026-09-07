@@ -536,6 +536,7 @@ mod tests {
             "spectrum_waterfall",
             &user,
             None,
+            false,
             crate::hardware::AcquisitionModel::PowerSweep,
         );
         assert!(engine.has_preset(engine.active_preset()));

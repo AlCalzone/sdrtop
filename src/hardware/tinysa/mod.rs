@@ -381,10 +381,13 @@ impl Worker {
                     effective_center_hz,
                     effective_span_hz,
                 }) => {
-                    if self.direct_sweep.is_none() {
-                        self.center_hz = effective_center_hz;
-                        self.span_hz = effective_span_hz;
-                    }
+                    update_normal_window(
+                        self.direct_sweep,
+                        &mut self.center_hz,
+                        &mut self.span_hz,
+                        effective_center_hz,
+                        effective_span_hz,
+                    );
                     if let Some(context) = &self.rx_context {
                         let target = if self.direct_sweep.is_some() {
                             PowerTraceTarget::Sweep
@@ -556,11 +559,12 @@ impl Worker {
             interrupted => return Ok(interrupted),
         }
         let frequencies_hz = display_frequencies(&frequencies_hz)?;
+        let (effective_center_hz, effective_span_hz) = effective_window(start_hz, stop_hz);
         Ok(ScanResult::Complete {
             frequencies_hz,
             levels_dbm,
-            effective_center_hz: self.center_hz,
-            effective_span_hz: self.span_hz,
+            effective_center_hz,
+            effective_span_hz,
         })
     }
 }
@@ -1031,6 +1035,23 @@ fn window_center(start_hz: u64, stop_hz: u64) -> u64 {
     start_hz + (stop_hz - start_hz) / 2
 }
 
+fn effective_window(start_hz: u64, stop_hz: u64) -> (u64, u64) {
+    (window_center(start_hz, stop_hz), stop_hz - start_hz)
+}
+
+fn update_normal_window(
+    direct_sweep: Option<DirectSweepConfig>,
+    center_hz: &mut u64,
+    span_hz: &mut u64,
+    effective_center_hz: u64,
+    effective_span_hz: u64,
+) {
+    if direct_sweep.is_none() {
+        *center_hz = effective_center_hz;
+        *span_hz = effective_span_hz;
+    }
+}
+
 fn normalize_span(hz: f64, maximum_hz: u64, points: u32) -> anyhow::Result<u64> {
     if !hz.is_finite() || hz <= 0.0 {
         bail!("tinySA span must be a positive finite value");
@@ -1337,6 +1358,38 @@ mod tests {
             centered_window(effective_center, 1_000_000, 100_000, 960_000_000),
             (4_600_000, 5_600_000)
         );
+    }
+
+    #[test]
+    fn completed_windows_update_only_normal_tuning() {
+        let (start_hz, stop_hz) =
+            centered_window(100_000, 10_000_000, MIN_FREQUENCY_HZ, 960_000_000);
+        let mut center_hz = 100_000;
+        let mut span_hz = 10_000_000;
+        let (effective_center_hz, effective_span_hz) = effective_window(start_hz, stop_hz);
+        update_normal_window(
+            None,
+            &mut center_hz,
+            &mut span_hz,
+            effective_center_hz,
+            effective_span_hz,
+        );
+        assert_eq!(center_hz, 5_100_000);
+        assert_eq!(span_hz, 10_000_000);
+
+        update_normal_window(
+            Some(DirectSweepConfig {
+                start_hz: 88_000_000,
+                stop_hz: 108_000_000,
+                generation: 1,
+            }),
+            &mut center_hz,
+            &mut span_hz,
+            98_000_000,
+            20_000_000,
+        );
+        assert_eq!(center_hz, 5_100_000);
+        assert_eq!(span_hz, 10_000_000);
     }
 
     #[test]

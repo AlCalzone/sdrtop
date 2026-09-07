@@ -202,7 +202,6 @@ struct PendingExit {
     tune_hz: u64,
     jumped: bool,
     direct_disabled: bool,
-    frequency_set: bool,
     retry_at: Instant,
     last_error: Option<String>,
 }
@@ -340,7 +339,6 @@ impl DirectSweepController {
                 tune_hz: exit.tune_hz,
                 jumped: exit.jumped,
                 direct_disabled: false,
-                frequency_set: false,
                 retry_at: now,
                 last_error: None,
             });
@@ -359,14 +357,9 @@ impl DirectSweepController {
                 }
             }
         }
-        if !pending.frequency_set {
-            match device.set_frequency(pending.tune_hz) {
-                Ok(()) => pending.frequency_set = true,
-                Err(error) => {
-                    record_exit_error(state, pending, now, error);
-                    return;
-                }
-            }
+        if let Err(error) = device.set_frequency(pending.tune_hz) {
+            record_exit_error(state, pending, now, error);
+            return;
         }
 
         let tune_hz = pending.tune_hz;
@@ -582,7 +575,10 @@ mod direct_tests {
         *device.frequency_failures.lock().unwrap() = 1;
         state.lock().unwrap().sweep.active = false;
         controller.update(&state, &device, now);
-        assert!(controller.pending_exit.is_some());
+        assert!(controller
+            .pending_exit
+            .as_ref()
+            .is_some_and(|pending| pending.direct_disabled));
 
         state.lock().unwrap().sweep.active = true;
         controller.update(&state, &device, now + DIRECT_SWEEP_RETRY);

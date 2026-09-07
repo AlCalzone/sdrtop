@@ -287,6 +287,8 @@ impl Worker {
                     effective_center_hz,
                     effective_span_hz,
                 }) => {
+                    self.center_hz = effective_center_hz;
+                    self.span_hz = effective_span_hz;
                     if let Some(context) = &self.rx_context {
                         let published = context
                             .power_tx
@@ -442,7 +444,7 @@ impl Worker {
             }
         }
         Ok(ScanResult::Complete {
-            frequencies_hz,
+            frequencies_hz: uniform_display_frequencies(&frequencies_hz)?,
             levels_dbm,
             effective_center_hz: start_hz + (stop_hz - start_hz) / 2,
             effective_span_hz: stop_hz - start_hz,
@@ -828,11 +830,35 @@ fn centered_window(center_hz: u64, span_hz: u64, minimum_hz: u64, maximum_hz: u6
         start_hz = minimum_hz;
         stop_hz = minimum_hz + span_hz;
     }
+
     if stop_hz > maximum_hz {
         stop_hz = maximum_hz;
         start_hz = maximum_hz - span_hz;
     }
     (start_hz, stop_hz)
+}
+
+fn uniform_display_frequencies(measured_hz: &[u64]) -> anyhow::Result<Vec<u64>> {
+    let first = *measured_hz
+        .first()
+        .context("tinySA scan returned no frequencies")?;
+    let last = *measured_hz
+        .last()
+        .context("tinySA scan returned no frequencies")?;
+    let intervals = measured_hz.len().saturating_sub(1) as u64;
+    if intervals == 0 {
+        bail!("tinySA scan returned only one frequency");
+    }
+    let step = last.saturating_sub(first) / intervals;
+    if step == 0 {
+        bail!(
+            "tinySA scan span is too narrow for {} points",
+            measured_hz.len()
+        );
+    }
+    Ok((0..measured_hz.len())
+        .map(|index| first + step * index as u64)
+        .collect())
 }
 
 fn scan_segments(model: Model, start_hz: u64, stop_hz: u64, points: u32) -> Vec<Segment> {
@@ -992,6 +1018,35 @@ mod tests {
         assert_eq!(
             centered_window(960_000_000, 10_000_000, 100_000, 960_000_000),
             (950_000_000, 960_000_000)
+        );
+    }
+
+    #[test]
+    fn float_rounded_firmware_frequencies_get_a_uniform_display_grid() {
+        let measured = protocol::scan_frequencies(100_000_000, 200_000_000, 450);
+        assert!(measured
+            .windows(2)
+            .any(|pair| pair[1] - pair[0] != measured[1] - measured[0]));
+        let display = uniform_display_frequencies(&measured).unwrap();
+        let step = display[1] - display[0];
+        assert!(display.windows(2).all(|pair| pair[1] - pair[0] == step));
+        assert_eq!(display[0], measured[0]);
+        assert!(display.last().unwrap().abs_diff(*measured.last().unwrap()) < 450);
+    }
+
+    #[test]
+    fn a_span_too_narrow_for_the_point_count_is_rejected() {
+        assert!(uniform_display_frequencies(&[100_000, 100_000, 100_000]).is_err());
+    }
+
+    #[test]
+    fn an_edge_shift_becomes_the_next_scan_center() {
+        let (start, stop) = centered_window(100_000, 10_000_000, 100_000, 960_000_000);
+        let effective_center = start + (stop - start) / 2;
+        assert_eq!(effective_center, 5_100_000);
+        assert_eq!(
+            centered_window(effective_center, 1_000_000, 100_000, 960_000_000),
+            (4_600_000, 5_600_000)
         );
     }
 

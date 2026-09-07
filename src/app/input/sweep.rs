@@ -34,21 +34,13 @@ pub(super) fn sweep_panel(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             let mut m = metrics(state);
-            let dwell_ms = (m.sweep.config.dwell_ms + 50).min(2000);
-            if dwell_ms != m.sweep.config.dwell_ms {
-                m.sweep.generation = m.sweep.generation.wrapping_add(1);
-                m.sweep.config.dwell_ms = dwell_ms;
-            }
+            m.sweep.config.dwell_ms = (m.sweep.config.dwell_ms + 50).min(2000);
             let d = m.sweep.config.dwell_ms;
             m.push_log(format!("Sweep dwell → {} ms", d));
         }
         KeyCode::Char('-') => {
             let mut m = metrics(state);
-            let dwell_ms = m.sweep.config.dwell_ms.saturating_sub(50).max(50);
-            if dwell_ms != m.sweep.config.dwell_ms {
-                m.sweep.generation = m.sweep.generation.wrapping_add(1);
-                m.sweep.config.dwell_ms = dwell_ms;
-            }
+            m.sweep.config.dwell_ms = m.sweep.config.dwell_ms.saturating_sub(50).max(50);
             let d = m.sweep.config.dwell_ms;
             m.push_log(format!("Sweep dwell → {} ms", d));
         }

@@ -62,7 +62,6 @@ pub struct PowerTrace {
 pub struct DirectSweepConfig {
     pub start_hz: u64,
     pub stop_hz: u64,
-    pub dwell_ms: u64,
     pub generation: u64,
 }
 

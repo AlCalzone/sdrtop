@@ -190,7 +190,6 @@ impl DirectSweepControl for dyn SdrDevice {
 struct SweepRequest {
     start_hz: u64,
     stop_hz: u64,
-    dwell_ms: u64,
 }
 
 struct FailedRequest {
@@ -242,6 +241,7 @@ impl DirectSweepController {
             metrics.sweep.cycle_count = 0;
             metrics.sweep.positions_done = 0;
             metrics.sweep.positions_total = 0;
+            metrics.sweep.current_frame = None;
             metrics.sweep.generation = metrics.sweep.generation.wrapping_add(1);
             metrics.push_log(format!(
                 "Sweep started: {:.1}\u{2013}{:.1} MHz",
@@ -267,7 +267,6 @@ impl DirectSweepController {
         let request = SweepRequest {
             start_hz: config.start_hz,
             stop_hz: config.stop_hz,
-            dwell_ms: config.dwell_ms,
         };
         let generation = {
             let mut metrics = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -284,7 +283,6 @@ impl DirectSweepController {
         let requested = DirectSweepConfig {
             start_hz: request.start_hz,
             stop_hz: request.stop_hz,
-            dwell_ms: request.dwell_ms,
             generation,
         };
         let retry_due = self.failed.as_ref().is_none_or(|failed| {
@@ -490,6 +488,34 @@ mod direct_tests {
         assert_eq!(device.requests.lock().unwrap().len(), 1);
         controller.update(&state, &device, now + DIRECT_SWEEP_RETRY);
         assert_eq!(device.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dwell_changes_do_not_restart_the_device_sweep() {
+        let state = active_state(false);
+        let device = TestDevice::default();
+        let mut controller = DirectSweepController::default();
+        let now = Instant::now();
+        controller.update(&state, &device, now);
+
+        state.lock().unwrap().sweep.config.dwell_ms += 50;
+        controller.update(&state, &device, now);
+        assert_eq!(device.requests.lock().unwrap().len(), 1);
+        assert_eq!(state.lock().unwrap().sweep.generation, 1);
+    }
+
+    #[test]
+    fn a_new_session_clears_the_previous_frame() {
+        let state = Arc::new(Mutex::new(
+            SdrMetrics::fixture()
+                .streaming()
+                .with_sweep(88_000_000, 108_000_000),
+        ));
+        let device = TestDevice::default();
+        let mut controller = DirectSweepController::default();
+        controller.update(&state, &device, Instant::now());
+
+        assert!(state.lock().unwrap().sweep.current_frame.is_none());
     }
 
     #[test]

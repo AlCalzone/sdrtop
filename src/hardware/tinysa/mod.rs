@@ -1345,7 +1345,6 @@ mod tests {
         let valid = DirectSweepConfig {
             start_hz: 88_000_000,
             stop_hz: 108_000_000,
-            dwell_ms: 200,
             generation: 7,
         };
         assert!(validate_direct_sweep(Some(valid), Model::Basic).is_ok());

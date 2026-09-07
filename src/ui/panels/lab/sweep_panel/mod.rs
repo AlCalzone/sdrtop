@@ -70,7 +70,21 @@ impl Panel for SweepPanel {
         // brackets. The scan parameters ride along as the suffix, rebuilt every
         // frame so the band, dwell and cycle number stay live.
         let sw = &state.sweep;
-        let step_mhz = sw.config.effective_step_hz(state.radio.config_sample_rate) as f64 / 1e6;
+        let step_hz = if state.caps.acquisition == crate::hardware::AcquisitionModel::PowerSweep {
+            sw.current_frame
+                .as_ref()
+                .and_then(|frame| {
+                    frame
+                        .freq_hz
+                        .get(1)
+                        .zip(frame.freq_hz.first())
+                        .map(|(second, first)| second.saturating_sub(*first))
+                })
+                .unwrap_or(0)
+        } else {
+            sw.config.effective_step_hz(state.radio.config_sample_rate)
+        };
+        let step_mhz = step_hz as f64 / 1e6;
         PanelChrome::new("Sweep").suffix(format!(
             "  {:.1}\u{2013}{:.1} MHz \u{00b7} step {:.1} MHz \u{00b7} dwell {} ms \u{00b7} cycle #{}",
             sw.config.start_hz as f64 / 1e6,

@@ -88,6 +88,7 @@ impl SpectrumAccumulator {
         let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
         let (center_freq_hz, sample_rate) = trace_window(&trace.frequencies_hz)
             .unwrap_or((m.radio.frequency, m.radio.config_sample_rate));
+        m.radio.frequency = center_freq_hz;
         let bins = Arc::new(self.smoothed.clone());
         let peak = Arc::new(self.peak.clone());
         m.waterfall.buffer.push(&bins);

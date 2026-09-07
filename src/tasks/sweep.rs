@@ -194,6 +194,7 @@ fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDev
     tokio::spawn(async move {
         let mut was_active = false;
         let mut applied: Option<crate::hardware::DirectSweepConfig> = None;
+        let mut failed: Option<(crate::hardware::DirectSweepConfig, Instant, String)> = None;
         let mut saved_freq = 0;
         let mut saved_rx_enabled = false;
 
@@ -228,20 +229,36 @@ fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDev
                     dwell_ms: config.dwell_ms,
                     generation,
                 };
-                if applied != Some(requested) {
+                let retry_due = failed.as_ref().is_none_or(|(failed_request, at, _)| {
+                    *failed_request != requested || at.elapsed() >= Duration::from_secs(1)
+                });
+                if applied != Some(requested) && retry_due {
                     match device.set_direct_sweep(Some(requested)) {
-                        Ok(()) => applied = Some(requested),
-                        Err(error) => {
+                        Ok(()) => {
                             applied = Some(requested);
+                            failed = None;
+                            state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .radio
+                                .rx_enabled = true;
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
                             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                            m.radio.rx_enabled = false;
-                            m.push_log(format!("Sweep error: {error}"));
+                            if failed.as_ref().is_none_or(|(failed_request, _, previous)| {
+                                *failed_request != requested || previous != &message
+                            }) {
+                                m.push_log(format!("Sweep error: {message}"));
+                            }
+                            failed = Some((requested, Instant::now(), message));
                         }
                     }
                 }
             } else if was_active {
                 was_active = false;
                 applied = None;
+                failed = None;
                 let target = {
                     let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
                     m.sweep.pending_tune.take().unwrap_or(saved_freq)

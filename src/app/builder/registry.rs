@@ -150,7 +150,27 @@ impl App {
                 .any(|panel| INSTRUMENTS.contains(&panel.name.as_str()))
         });
         if !config.presets.contains_key(&config.active_preset) {
-            config.active_preset = "spectrum_waterfall".into();
+            let fallback = [
+                "spectrum_waterfall",
+                "spectrum",
+                "waterfall",
+                "lab_sweep",
+                "micro_sweep",
+            ]
+            .into_iter()
+            .find(|name| config.presets.contains_key(*name))
+            .map(str::to_string)
+            .or_else(|| {
+                let mut names: Vec<String> = config.presets.keys().cloned().collect();
+                names.sort();
+                names.into_iter().next()
+            });
+            if let Some(fallback) = fallback {
+                config.active_preset = fallback;
+            } else if let Some(spectrum) = builtins.get("spectrum").cloned() {
+                config.presets.insert("spectrum".into(), spectrum);
+                config.active_preset = "spectrum".into();
+            }
         }
     }
 }
@@ -495,6 +515,36 @@ mod tests {
         assert!(engine.has_preset("main"));
         assert_eq!(engine.active_preset(), "main");
         assert!(engine.is_panel_visible("header_slim"));
+    }
+
+    #[test]
+    fn an_unsupported_override_of_the_default_falls_back_to_a_live_layout() {
+        let mut user = HashMap::new();
+        user.insert(
+            "spectrum_waterfall".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![crate::config::PanelSpec {
+                    name: "iq_constellation".into(),
+                    position: crate::config::Position::Body,
+                    height: None,
+                    width_pct: None,
+                }],
+                ..Default::default()
+            },
+        );
+        let (engine, _) = App::build_ui_for(
+            "spectrum_waterfall",
+            &user,
+            None,
+            crate::hardware::AcquisitionModel::PowerSweep,
+        );
+        assert!(engine.has_preset(engine.active_preset()));
+        assert!(
+            engine.is_panel_visible("spectrum")
+                || engine.is_panel_visible("waterfall")
+                || engine.is_panel_visible("sweep_panel")
+                || engine.is_panel_visible("micro_sweep_panel")
+        );
     }
 
     /// A full-height waterfall must reach its own bottom border.

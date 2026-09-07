@@ -238,11 +238,6 @@ fn spawn_direct_sweep_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDev
                         Ok(()) => {
                             applied = Some(requested);
                             failed = None;
-                            state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .radio
-                                .rx_enabled = true;
                         }
                         Err(error) => {
                             let message = error.to_string();

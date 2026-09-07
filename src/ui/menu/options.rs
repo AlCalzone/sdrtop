@@ -11,7 +11,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::{state::SdrMetrics, ui::chrome};
+use crate::{
+    state::{DeviceOptionUpdate, SdrMetrics},
+    ui::chrome,
+};
 
 /// The heading. Says what the pane is for, in the future tense, because that is
 /// the only true tense for it right now.
@@ -76,7 +79,13 @@ fn lines(
         .skip(first)
         .take(visible)
     {
-        out.push(option_line(option, index == selected, iw, theme));
+        out.push(option_line(
+            option,
+            index == selected,
+            &m.ui.device_option_update,
+            iw,
+            theme,
+        ));
     }
     out
 }
@@ -99,6 +108,7 @@ fn option_header(iw: usize, height: usize, theme: &crate::Theme) -> Vec<Line<'st
 fn option_line(
     option: &crate::hardware::DeviceOption,
     active: bool,
+    update: &DeviceOptionUpdate,
     iw: usize,
     theme: &crate::Theme,
 ) -> Line<'static> {
@@ -120,7 +130,16 @@ fn option_line(
     let label_width = content_width.min(18).min(content_width / 2);
     let choice_width = content_width - label_width;
     let label = fit_cell(&option.label, label_width);
-    let choice = fit_text(&option.selected_choice, choice_width);
+    let shown = match update {
+        DeviceOptionUpdate::Pending { id, choice, .. } if id == &option.id => {
+            format!("{} -> {choice}...", option.selected_choice)
+        }
+        DeviceOptionUpdate::Error { id, .. } if id == &option.id => {
+            format!("{} (failed)", option.selected_choice)
+        }
+        _ => option.selected_choice.clone(),
+    };
+    let choice = fit_text(&shown, choice_width);
     Line::from(vec![
         Span::styled(marker, Style::default().fg(theme.border_accent)),
         Span::styled(label, Style::default().fg(theme.label)),
@@ -292,5 +311,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pending_change_keeps_the_accepted_choice_visible() {
+        let mut m = SdrMetrics::fixture();
+        m.device_options.push(crate::hardware::DeviceOption {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choices: vec!["Narrow".into(), "Wide".into()],
+            selected_choice: "Narrow".into(),
+        });
+        m.ui.device_option_update = DeviceOptionUpdate::Pending {
+            request_id: 1,
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choice: "Wide".into(),
+        };
+
+        let text = lines(&m, 0, 80, 1, &crate::Theme::sdr())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Narrow -> Wide..."), "{text}");
+    }
+
+    #[test]
+    fn failed_change_keeps_the_accepted_choice_visible() {
+        let mut m = SdrMetrics::fixture();
+        m.device_options.push(crate::hardware::DeviceOption {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choices: vec!["Narrow".into(), "Wide".into()],
+            selected_choice: "Narrow".into(),
+        });
+        m.ui.device_option_update = DeviceOptionUpdate::Error {
+            request_id: 1,
+            id: "bandwidth".into(),
+            choice: "Wide".into(),
+            message: "device rejected choice".into(),
+        };
+
+        let text = lines(&m, 0, 80, 1, &crate::Theme::sdr())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Narrow (failed)"), "{text}");
+        assert!(!text.contains("Wide"), "{text}");
     }
 }

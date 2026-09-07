@@ -129,6 +129,29 @@ pub struct LogEntry {
     pub text: Arc<str>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum DeviceOptionUpdate {
+    #[default]
+    Ready,
+    Pending {
+        request_id: u64,
+        id: String,
+        label: String,
+        choice: String,
+    },
+    Completed {
+        request_id: u64,
+        id: String,
+        choice: String,
+    },
+    Error {
+        request_id: u64,
+        id: String,
+        choice: String,
+        message: String,
+    },
+}
+
 #[derive(Clone, PartialEq)]
 pub enum InputMode {
     Normal,
@@ -195,6 +218,9 @@ pub struct UiState {
     /// Where the cursor is while the menu is open, `None` when it is closed.
     /// See [`MenuState`].
     pub menu: Option<MenuState>,
+    pub device_option_update: DeviceOptionUpdate,
+    pub next_device_option_request: u64,
+    pub quit_after_device_option: bool,
 }
 
 /// Which pane the menu's right column is showing.
@@ -328,6 +354,9 @@ impl Default for UiState {
             recall_cursor: 0,
             log_overlay: false,
             menu: None,
+            device_option_update: DeviceOptionUpdate::default(),
+            next_device_option_request: 0,
+            quit_after_device_option: false,
         }
     }
 }

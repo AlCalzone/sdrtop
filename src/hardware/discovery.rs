@@ -51,7 +51,7 @@ impl DeviceKind {
         match self {
             Self::HackRf => hackrf::ffi::api().map(|_| ()),
             Self::RtlSdr => rtlsdr::ffi::api().map(|_| ()),
-            Self::Soapy | Self::TinySa => Ok(()),
+            Self::Soapy => Ok(()),
         }
     }
 

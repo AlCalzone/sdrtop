@@ -34,8 +34,13 @@ An incompatible architecture or libc triggers a source build through
 
 Runtime installation is opt-in. `--hackrf` adds libhackrf. `--rtlsdr` adds
 librtlsdr. `--soapy` adds SoapySDR and its driver modules. These flags can be
-combined. A plain install adds none of these libraries. tinySA needs none of them.
+combined. A plain install adds none of these libraries.
 Missing or incompatible libraries disable only their respective backends.
+
+Before a runtime-loading release is published, the latest-release URL can still
+select an older version that requires native SDR development packages.
+Use `sh install.sh --git` to build `main`. See
+[older-release build failures](troubleshooting.md#the-build-fails-looking-for-libhackrf).
 
 Runtime package installation is best-effort. Check warnings for packages that
 could not be installed. The runtime package lists fall back to development
@@ -84,11 +89,10 @@ Everything below is the same job done by hand.
 ## What you need
 
 - **Host:** A Linux machine.
-- **Radio:** A HackRF One, RTL-SDR, tinySA or a supported SoapySDR device.
+- **Radio:** A HackRF One, RTL-SDR or a supported SoapySDR device.
 - **Source builds:** Rust 1.88+ and a C compiler/linker. Install Rust with
   [rustup](https://rustup.rs). No SDR development headers or pkg-config are needed.
-- **Runtime:** Install only the library for the backend you use. tinySA needs
-  neither libhackrf nor librtlsdr.
+- **Runtime:** Install only the library for the backend you use.
 
 Build tools by distribution:
 
@@ -184,8 +188,8 @@ sudo install -Dm755 sdrtop /usr/local/bin/sdrtop
 
 The tarball needs x86_64 Linux with glibc 2.36+. Debian 12+ and Ubuntu 24.04+
 meet that floor. Both Debian's `librtlsdr.so.0` and Ubuntu's `librtlsdr.so.2`
-are supported at runtime. Neither library is needed to start sdrtop or use
-tinySA. Raspberry Pi, musl-based systems and older glibc systems need a source build.
+are supported at runtime. Neither library is needed to start sdrtop.
+Raspberry Pi, musl-based systems and older glibc systems need a source build.
 
 From 0.4.2 onward every release also carries a signed build provenance
 attestation. The checksum only tells you the download arrived intact. This tells

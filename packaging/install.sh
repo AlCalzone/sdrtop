@@ -64,10 +64,11 @@ sdrtop installer
   --uninstall     remove what a previous run installed
   --help          this
 
-No SDR libraries are installed by default. tinySA needs none of them.
+No SDR libraries are installed by default.
 --deps-only without a runtime flag does nothing. It never installs build tools.
 Source builds need Rust 1.88+ and a C compiler/linker.
-SDR headers are unnecessary for current releases.
+SDR headers are unnecessary for runtime-loading builds.
+Older releases may require SDR development packages. --git builds main.
 EOF
 }
 
@@ -502,10 +503,18 @@ if [ -z "$BINARY" ]; then
     # shellcheck disable=SC2086 # deliberate: $src_args is an argument list
     PATH="$WORK/cargo/bin:$PATH" \
         cargo install "$CRATE" --locked --root "$WORK/cargo" $src_args \
-        || die "the build failed; see the output above"
+        || {
+            if [ "$FROM_GIT" -eq 0 ]; then
+                warn "older releases require native SDR development packages"
+                warn "use --git to build main with runtime loading"
+            fi
+            die "the build failed; see the output above"
+        }
 
     BINARY="$WORK/cargo/bin/sdrtop"
     [ -x "$BINARY" ] || die "cargo reported success but produced no binary"
+    "$BINARY" --version >/dev/null 2>&1 \
+        || die "the built binary does not run; the existing installation was left unchanged"
     # No SRC_DIR: `cargo install` delivers a binary and nothing else, so this
     # path installs no README, man page or user_docs. That is what the command
     # means, and the documentation lives at github.com/musithang/sdrtop.

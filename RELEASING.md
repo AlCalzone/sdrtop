@@ -338,8 +338,11 @@ The release workflow requires exactly `libc.so.6`, `libgcc_s.so.1` and
 `install.sh` installs native runtimes only with `--hackrf` or `--rtlsdr`.
 `--soapy` selects SoapySDR and its driver modules. `--deps-only` installs only
 selected runtimes. With no runtime flags it does nothing. Source-build packages
-contain compiler/linker tools. Older releases selected by `--version` may still
-need SDR development packages installed by hand.
+contain compiler/linker tools. Older releases selected by `--version` or the
+latest-release URL may still need SDR development packages installed by hand.
+Failed source builds report that requirement. A built binary must pass its startup
+check before it replaces an existing installation. `--git` selects `main` before
+the next release.
 
 ---
 

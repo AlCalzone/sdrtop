@@ -131,7 +131,7 @@ Measured the awkward way rather than the easy way. Bandwidth about the carrier, 
 
 ## 📦 Install
 
-**Requirements:** Linux · a HackRF One, an RTL-SDR, a tinySA, or anything SoapySDR speaks to
+**Requirements:** Linux · a HackRF One, an RTL-SDR, or anything SoapySDR speaks to
 
 ### The one-liner
 
@@ -141,7 +141,7 @@ curl -fsSL https://raw.githubusercontent.com/musithang/sdrtop/main/packaging/ins
 
 The installer tries the prebuilt binary on your machine. It compiles from source if the binary cannot run there. Native SDR libraries are optional runtime dependencies.
 
-Add `--hackrf` or `--rtlsdr` to install the runtime for your radio. `--soapy` adds SoapySDR and its driver modules. A plain install adds none of these libraries. tinySA needs none of them.
+Add `--hackrf` or `--rtlsdr` to install the runtime for your radio. `--soapy` adds SoapySDR and its driver modules. A plain install adds none of these libraries.
 
 <details>
 <summary>Every flag it takes, and installing without root</summary>
@@ -182,7 +182,9 @@ sudo dnf install gcc               # Fedora
 cargo install sdrtop --locked
 ```
 
-Building needs Rust 1.88+ and a C compiler/linker. Install Rust with [rustup](https://rustup.rs). No SDR libraries, development headers or pkg-config are required. At runtime, HackRF needs libhackrf 2023.01.1+ and RTL-SDR needs librtlsdr. A missing or incompatible library disables only its backend. tinySA can build and run with neither library.
+Building needs Rust 1.88+ and a C compiler/linker. Install Rust with [rustup](https://rustup.rs). No SDR libraries, development headers or pkg-config are required. At runtime, HackRF needs libhackrf 2023.01.1+ and RTL-SDR needs librtlsdr. A missing or incompatible library disables only its backend.
+
+Runtime loading is independent preparation for the tinySA support proposed in [musithang/sdrtop#7](https://github.com/musithang/sdrtop/pull/7) and [musithang/sdrtop#8](https://github.com/musithang/sdrtop/pull/8). The tinySA backend is provided by that companion work.
 
 Then go make coffee: a few minutes on a laptop, considerably more on a Raspberry Pi. It's not frozen, it's just Rust.
 

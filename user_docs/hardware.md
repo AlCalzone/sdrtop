@@ -232,7 +232,7 @@ which is the honest answer rather than a guess dressed as two.
 | ARM / Android (Termux) | Builds and runs; needs a root-capable USB stack to reach the device |
 
 sdrtop loads libhackrf and librtlsdr at runtime. Neither library is required
-to build sdrtop or use tinySA. A missing or incompatible library disables only
+to build sdrtop. A missing or incompatible library disables only
 its backend.
 
 HackRF needs libhackrf 2023.01.1+ with all required symbols, including

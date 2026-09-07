@@ -57,7 +57,7 @@ sdrtop --device rtlsdr
 
 Explicit selection reports the library and candidate filename that failed.
 A missing-symbol error names the symbol too. Automatic discovery skips only
-the unavailable backend. tinySA remains usable with neither native library.
+the unavailable backend. Other installed backends remain available.
 Startup discovery diagnostics are printed to stderr before the TUI opens.
 
 1. **Install the selected runtime.** Use `sh install.sh --deps-only --hackrf`
@@ -458,6 +458,12 @@ libhackrf, librtlsdr, SDR development headers or pkg-config.
 Check whether you selected an older release with `--version`. Those releases
 may still require both development libraries. On Debian or Ubuntu, install
 `libhackrf-dev librtlsdr-dev pkg-config` to build an older release.
+
+The installer from `main` may also select an older version through the latest
+release URL. It checks downloaded binaries before installation. An old binary
+with missing libraries triggers a source build of that same release.
+Use `sh install.sh --git` to build `main` with runtime loading before the next
+release. A failed build or startup check leaves an existing installation unchanged.
 
 For a runtime loading error, follow
 [A native backend's library is unavailable](#a-native-backends-library-is-unavailable).

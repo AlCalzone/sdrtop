@@ -307,6 +307,7 @@ pub fn list() -> Vec<DeviceListing> {
             args: None,
             serial: device_serial(i),
             path: None,
+            tiny_sa_input: None,
         });
     }
     out

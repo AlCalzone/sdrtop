@@ -295,6 +295,7 @@ pub fn list() -> Vec<DeviceListing> {
                     args: None,
                     serial: Some(serial.clone()),
                     path: None,
+                    tiny_sa_input: None,
                 });
             }
         }

@@ -5,7 +5,7 @@ mod discovery;
 mod protocol;
 
 use std::io::{ErrorKind, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -30,8 +30,49 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAIN_QUIET: Duration = Duration::from_millis(200);
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
+const BASIC_LOW_MAX_HZ: u64 = 350_000_000;
+const BASIC_HIGH_MIN_HZ: u64 = 240_000_000;
+const BASIC_HIGH_MAX_HZ: u64 = 959_000_000;
 
 type UnitReply = Sender<anyhow::Result<()>>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BasicInput {
+    #[default]
+    Low,
+    High,
+}
+
+impl BasicInput {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "high" => Ok(Self::High),
+            _ => bail!("tinySA input must be 'low' or 'high'"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Low => "LOW",
+            Self::High => "HIGH",
+        }
+    }
+
+    fn mode_command(self) -> &'static str {
+        match self {
+            Self::Low => "mode low input",
+            Self::High => "mode high input",
+        }
+    }
+
+    fn range(self) -> (u64, u64) {
+        match self {
+            Self::Low => (MIN_FREQUENCY_HZ, BASIC_LOW_MAX_HZ),
+            Self::High => (BASIC_HIGH_MIN_HZ, BASIC_HIGH_MAX_HZ),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ScanSettings {
@@ -46,8 +87,52 @@ enum SpurMode {
     Auto,
 }
 
-pub fn list() -> Vec<DeviceListing> {
-    discovery::list()
+pub fn list(selector: Option<&str>) -> Vec<DeviceListing> {
+    let show_input = selector.is_some_and(|value| value.contains("?input="));
+    let (path, input) = match selector {
+        Some(selector) => match parse_selector(selector) {
+            Ok(selection) => selection,
+            Err(_) => return Vec::new(),
+        },
+        None => (None, BasicInput::Low),
+    };
+    if let Some(path) = path {
+        let input_label = if show_input {
+            format!(" · {} input", input.label())
+        } else {
+            String::new()
+        };
+        return vec![DeviceListing {
+            kind: crate::hardware::DeviceKind::TinySa,
+            index: 0,
+            label: format!("tinySA · {}{input_label}", path.display()),
+            serial: None,
+            args: None,
+            path: Some(path),
+            tiny_sa_input: Some(input),
+        }];
+    }
+    let mut devices = discovery::list();
+    for device in &mut devices {
+        device.tiny_sa_input = Some(input);
+        if show_input {
+            device
+                .label
+                .push_str(&format!(" · {} input", input.label()));
+        }
+    }
+    devices
+}
+
+pub fn parse_selector(selector: &str) -> anyhow::Result<(Option<PathBuf>, BasicInput)> {
+    let (path, input) = match selector.rsplit_once("?input=") {
+        Some((path, input)) => (path, BasicInput::parse(input)?),
+        None => (selector, BasicInput::Low),
+    };
+    if path.contains('?') {
+        bail!("tinySA selector only supports '?input=low' or '?input=high'");
+    }
+    Ok(((!path.is_empty()).then(|| PathBuf::from(path)), input))
 }
 
 pub struct TinySaDevice {
@@ -59,7 +144,7 @@ pub struct TinySaDevice {
 }
 
 impl TinySaDevice {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
+    pub fn open(path: &Path, basic_input: BasicInput) -> anyhow::Result<Self> {
         let port = serialport::new(path.to_string_lossy(), 115_200)
             .data_bits(DataBits::Eight)
             .stop_bits(StopBits::One)
@@ -72,7 +157,7 @@ impl TinySaDevice {
         let (init_tx, init_rx) = bounded(1);
         let worker = thread::Builder::new()
             .name("tinysa-serial".to_string())
-            .spawn(move || worker_entry(port, command_rx, init_tx))
+            .spawn(move || worker_entry(port, command_rx, init_tx, basic_input))
             .context("failed to start tinySA serial worker")?;
         let initialized = match init_rx.recv() {
             Ok(Ok(initialized)) => initialized,
@@ -85,7 +170,7 @@ impl TinySaDevice {
                 bail!("tinySA serial worker stopped during initialization");
             }
         };
-        let caps = capabilities(initialized.identity.model);
+        let caps = capabilities(initialized.identity.model, basic_input);
         let notes = initialized
             .identity
             .hardware
@@ -197,16 +282,10 @@ struct Worker {
     command_rx: Receiver<Command>,
     identity: Identity,
     settings: ScanSettings,
+    basic_input: BasicInput,
     center_hz: u64,
     span_hz: u64,
     rx_context: Option<Arc<RxContext>>,
-    active_path: Option<RfPath>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RfPath {
-    Lower,
-    Upper,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +293,6 @@ struct Segment {
     start_hz: u64,
     stop_hz: u64,
     points: u32,
-    path: RfPath,
 }
 
 enum ScanResult {
@@ -242,8 +320,9 @@ fn worker_entry(
     mut port: Box<dyn SerialPort>,
     command_rx: Receiver<Command>,
     init_tx: Sender<anyhow::Result<Initialized>>,
+    basic_input: BasicInput,
 ) {
-    let (identity, settings) = match initialize(&mut *port) {
+    let (identity, settings) = match initialize(&mut *port, basic_input) {
         Ok(value) => value,
         Err(error) => {
             let _ = init_tx.send(Err(error));
@@ -258,15 +337,16 @@ fn worker_entry(
     {
         return;
     }
+    let center_hz = default_frequency(identity.model, basic_input);
     Worker {
         port,
         command_rx,
         identity,
         settings,
-        center_hz: DEFAULT_FREQUENCY_HZ,
+        center_hz,
         span_hz: DEFAULT_SPAN_HZ,
+        basic_input,
         rx_context: None,
-        active_path: None,
     }
     .run();
 }
@@ -366,11 +446,13 @@ impl Worker {
                 let _ = reply.send(Ok(self.rx_context.is_some()));
             }
             Command::SetFrequency(hz, reply) => {
-                self.center_hz = hz.clamp(MIN_FREQUENCY_HZ, self.identity.model.maximum_hz());
+                let (minimum, maximum) = frequency_range(self.identity.model, self.basic_input);
+                self.center_hz = hz.clamp(minimum, maximum);
                 let _ = reply.send(Ok(()));
             }
             Command::SetSpan(hz, reply) => {
-                let maximum = self.identity.model.maximum_hz() - MIN_FREQUENCY_HZ;
+                let (minimum, maximum) = frequency_range(self.identity.model, self.basic_input);
+                let maximum = maximum - minimum;
                 let result = normalize_span(hz, maximum, self.settings.points).map(|span_hz| {
                     self.span_hz = span_hz;
                     RateSet::new(
@@ -408,12 +490,9 @@ impl Worker {
     }
 
     fn scan_once(&mut self) -> anyhow::Result<ScanResult> {
-        let (start_hz, stop_hz) = centered_window(
-            self.center_hz,
-            self.span_hz,
-            MIN_FREQUENCY_HZ,
-            self.identity.model.maximum_hz(),
-        );
+        let (minimum_hz, maximum_hz) = frequency_range(self.identity.model, self.basic_input);
+        let (start_hz, stop_hz) =
+            centered_window(self.center_hz, self.span_hz, minimum_hz, maximum_hz);
         let points = self.settings.points;
         self.center_hz = window_center(start_hz, stop_hz);
         self.span_hz = stop_hz - start_hz;
@@ -422,34 +501,31 @@ impl Worker {
         }
         let mut frequencies_hz = Vec::with_capacity(points as usize);
         let mut levels_dbm = Vec::with_capacity(points as usize);
-        for segment in scan_segments(self.identity.model, start_hz, stop_hz, points) {
-            if let Some(command) = poll_scan_command(&self.command_rx)? {
-                return Ok(ScanResult::Interrupted(command, Ok(())));
+        let segment = Segment {
+            start_hz,
+            stop_hz,
+            points,
+        };
+        let inactivity_timeout =
+            scan_inactivity_timeout(segment, self.identity.model, self.settings)?;
+        match scan_segment(
+            &mut *self.port,
+            &self.command_rx,
+            segment,
+            self.identity.zero_dbm,
+            inactivity_timeout,
+        )? {
+            ScanResult::Complete {
+                frequencies_hz: segment_frequencies,
+                levels_dbm: segment_levels,
+                ..
+            } => {
+                frequencies_hz.extend(segment_frequencies);
+                levels_dbm.extend(segment_levels);
             }
-            self.select_path(segment.path)?;
-            let inactivity_timeout =
-                scan_inactivity_timeout(segment, self.identity.model, self.settings)?;
-            match scan_segment(
-                &mut *self.port,
-                &self.command_rx,
-                segment,
-                self.identity.zero_dbm,
-                inactivity_timeout,
-            )? {
-                ScanResult::Complete {
-                    frequencies_hz: segment_frequencies,
-                    levels_dbm: segment_levels,
-                    ..
-                } => {
-                    frequencies_hz.extend(segment_frequencies);
-                    levels_dbm.extend(segment_levels);
-                }
-                interrupted => return Ok(interrupted),
-            }
+            interrupted => return Ok(interrupted),
         }
-        if frequencies_hz.windows(2).any(|pair| pair[1] <= pair[0]) {
-            bail!("tinySA scan returned duplicate or descending frequencies");
-        }
+        let frequencies_hz = display_frequencies(&frequencies_hz)?;
         Ok(ScanResult::Complete {
             frequencies_hz,
             levels_dbm,
@@ -457,27 +533,12 @@ impl Worker {
             effective_span_hz: self.span_hz,
         })
     }
-
-    fn select_path(&mut self, path: RfPath) -> anyhow::Result<()> {
-        if self.identity.model.is_ultra() {
-            return Ok(());
-        }
-        if self.active_path == Some(path) {
-            return Ok(());
-        }
-        let command = match path {
-            RfPath::Lower => "mode low input",
-            RfPath::Upper => "mode high input",
-        };
-        send_text_command(&mut *self.port, command)?;
-        send_text_command(&mut *self.port, "abort on")?;
-        apply_scan_settings(&mut *self.port, self.identity.model)?;
-        self.active_path = Some(path);
-        Ok(())
-    }
 }
 
-fn initialize(port: &mut dyn SerialPort) -> anyhow::Result<(Identity, ScanSettings)> {
+fn initialize(
+    port: &mut dyn SerialPort,
+    basic_input: BasicInput,
+) -> anyhow::Result<(Identity, ScanSettings)> {
     best_effort_abort(port);
     drain_startup(port)?;
     let mut last_error = None;
@@ -504,8 +565,11 @@ fn initialize(port: &mut dyn SerialPort) -> anyhow::Result<(Identity, ScanSettin
     let help = send_text_command(port, "help")?;
     let zero = send_text_command(port, "zero")?;
     let identity = protocol::parse_identity(&version, &info, &help, &zero)?;
+    if identity.model.is_ultra() && basic_input == BasicInput::High {
+        bail!("tinySA HIGH input selection applies only to the basic model");
+    }
     send_text_command(port, "abort on")?;
-    send_text_command(port, input_mode_command(identity.model))?;
+    send_text_command(port, input_mode_command(identity.model, basic_input))?;
     let (settings, _) = startup_settings(identity.model);
     apply_scan_settings(port, identity.model)?;
     Ok((identity, settings))
@@ -523,11 +587,11 @@ fn best_effort_abort(port: &mut dyn SerialPort) {
     let _ = port.flush();
 }
 
-fn input_mode_command(model: Model) -> &'static str {
+fn input_mode_command(model: Model, basic_input: BasicInput) -> &'static str {
     if model.is_ultra() {
         "mode input"
     } else {
-        "mode low input"
+        basic_input.mode_command()
     }
 }
 
@@ -859,7 +923,8 @@ fn reject_command(command: Command, error: anyhow::Error) {
     }
 }
 
-fn capabilities(model: Model) -> DeviceCapabilities {
+fn capabilities(model: Model, basic_input: BasicInput) -> DeviceCapabilities {
+    let (minimum_hz, maximum_hz) = frequency_range(model, basic_input);
     DeviceCapabilities {
         acquisition: AcquisitionKind::PowerTrace,
         sample_rate_is_span: true,
@@ -867,11 +932,11 @@ fn capabilities(model: Model) -> DeviceCapabilities {
         level_min_db: -120.0,
         level_max_db: 20.0,
         trace_stale_ms: 5_000,
-        freq_min_hz: MIN_FREQUENCY_HZ,
-        freq_max_hz: model.maximum_hz(),
+        freq_min_hz: minimum_hz,
+        freq_max_hz: maximum_hz,
         sample_rate_min_hz: DEFAULT_POINTS as f64,
-        sample_rate_max_hz: (model.maximum_hz() - MIN_FREQUENCY_HZ) as f64,
-        default_frequency_hz: DEFAULT_FREQUENCY_HZ,
+        sample_rate_max_hz: (maximum_hz - minimum_hz) as f64,
+        default_frequency_hz: default_frequency(model, basic_input),
         default_sample_rate_hz: DEFAULT_SPAN_HZ as f64,
         sample_geometry: SampleGeometry {
             format: SampleFormat::Int8,
@@ -883,6 +948,19 @@ fn capabilities(model: Model) -> DeviceCapabilities {
         friis_applicable: false,
         delivery: DeliveryModel::Pull,
     }
+}
+
+fn frequency_range(model: Model, basic_input: BasicInput) -> (u64, u64) {
+    if model.is_ultra() {
+        (MIN_FREQUENCY_HZ, model.maximum_hz())
+    } else {
+        basic_input.range()
+    }
+}
+
+fn default_frequency(model: Model, basic_input: BasicInput) -> u64 {
+    let (minimum_hz, maximum_hz) = frequency_range(model, basic_input);
+    DEFAULT_FREQUENCY_HZ.clamp(minimum_hz, maximum_hz)
 }
 
 fn centered_window(center_hz: u64, span_hz: u64, minimum_hz: u64, maximum_hz: u64) -> (u64, u64) {
@@ -912,46 +990,30 @@ fn normalize_span(hz: f64, maximum_hz: u64, points: u32) -> anyhow::Result<u64> 
     Ok((hz.round() as u64).clamp(points as u64, maximum_hz))
 }
 
-fn scan_segments(model: Model, start_hz: u64, stop_hz: u64, points: u32) -> Vec<Segment> {
-    if model.is_ultra() {
-        return vec![Segment {
-            start_hz,
-            stop_hz,
-            points,
-            path: RfPath::Lower,
-        }];
+fn display_frequencies(measured_hz: &[u64]) -> anyhow::Result<Vec<u64>> {
+    let first = *measured_hz
+        .first()
+        .context("tinySA scan returned no frequencies")?;
+    let last = *measured_hz
+        .last()
+        .context("tinySA scan returned no frequencies")?;
+    if measured_hz.windows(2).any(|pair| pair[1] <= pair[0]) {
+        bail!("tinySA scan returned duplicate or descending frequencies");
     }
-    let boundary = model.path_boundary_hz();
-    if start_hz < boundary && boundary < stop_hz && points >= 2 {
-        let total_span = stop_hz - start_hz;
-        let lower_span = boundary - start_hz;
-        let lower_points = ((points as u64 * lower_span + total_span / 2) / total_span)
-            .clamp(1, points as u64 - 1) as u32;
-        return vec![
-            Segment {
-                start_hz,
-                stop_hz: boundary,
-                points: lower_points,
-                path: RfPath::Lower,
-            },
-            Segment {
-                start_hz: boundary,
-                stop_hz,
-                points: points - lower_points,
-                path: RfPath::Upper,
-            },
-        ];
+    let intervals = measured_hz.len().saturating_sub(1) as u64;
+    let span = last - first;
+    if intervals == 0 || span < intervals {
+        bail!(
+            "tinySA scan span is too narrow for {} points",
+            measured_hz.len()
+        );
     }
-    vec![Segment {
-        start_hz,
-        stop_hz,
-        points,
-        path: if start_hz < boundary {
-            RfPath::Lower
-        } else {
-            RfPath::Upper
-        },
-    }]
+    Ok((0..measured_hz.len())
+        .map(|index| {
+            let offset = (span as u128 * index as u128 + intervals as u128 / 2) / intervals as u128;
+            first + offset as u64
+        })
+        .collect())
 }
 
 fn startup_settings(model: Model) -> (ScanSettings, Vec<&'static str>) {
@@ -1132,48 +1194,18 @@ mod tests {
     }
 
     #[test]
-    fn basic_crossing_scans_split_at_the_model_path_boundary() {
+    fn basic_inputs_expose_only_their_physical_connector_range() {
         assert_eq!(
-            scan_segments(Model::Basic, 300_000_000, 400_000_000, 290),
-            vec![
-                Segment {
-                    start_hz: 300_000_000,
-                    stop_hz: 350_000_000,
-                    points: 145,
-                    path: RfPath::Lower,
-                },
-                Segment {
-                    start_hz: 350_000_000,
-                    stop_hz: 400_000_000,
-                    points: 145,
-                    path: RfPath::Upper,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ultra_scans_leave_path_selection_to_the_firmware() {
-        assert_eq!(
-            scan_segments(Model::Zs405, 700_000_000, 900_000_000, 450),
-            vec![Segment {
-                start_hz: 700_000_000,
-                stop_hz: 900_000_000,
-                points: 450,
-                path: RfPath::Lower,
-            }]
+            frequency_range(Model::Basic, BasicInput::Low),
+            (100_000, 350_000_000)
         );
         assert_eq!(
-            scan_segments(Model::Zs407, 100_000, 7_300_000_000, 450).len(),
-            1
+            frequency_range(Model::Basic, BasicInput::High),
+            (240_000_000, 959_000_000)
         );
-    }
-
-    #[test]
-    fn basic_unsplit_scans_select_the_expected_path() {
         assert_eq!(
-            scan_segments(Model::Basic, 100_000, 200_000_000, 64)[0].path,
-            RfPath::Lower
+            default_frequency(Model::Basic, BasicInput::High),
+            240_000_000
         );
     }
 
@@ -1212,20 +1244,6 @@ mod tests {
     }
 
     #[test]
-    fn float_rounded_firmware_frequencies_keep_the_measured_edges() {
-        let measured = protocol::scan_frequencies(100_000_000, 200_000_000, 450);
-        assert!(measured
-            .windows(2)
-            .any(|pair| pair[1] - pair[0] != measured[1] - measured[0]));
-        let first = measured[0];
-        let last = *measured.last().unwrap();
-        assert_eq!(
-            crate::signal::power::trace_window(&measured),
-            Some((window_center(first, last), (last - first) as f64))
-        );
-    }
-
-    #[test]
     fn a_span_too_narrow_for_the_point_count_is_clamped() {
         assert_eq!(
             normalize_span(1.0, 959_900_000, DEFAULT_POINTS).unwrap(),
@@ -1234,6 +1252,31 @@ mod tests {
         let frequencies =
             protocol::scan_frequencies(100_000, 100_000 + DEFAULT_POINTS as u64, DEFAULT_POINTS);
         assert!(frequencies.windows(2).all(|pair| pair[1] > pair[0]));
+    }
+
+    #[test]
+    fn firmware_frequencies_use_an_endpoint_preserving_display_grid() {
+        let measured = protocol::scan_frequencies(100_000_000, 200_000_000, 450);
+        assert!(
+            measured.windows(2).map(|pair| pair[1] - pair[0]).min()
+                != measured.windows(2).map(|pair| pair[1] - pair[0]).max()
+        );
+        let displayed = display_frequencies(&measured).unwrap();
+        assert_eq!(displayed.first(), measured.first());
+        assert_eq!(displayed.last(), measured.last());
+        let span = displayed.last().unwrap() - displayed.first().unwrap();
+        let intervals = displayed.len() as u64 - 1;
+        let lower_step = span / intervals;
+        let upper_step = span.div_ceil(intervals);
+        assert!(displayed.windows(2).all(|pair| {
+            let step = pair[1] - pair[0];
+            step == lower_step || step == upper_step
+        }));
+    }
+
+    #[test]
+    fn display_grid_rejects_duplicate_firmware_frequencies() {
+        assert!(display_frequencies(&[100_000, 100_000, 100_001]).is_err());
     }
 
     #[test]
@@ -1250,20 +1293,54 @@ mod tests {
     #[test]
     fn unknown_ultra_uses_the_conservative_zs405_range() {
         assert_eq!(Model::UltraUnknown.maximum_hz(), 6_000_000_000);
-        assert_eq!(Model::UltraUnknown.path_boundary_hz(), 800_000_000);
     }
 
     #[test]
     fn startup_forces_every_model_into_input_mode() {
-        assert_eq!(input_mode_command(Model::Basic), "mode low input");
+        assert_eq!(
+            input_mode_command(Model::Basic, BasicInput::Low),
+            "mode low input"
+        );
+        assert_eq!(
+            input_mode_command(Model::Basic, BasicInput::High),
+            "mode high input"
+        );
         for model in [
             Model::Zs405,
             Model::Zs406,
             Model::Zs407,
             Model::UltraUnknown,
         ] {
-            assert_eq!(input_mode_command(model), "mode input");
+            assert_eq!(input_mode_command(model, BasicInput::High), "mode input");
         }
+    }
+
+    #[test]
+    fn selector_keeps_the_path_and_basic_input_separate() {
+        assert_eq!(
+            parse_selector("/dev/ttyACM2").unwrap(),
+            (Some(PathBuf::from("/dev/ttyACM2")), BasicInput::Low)
+        );
+        assert_eq!(
+            parse_selector("/dev/ttyACM2?input=high").unwrap(),
+            (Some(PathBuf::from("/dev/ttyACM2")), BasicInput::High)
+        );
+        assert_eq!(
+            parse_selector("?input=high").unwrap(),
+            (None, BasicInput::High)
+        );
+        assert!(parse_selector("/dev/ttyACM2?input=other").is_err());
+    }
+
+    #[test]
+    fn basic_capabilities_match_the_selected_input() {
+        let low = capabilities(Model::Basic, BasicInput::Low);
+        assert_eq!((low.freq_min_hz, low.freq_max_hz), (100_000, 350_000_000));
+        let high = capabilities(Model::Basic, BasicInput::High);
+        assert_eq!(
+            (high.freq_min_hz, high.freq_max_hz),
+            (240_000_000, 959_000_000)
+        );
     }
 
     #[test]
@@ -1277,7 +1354,6 @@ mod tests {
             start_hz: 400_000_000,
             stop_hz: 500_000_000,
             points: 450,
-            path: RfPath::Lower,
         };
         let timeout = scan_inactivity_timeout(segment, Model::Zs405, settings).unwrap();
         assert!(timeout > Duration::from_secs(120), "{timeout:?}");
@@ -1291,7 +1367,7 @@ mod tests {
         #[ignore = "requires SDRTOP_TINYSA_TEST to name a connected serial port"]
         fn connected_device_streams_spectrum_frames() {
             let path = std::env::var("SDRTOP_TINYSA_TEST").expect("SDRTOP_TINYSA_TEST is not set");
-            let device = TinySaDevice::open(Path::new(&path)).unwrap();
+            let device = TinySaDevice::open(Path::new(&path), BasicInput::Low).unwrap();
             assert!(device
                 .info()
                 .board_name

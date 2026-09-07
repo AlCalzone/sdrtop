@@ -45,6 +45,7 @@ fn list_at(tty_root: &Path, dev_root: &Path) -> Vec<DeviceListing> {
             serial: None,
             args: None,
             path: Some(path),
+            tiny_sa_input: None,
         })
         .collect()
 }

@@ -93,6 +93,8 @@ pub struct DeviceListing {
     pub args: Option<String>,
     /// Character-device path for serial backends.
     pub path: Option<PathBuf>,
+    /// Physical input selected for a basic tinySA.
+    pub tiny_sa_input: Option<tinysa::BasicInput>,
 }
 
 /// Normalise a serial so two backends' spellings of the same radio compare
@@ -135,6 +137,11 @@ pub fn parse_device_arg(spec: &str) -> anyhow::Result<(DeviceKind, Option<String
              'soapy'; tinysa and soapy accept '=selector')"
         ),
     };
+    if kind == DeviceKind::TinySa {
+        if let Some(selector) = filter.as_deref() {
+            tinysa::parse_selector(selector)?;
+        }
+    }
     Ok((kind, filter))
 }
 
@@ -169,19 +176,9 @@ pub fn list_all_devices(
     out.extend(hackrf::list());
     out.extend(rtlsdr::list());
     let tinysa = if want == Some(DeviceKind::TinySa) {
-        match soapy_filter.filter(|value| !value.is_empty()) {
-            Some(path) => vec![DeviceListing {
-                kind: DeviceKind::TinySa,
-                index: 0,
-                label: format!("tinySA · {path}"),
-                serial: None,
-                args: None,
-                path: Some(PathBuf::from(path)),
-            }],
-            None => tinysa::list(),
-        }
+        tinysa::list(soapy_filter.filter(|value| !value.is_empty()))
     } else {
-        tinysa::list()
+        tinysa::list(None)
     };
     out.extend(tinysa);
     // A radio the native backend also found is normally dropped. Not when the
@@ -263,7 +260,10 @@ pub fn open_device(listing: &DeviceListing) -> anyhow::Result<Arc<dyn SdrDevice>
             let Some(path) = listing.path.as_deref() else {
                 anyhow::bail!("a tinySA listing with no serial port cannot be opened");
             };
-            Ok(Arc::new(tinysa::TinySaDevice::open(path)?))
+            Ok(Arc::new(tinysa::TinySaDevice::open(
+                path,
+                listing.tiny_sa_input.unwrap_or_default(),
+            )?))
         }
     }
 }
@@ -285,6 +285,7 @@ mod tests {
             serial: serial.map(str::to_string),
             args: args.map(str::to_string),
             path: None,
+            tiny_sa_input: None,
         }
     }
 
@@ -464,6 +465,14 @@ mod tests {
             (DeviceKind::Soapy, Some("driver=airspy".to_string())),
             "only the first = separates the name from the arguments"
         );
+        assert_eq!(
+            parse_device_arg("tinysa=/dev/ttyACM2?input=high").unwrap(),
+            (
+                DeviceKind::TinySa,
+                Some("/dev/ttyACM2?input=high".to_string())
+            )
+        );
+        assert!(parse_device_arg("tinysa=/dev/ttyACM2?input=other").is_err());
         assert!(parse_device_arg("airspy").is_err(), "not a backend name");
         assert!(parse_device_arg("").is_err(), "nor is nothing");
     }

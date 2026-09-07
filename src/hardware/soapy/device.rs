@@ -321,6 +321,7 @@ pub fn list() -> Vec<DeviceListing> {
             serial: args::get(&kwargs, "serial").map(str::to_string),
             args: Some(args::open_markup(&kwargs, i)),
             path: None,
+            tiny_sa_input: None,
         })
         .collect()
 }

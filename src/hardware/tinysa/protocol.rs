@@ -27,14 +27,6 @@ impl Model {
         }
     }
 
-    pub(super) fn path_boundary_hz(self) -> u64 {
-        match self {
-            Self::Basic => 350_000_000,
-            Self::Zs405 | Self::UltraUnknown => 800_000_000,
-            Self::Zs406 | Self::Zs407 => 900_000_000,
-        }
-    }
-
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::Basic => "tinySA",

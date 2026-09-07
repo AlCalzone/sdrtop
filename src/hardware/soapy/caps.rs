@@ -168,6 +168,7 @@ pub fn capabilities(a: &DriverAnswers) -> Result<Built, Unsupported> {
         level_max_db: 0.0,
         trace_stale_ms: crate::hardware::IQ_TRACE_STALE_MS,
         acquisition: crate::hardware::AcquisitionKind::IqSamples,
+        sample_rate_is_span: false,
         freq_min_hz: freq_min.max(0.0) as u64,
         freq_max_hz: freq_max.max(0.0) as u64,
         sample_rate_min_hz: rate_min,

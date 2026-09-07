@@ -653,6 +653,8 @@ pub enum DeliveryModel {
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
     pub acquisition: AcquisitionKind,
+    /// `set_sample_rate` controls a swept span for this device.
+    pub sample_rate_is_span: bool,
     /// Spectral levels and display bounds use this unit
     pub level_unit: LevelUnit,
     /// The finite display floor must be below `level_max_db`

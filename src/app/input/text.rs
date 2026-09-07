@@ -90,7 +90,12 @@ pub(super) fn sample_rate(
             let mut m = metrics(state);
             m.ui.input_mode = InputMode::Normal;
             m.ui.input_buf.clear();
-            m.push_log("Sample rate input cancelled");
+            let name = if m.caps.sample_rate_is_span {
+                "Span"
+            } else {
+                "Sample rate"
+            };
+            m.push_log(format!("{name} input cancelled"));
         }
         KeyCode::Backspace => {
             metrics(state).ui.input_buf.pop();
@@ -118,6 +123,11 @@ pub(super) fn sample_rate(
                 // rx_callback thread that needs the same lock to return.
                 let result = rate_hz.map(|hz| device.set_sample_rate(hz));
                 let mut m = metrics(state);
+                let (name, lower_name) = if m.caps.sample_rate_is_span {
+                    ("Span", "span")
+                } else {
+                    ("Sample rate", "sample rate")
+                };
                 match (rate_hz, result) {
                     // The rate recorded is the one the device came back with,
                     // not the one that was typed: a driver is free to round onto
@@ -129,21 +139,21 @@ pub(super) fn sample_rate(
                         m.ui.input_mode = InputMode::Normal;
                         m.ui.input_buf.clear();
                         m.push_log(if set.rate_hz == hz {
-                            format!("Sample rate set to {:.3} MHz", hz / 1e6)
+                            format!("{name} set to {:.3} MHz", hz / 1e6)
                         } else {
                             format!(
-                                "Sample rate {:.3} MHz is not on this radio's grid; running at \
+                                "{name} {:.3} MHz is not on this device's grid; running at \
                                  {:.3} MHz",
                                 hz / 1e6,
                                 set.rate_hz / 1e6
                             )
                         });
                     }
-                    (Some(_), Some(Err(e))) => m.push_log(format!("Sample rate error: {}", e)),
+                    (Some(_), Some(Err(e))) => m.push_log(format!("{name} error: {e}")),
                     _ => {
                         let bad = m.ui.input_buf.clone();
                         m.push_log(format!(
-                            "Invalid sample rate: '{}' (valid: {:.1}–{:.1} MHz)",
+                            "Invalid {lower_name}: '{}' (valid: {:.1}–{:.1} MHz)",
                             bad,
                             lo_hz / 1e6,
                             hi_hz / 1e6

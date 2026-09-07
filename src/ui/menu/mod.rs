@@ -158,7 +158,7 @@ fn right_pane(
 
     match state.pane {
         MenuPane::Views => entries::render(f, body, &menu.sections[section], cursor, theme),
-        MenuPane::Keys => keys::render(f, body, &m.caps.gain, state.scroll, theme),
+        MenuPane::Keys => keys::render(f, body, &m.caps, state.scroll, theme),
         MenuPane::Options => options::render(f, body, theme),
     }
 }

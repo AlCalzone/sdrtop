@@ -10,12 +10,11 @@
 |--------|--------|
 | HackRF One | Fully supported: spectrum, waterfall, every diagnostic |
 | RTL-SDR (R820T / R828D / E4000) | Fully supported: the whole spectrum, waterfall and lab stack, with a single tuner gain plus AGC |
+| tinySA / tinySA Ultra / Ultra+ | Spectrum and waterfall in calibrated dBm. ZS405 is verified on hardware |
 | **Anything with a SoapySDR driver** | Supported, **and not yet confirmed on hardware other than a HackRF**. See [below](#soapysdr-the-honest-version) |
 | PortaPack H4M (Mayhem) | Fully supported (HackRF mode) |
 
-The first two are built and tested on real hardware. Support for them was only
-added after physical testing, never guessed from documentation. Datasheets have
-been known to fib; an oscilloscope rarely does.
+HackRF One, RTL-SDR and the tinySA Ultra ZS405 are tested on real hardware.
 
 The third row is a deliberate exception, and it gets its own section rather than
 a footnote, because you deserve to know which kind of "supported" you are
@@ -37,6 +36,25 @@ The UI adapts rather than showing you fields that can't mean anything:
 
 Everything else, including every lab bench, the demodulator and the sweep scanner,
 works the same on both.
+
+## tinySA
+
+sdrtop uses the tinySA USB console for calibrated power traces. The backend
+supports the basic tinySA and the Ultra family. It was verified on a ZS405
+running `tinySA4_v1.4-236-ge5aa115`.
+
+The device supplies swept power readings without IQ samples. sdrtop therefore
+offers only the spectrum and waterfall layouts. RBW, attenuation, gain, AGC and
+spur handling use safe automatic defaults.
+
+```sh
+sdrtop --device tinysa
+sdrtop --device tinysa=/dev/ttyACM2
+```
+
+Automatic discovery recognizes the official USB CDC identity on
+`/dev/ttyACM*`. The explicit form selects a path when several devices are
+present or discovery cannot inspect sysfs.
 
 > **RTL clones vary.** Different tuners, different gain tables, different quirks,
 > and no single person owns them all. If yours behaves oddly, please

@@ -306,6 +306,7 @@ pub fn list() -> Vec<DeviceListing> {
             label: format!("RTL-SDR · {} · {}", name, shown),
             args: None,
             serial: device_serial(i),
+            path: None,
         });
     }
     out
@@ -369,6 +370,7 @@ fn rtl_caps(tuner: c_int, gains_tenths: &[i32]) -> DeviceCapabilities {
         level_max_db: 0.0,
         trace_stale_ms: crate::hardware::IQ_TRACE_STALE_MS,
         acquisition: crate::hardware::AcquisitionKind::IqSamples,
+        sample_rate_is_span: false,
         freq_min_hz,
         freq_max_hz,
         // RTL-SDR's usable upper band is 900_001..=3_200_000 Hz (the lower

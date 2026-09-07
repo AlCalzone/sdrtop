@@ -113,7 +113,7 @@ impl App {
             // RTL-SDR reports a tuner instead of a board revision / USB-API version.
             if let Some(tuner) = &info.tuner_name {
                 m.push_log(format!("Tuner: {}", tuner));
-            } else {
+            } else if caps.acquisition == hardware::AcquisitionKind::IqSamples {
                 m.push_log(board);
             }
             // Anything the backend declined while opening. Both native paths

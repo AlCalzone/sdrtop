@@ -75,14 +75,7 @@ jobs:
       - name: Build the tarball
         run: packaging/build-tarball.sh
 
-      # build-tarball.sh has already proved the binary *runs* and reports the
-      # version the archive is named after, inside the Debian 12 container,
-      # which is the only place it can be run: this runner is Ubuntu and has
-      # librtlsdr.so.2 where the binary wants .so.0, the exact mismatch
-      # install.sh exists to handle. So none of the checks below execute it.
-      #
-      # What is left is what the binary *is* and what it asks of a machine,
-      # which the ELF headers answer without running anything.
+      # build-tarball.sh checks startup at the glibc floor without SDR libraries
       - name: Check what came out
         run: |
           out="$RUNNER_TEMP/unpacked"
@@ -103,11 +96,16 @@ jobs:
           #
           # Changing this list is a deliberate act, and the edit belongs in the
           # same commit as the dependency that caused it.
-          expected="libc.so.6 libgcc_s.so.1 libhackrf.so.0 libm.so.6 librtlsdr.so.0"
+          expected="libc.so.6 libgcc_s.so.1 libm.so.6"
           actual=$(readelf -d "$bin" \
             | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
           actual=${actual% }
           echo "needs: $actual"
+          case "$actual" in
+            *libhackrf.so*|*librtlsdr.so*)
+              echo "::error::native SDR libraries must remain optional runtime loads"
+              exit 1 ;;
+          esac
           test "$actual" = "$expected" || {
             echo "::error::the set of shared libraries changed"
             echo "::error::expected: $expected"
@@ -204,13 +202,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-
-      # `cargo publish` runs a verification build, so the C libraries have to be
-      # present. Publishing with --no-verify to dodge that would mean uploading
-      # a version nobody proved compiles, which is the one thing here that
-      # cannot be taken back.
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libhackrf-dev librtlsdr-dev pkg-config libusb-1.0-0-dev
 
       - uses: dtolnay/rust-toolchain@stable
 

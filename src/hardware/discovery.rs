@@ -46,6 +46,15 @@ pub struct ObserverProfile {
 }
 
 impl DeviceKind {
+    /// Reports a missing or incompatible native runtime library
+    pub fn check_available(self) -> anyhow::Result<()> {
+        match self {
+            Self::HackRf => hackrf::ffi::api().map(|_| ()),
+            Self::RtlSdr => rtlsdr::ffi::api().map(|_| ()),
+            Self::Soapy | Self::TinySa => Ok(()),
+        }
+    }
+
     /// How observer mode describes this backend, when it can.
     ///
     /// Observer mode reads sysfs for a USB device sdrtop knows by vendor and

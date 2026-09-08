@@ -148,6 +148,7 @@ impl SdrMetrics {
             channel_power_dbfs: noise_floor + snr_db,
             occupied_bw_hz: 150_000,
             enbw_hz: sample_rate / N as f64,
+            bin_axis: crate::state::BinAxis::FftBins,
         });
         self.signal.peak_to_nf_db = snr_db;
         self.signal.channel_power_dbfs = noise_floor + snr_db;

@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+use crate::state::BinAxis;
+
 /// The window the panel is actually drawing: the bins in view and the frequency
 /// span they cover.
 pub(super) struct SpectrumView {
@@ -30,16 +32,14 @@ pub(super) struct SpectrumView {
     pub left_hz: f64,
     /// Width of the window in hertz.
     pub bw: f64,
+    bin_axis: BinAxis,
 }
 
 impl SpectrumView {
-    /// Window `full_*` down to the centre `1/zoom` of its bins. A `zoom` of 1
-    /// (or a frame with nothing in it) returns the whole span, sharing the
-    /// frame's `Arc`s rather than copying.
+    /// Select the centre slice of the frame at `zoom`
     ///
-    /// `held` may have been captured at a different bin count than the live
-    /// frame, so it is windowed against its own length. Slicing it blind is a
-    /// panic waiting for the user to change sample rate while holding.
+    /// The full view shares the frame's buffers. Empty frames have no view.
+    /// A held trace may have a different bin count.
     pub fn new(
         bins: &Arc<Vec<f32>>,
         peaks: &Arc<Vec<f32>>,
@@ -47,41 +47,35 @@ impl SpectrumView {
         center_hz: u64,
         sample_rate: f64,
         zoom: usize,
+        bin_axis: BinAxis,
     ) -> Option<Self> {
         let full_n = bins.len();
-        if full_n == 0 || sample_rate <= 0.0 {
-            return None;
-        }
-        let full_left = center_hz as f64 - sample_rate / 2.0;
-        let zoom = zoom.max(1);
+        let window = bin_axis.window(center_hz, sample_rate, full_n, zoom)?;
+        let lo = window.first_bin;
+        let hi = lo + window.bin_count;
 
-        if zoom == 1 {
-            // Arc::clone is O(1) - no data copied.
+        if lo == 0 && hi == full_n {
             return Some(Self {
                 bins: Arc::clone(bins),
                 peaks: Arc::clone(peaks),
                 held,
                 n_bins: full_n,
-                left_hz: full_left,
-                bw: sample_rate,
+                left_hz: window.left_hz,
+                bw: window.span_hz,
+                bin_axis,
             });
         }
 
-        let visible_n = (full_n / zoom).max(1);
-        let lo = (full_n / 2)
-            .saturating_sub(visible_n / 2)
-            .min(full_n - visible_n);
-        let hi = lo + visible_n;
-        let bin_hz = sample_rate / full_n as f64;
         let win = |v: &[f32]| Arc::new(v[lo.min(v.len())..hi.min(v.len())].to_vec());
 
         Some(Self {
             bins: win(bins),
             peaks: win(peaks),
             held: held.map(|h| win(&h)),
-            n_bins: visible_n,
-            left_hz: full_left + lo as f64 * bin_hz,
-            bw: visible_n as f64 * bin_hz,
+            n_bins: window.bin_count,
+            left_hz: window.left_hz,
+            bw: window.span_hz,
+            bin_axis,
         })
     }
 
@@ -90,24 +84,30 @@ impl SpectrumView {
         self.left_hz + self.bw
     }
 
-    /// Canvas width in the units the paint closure works in: `0..n-1`.
+    /// Return the right edge of the canvas in bin-interval units
     pub fn n(&self) -> f64 {
-        self.n_bins as f64
+        self.bin_axis.interval_count(self.n_bins).unwrap_or(1) as f64
+    }
+
+    pub fn bin_end(&self, index: usize) -> f64 {
+        match self.bin_axis {
+            BinAxis::FftBins => (index + 1) as f64,
+        }
     }
 
     /// The level at `freq_hz`, or `None` when it falls outside the window.
     pub fn level_at(&self, freq_hz: u64) -> Option<f32> {
-        let frac = (freq_hz as f64 - self.left_hz) / self.bw;
-        if !(0.0..=1.0).contains(&frac) {
-            return None;
-        }
-        let idx = (frac * (self.n_bins - 1) as f64).round() as usize;
-        self.bins.get(idx.min(self.n_bins - 1)).copied()
+        let idx = self
+            .bin_axis
+            .nearest_bin(self.left_hz, self.bw, self.n_bins, freq_hz as f64)?;
+        self.bins.get(idx).copied()
     }
 
     /// The centre frequency of bin `idx`.
     pub fn freq_of_bin(&self, idx: usize) -> f64 {
-        self.left_hz + self.bw * (idx as f64 / (self.n_bins - 1).max(1) as f64)
+        self.bin_axis
+            .frequency_of_bin(self.left_hz, self.bw, self.n_bins, idx)
+            .unwrap_or(self.left_hz)
     }
 }
 
@@ -123,7 +123,16 @@ mod tests {
     fn zoom_one_shows_the_whole_span_without_copying() {
         let bins = ramp(1024);
         let peaks = ramp(1024);
-        let v = SpectrumView::new(&bins, &peaks, None, 92_800_000, 2_000_000.0, 1).unwrap();
+        let v = SpectrumView::new(
+            &bins,
+            &peaks,
+            None,
+            92_800_000,
+            2_000_000.0,
+            1,
+            BinAxis::FftBins,
+        )
+        .unwrap();
         assert_eq!(v.n_bins, 1024);
         assert_eq!(v.left_hz, 91_800_000.0);
         assert_eq!(v.bw, 2_000_000.0);
@@ -136,7 +145,16 @@ mod tests {
     #[test]
     fn zoom_takes_the_centre_slice_around_the_tuned_frequency() {
         let bins = ramp(1000);
-        let v = SpectrumView::new(&bins, &ramp(1000), None, 92_800_000, 2_000_000.0, 4).unwrap();
+        let v = SpectrumView::new(
+            &bins,
+            &ramp(1000),
+            None,
+            92_800_000,
+            2_000_000.0,
+            4,
+            BinAxis::FftBins,
+        )
+        .unwrap();
         assert_eq!(v.n_bins, 250);
         assert_eq!(v.bins[0], 375.0, "starts a quarter of the way in, not at 0");
         assert_eq!(v.bw, 500_000.0, "a quarter of the span");
@@ -150,15 +168,42 @@ mod tests {
         // than the live frame, so the window has to clamp to its own length.
         let bins = ramp(1024);
         let held = Some(ramp(200));
-        let v = SpectrumView::new(&bins, &ramp(1024), held, 92_800_000, 2_000_000.0, 4).unwrap();
+        let v = SpectrumView::new(
+            &bins,
+            &ramp(1024),
+            held,
+            92_800_000,
+            2_000_000.0,
+            4,
+            BinAxis::FftBins,
+        )
+        .unwrap();
         assert!(v.held.unwrap().len() <= 200);
     }
 
     #[test]
     fn an_empty_frame_yields_no_view() {
-        assert!(SpectrumView::new(&ramp(0), &ramp(0), None, 92_800_000, 2_000_000.0, 1).is_none());
+        assert!(SpectrumView::new(
+            &ramp(0),
+            &ramp(0),
+            None,
+            92_800_000,
+            2_000_000.0,
+            1,
+            BinAxis::FftBins
+        )
+        .is_none());
         assert!(
-            SpectrumView::new(&ramp(64), &ramp(64), None, 92_800_000, 0.0, 1).is_none(),
+            SpectrumView::new(
+                &ramp(64),
+                &ramp(64),
+                None,
+                92_800_000,
+                0.0,
+                1,
+                BinAxis::FftBins
+            )
+            .is_none(),
             "a zero sample rate has no span to draw"
         );
     }
@@ -166,9 +211,94 @@ mod tests {
     #[test]
     fn level_at_reads_the_window_not_the_frame() {
         let bins = ramp(1000);
-        let v = SpectrumView::new(&bins, &ramp(1000), None, 92_800_000, 2_000_000.0, 4).unwrap();
+        let v = SpectrumView::new(
+            &bins,
+            &ramp(1000),
+            None,
+            92_800_000,
+            2_000_000.0,
+            4,
+            BinAxis::FftBins,
+        )
+        .unwrap();
         // Mid-window is bin 125 of the slice, which held the value 500.
         assert_eq!(v.level_at((v.left_hz + v.bw / 2.0) as u64), Some(500.0));
         assert!(v.level_at(90_000_000).is_none(), "outside the window");
+    }
+
+    #[test]
+    fn fft_bin_24_maps_to_canvas_24() {
+        let bins = ramp(32);
+        let view = SpectrumView::new(
+            &bins,
+            &bins,
+            None,
+            100_000_000,
+            32_000_000.0,
+            1,
+            BinAxis::FftBins,
+        )
+        .unwrap();
+        assert_eq!(view.freq_of_bin(24), 108_000_000.0);
+        assert_eq!(view.level_at(108_000_000), Some(24.0));
+        assert_eq!(
+            super::super::scale::freq_to_canvas_x(108_000_000.0, view.left_hz, view.bw, view.n(),),
+            Some(24.0)
+        );
+    }
+
+    #[test]
+    fn sub_bin_lookup_stays_in_its_fft_interval_at_high_zoom() {
+        let bins = ramp(256);
+        let view = SpectrumView::new(
+            &bins,
+            &bins,
+            None,
+            100_000_000,
+            32_000_000.0,
+            32,
+            BinAxis::FftBins,
+        )
+        .unwrap();
+        for i in 0..view.n_bins {
+            let hz = view.freq_of_bin(i) as u64;
+            for offset in [0, 62_500, 100_000, 124_999] {
+                assert_eq!(view.level_at(hz + offset), Some(view.bins[i]));
+            }
+        }
+    }
+
+    #[test]
+    fn bin_frequencies_map_to_their_canvas_positions_across_zoom() {
+        let bins = ramp(32);
+        for zoom in [0, 1, 2, 3, 4, 32, 64] {
+            let view = SpectrumView::new(
+                &bins,
+                &bins,
+                None,
+                100_000_000,
+                32_000_000.0,
+                zoom,
+                BinAxis::FftBins,
+            )
+            .unwrap();
+            for index in 0..view.n_bins {
+                let frequency = 84_000_000.0 + view.bins[index] as f64 * 1_000_000.0;
+                assert_eq!(view.freq_of_bin(index), frequency);
+                assert_eq!(view.level_at(frequency as u64), Some(view.bins[index]));
+                let x = super::super::scale::freq_to_canvas_x(
+                    frequency,
+                    view.left_hz,
+                    view.bw,
+                    view.n(),
+                )
+                .unwrap();
+                assert!((x - index as f64).abs() < 1e-9, "zoom {zoom} bin {index}");
+            }
+            assert_eq!(
+                view.level_at(view.right_hz() as u64),
+                view.bins.last().copied()
+            );
+        }
     }
 }

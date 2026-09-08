@@ -22,6 +22,7 @@ use ratatui::{
 };
 
 use crate::palette::{magnitude_to_color_palette, ColorDepth, WaterfallPalette};
+use crate::state::{BinAxis, BinWindow};
 
 /// Top of the colour scale. The waterfall is always referenced to full scale;
 /// only the floor (`db_min`) moves, under `↑`/`↓`.
@@ -47,34 +48,34 @@ pub(super) fn band_max(row: &[f32], start: usize, end: usize) -> f32 {
 /// Zoom keeps the centre `1/zoom` of the row's bins - the same slice the bonded
 /// spectrum above narrows to, so `+`/`-` zoom both plots as one instrument.
 pub(super) struct Columns {
-    lo_bin: usize,
-    visible_n: usize,
-    row_bins: usize,
+    pub window: BinWindow,
     cols: usize,
+    bin_axis: BinAxis,
 }
 
 impl Columns {
-    pub fn new(row_bins: usize, zoom: u32, cols: usize) -> Self {
-        // A zero-bin row would underflow the `row_bins - 1` clamp below. It should
-        // not happen, but a malformed row must not take the TUI down with it.
-        let row_bins = row_bins.max(1);
-        let visible_n = (row_bins / (zoom as usize).max(1)).max(1);
+    /// Use a window computed from the row being drawn
+    pub fn new(window: BinWindow, cols: usize, bin_axis: BinAxis) -> Self {
         Self {
-            lo_bin: (row_bins / 2).saturating_sub(visible_n / 2),
-            visible_n,
-            row_bins,
+            window,
             cols: cols.max(1),
+            bin_axis,
         }
     }
 
     /// The `[start, end)` bin span column `col` reads. Always non-empty, so a
     /// wide panel over few bins still gets one bin per column rather than none.
     pub fn range(&self, col: usize) -> (usize, usize) {
-        let start = (self.lo_bin + col * self.visible_n / self.cols).min(self.row_bins - 1);
-        let end = (self.lo_bin + ((col + 1) * self.visible_n) / self.cols)
-            .max(start + 1)
-            .min(self.row_bins);
-        (start, end)
+        let visible_n = self.window.bin_count;
+        let (start, end) = match self.bin_axis {
+            BinAxis::FftBins => (
+                col * visible_n / self.cols,
+                (col + 1) * visible_n / self.cols,
+            ),
+        };
+        let start = start.min(visible_n - 1);
+        let end = end.max(start + 1).min(visible_n);
+        (self.window.first_bin + start, self.window.first_bin + end)
     }
 }
 
@@ -84,7 +85,7 @@ pub(super) fn draw(
     f: &mut Frame,
     area: Rect,
     rows: &VecDeque<(Instant, Arc<Vec<f32>>)>,
-    columns: &Columns,
+    columns_for_row: impl Fn(usize) -> Option<Columns>,
     cursor_col: Option<usize>,
     skip_data: usize,
     db_min: f32,
@@ -100,16 +101,25 @@ pub(super) fn draw(
     let mut data = rows.iter().skip(skip_data).take(area.height as usize * 2);
     while let Some((_ts, top_row)) = data.next() {
         let bot_row = data.next().map(|(_ts, r)| r.as_ref());
+        let top_columns = columns_for_row(top_row.len());
+        let bot_columns = bot_row.and_then(|row| columns_for_row(row.len()));
+        let row_color = |row: &[f32], columns: Option<&Columns>, col| {
+            columns.map_or(floor, |columns| {
+                let (lo, hi) = columns.range(col);
+                color(band_max(row, lo, hi))
+            })
+        };
         let spans: Vec<Span> = (0..cols)
             .map(|col| {
-                let (lo, hi) = columns.range(col);
-                let bot_color = bot_row.map(|r| color(band_max(r, lo, hi))).unwrap_or(floor);
+                let bot_color = bot_row
+                    .map(|r| row_color(r, bot_columns.as_ref(), col))
+                    .unwrap_or(floor);
                 // The cursor column keeps the background so the history still reads
                 // through it, but takes a bright foreground as its marker.
                 let top_color = if Some(col) == cursor_col {
                     theme.value_hi
                 } else {
-                    color(band_max(top_row, lo, hi))
+                    row_color(top_row, top_columns.as_ref(), col)
                 };
                 Span::styled("\u{2580}", Style::default().fg(top_color).bg(bot_color))
             })
@@ -123,6 +133,14 @@ pub(super) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn columns(row_bins: usize, zoom: usize, cols: usize) -> Columns {
+        let axis = BinAxis::FftBins;
+        let window = axis
+            .window(100_000_000, 32_000_000.0, row_bins, zoom)
+            .unwrap();
+        Columns::new(window, cols, axis)
+    }
 
     #[test]
     fn band_max_reads_in_range() {
@@ -148,7 +166,7 @@ mod tests {
 
     #[test]
     fn unzoomed_columns_cover_every_bin_exactly_once() {
-        let c = Columns::new(1024, 1, 128);
+        let c = columns(1024, 1, 128);
         let (first, _) = c.range(0);
         let (_, last) = c.range(127);
         assert_eq!(first, 0, "the first column starts at the first bin");
@@ -165,7 +183,7 @@ mod tests {
 
     #[test]
     fn zoom_keeps_the_centre_slice() {
-        let c = Columns::new(1024, 4, 128);
+        let c = columns(1024, 4, 128);
         let (first, _) = c.range(0);
         let (_, last) = c.range(127);
         assert_eq!(first, 384, "a quarter of the way in");
@@ -173,10 +191,26 @@ mod tests {
     }
 
     #[test]
+    fn columns_follow_the_bin_window_at_uneven_zoom() {
+        let axis = BinAxis::FftBins;
+        let window = axis.window(100, 10.0, 10, 3).unwrap();
+        let columns = Columns::new(window, 3, axis);
+        assert_eq!(columns.range(0), (4, 5));
+        assert_eq!(columns.range(1), (5, 6));
+        assert_eq!(columns.range(2), (6, 7));
+        for col in 0..3 {
+            assert_eq!(
+                axis.frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, col),
+                Some(99.0 + col as f64)
+            );
+        }
+    }
+
+    #[test]
     fn a_column_is_never_empty_however_odd_the_geometry() {
         // More columns than bins: every column still reads at least one bin,
         // rather than an empty span that would paint the whole plot at the floor.
-        let c = Columns::new(8, 1, 200);
+        let c = columns(8, 1, 200);
         for col in 0..200 {
             let (lo, hi) = c.range(col);
             assert!(hi > lo, "column {col} is empty");
@@ -194,12 +228,12 @@ mod tests {
         let (row_bins, cols) = (1024usize, 128usize);
         let naive = |col: usize| col * row_bins / cols;
 
-        let unzoomed = Columns::new(row_bins, 1, cols);
+        let unzoomed = columns(row_bins, 1, cols);
         for col in 0..cols {
             assert_eq!(unzoomed.range(col).0, naive(col), "zoom 1 hides the bug");
         }
 
-        let zoomed = Columns::new(row_bins, 4, cols);
+        let zoomed = columns(row_bins, 4, cols);
         assert_eq!(zoomed.range(0).0, 384);
         assert_eq!(
             naive(0),
@@ -211,13 +245,29 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_input_does_not_underflow() {
-        // A zero-bin row and a zero zoom are both nonsense, and both used to be
-        // one subtraction away from panicking.
-        let c = Columns::new(0, 0, 40);
+    fn singleton_and_zero_columns_do_not_underflow() {
+        let c = columns(1, 32, 40);
         let (lo, hi) = c.range(0);
         assert!(hi > lo);
-        let zero_cols = Columns::new(1024, 4, 0);
+        let zero_cols = columns(1024, 4, 0);
         let _ = zero_cols.range(0);
+    }
+
+    #[test]
+    fn high_zoom_sub_bin_frequencies_use_the_same_interval() {
+        let axis = BinAxis::FftBins;
+        let columns = columns(256, 32, 160);
+        let window = columns.window;
+        for col in 0..160 {
+            let frequency = window.left_hz + col as f64 * window.span_hz / 160.0;
+            let index = axis
+                .nearest_bin(window.left_hz, window.span_hz, window.bin_count, frequency)
+                .unwrap();
+            assert_eq!(
+                columns.range(col).0,
+                window.first_bin + index,
+                "column {col}"
+            );
+        }
     }
 }

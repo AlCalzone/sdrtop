@@ -82,17 +82,14 @@ fn fmt_delta(df_hz: u64, dl_db: Option<f32>) -> String {
 /// is no frame yet or the frequency is outside the captured span.
 fn level_at_freq(state: &SdrMetrics, freq_hz: u64) -> Option<f32> {
     let fr = state.waterfall.last_fft.as_ref()?;
-    let n = fr.bins_dbfs.len();
-    if n == 0 {
-        return None;
-    }
-    let left = fr.center_freq_hz as f64 - fr.sample_rate / 2.0;
-    let frac = (freq_hz as f64 - left) / fr.sample_rate;
-    if !(0.0..=1.0).contains(&frac) {
-        return None;
-    }
-    let idx = (frac * (n - 1) as f64).round() as usize;
-    fr.bins_dbfs.get(idx.min(n - 1)).copied()
+    let window = fr.window(1)?;
+    let idx = fr.bin_axis.nearest_bin(
+        window.left_hz,
+        window.span_hz,
+        window.bin_count,
+        freq_hz as f64,
+    )?;
+    fr.bins_dbfs.get(idx).copied()
 }
 
 /// Display width (columns) of a span run - every glyph we use here is single-width.
@@ -1050,6 +1047,19 @@ mod tests {
     use super::*;
     use crate::hardware::native::{hackrf, rtlsdr};
 
+    #[test]
+    fn marker_level_uses_the_captured_fft_interval() {
+        let mut state = SdrMetrics::fixture();
+        state.radio.frequency = 100_000_000;
+        state.radio.config_sample_rate = 32_000_000.0;
+        let mut state = state.with_carrier(8_000_000.0, 70.0);
+        state.radio.frequency = 200_000_000;
+        assert_eq!(level_at_freq(&state, 108_000_000), Some(-30.0));
+        assert_eq!(level_at_freq(&state, 108_100_000), Some(-30.0));
+        assert_eq!(level_at_freq(&state, 108_125_000), Some(-100.0));
+        assert_eq!(level_at_freq(&state, 116_000_000), Some(-100.0));
+        assert_eq!(level_at_freq(&state, 116_000_001), None);
+    }
     /// A signal state with real numbers in it, as if the FFT had just run.
     fn measured() -> crate::state::SignalState {
         crate::state::SignalState {

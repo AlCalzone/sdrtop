@@ -5,6 +5,107 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Define how bins cover a frequency span
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BinAxis {
+    /// Each FFT bin owns one interval starting at its frequency
+    #[default]
+    FftBins,
+}
+
+/// A nonempty centre slice retains the full frame's bin spacing
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BinWindow {
+    pub first_bin: usize,
+    pub bin_count: usize,
+    pub left_hz: f64,
+    pub span_hz: f64,
+}
+
+impl BinAxis {
+    /// Return the number of frequency intervals, or `None` for an empty axis
+    pub fn interval_count(self, bin_count: usize) -> Option<usize> {
+        match self {
+            Self::FftBins => (bin_count > 0).then_some(bin_count),
+        }
+    }
+
+    /// Select a centre slice with at least one bin. Zero zoom means full span.
+    /// Empty axes and non-positive or non-finite spans have no window.
+    pub fn window(
+        self,
+        center_hz: u64,
+        span_hz: f64,
+        bin_count: usize,
+        zoom: usize,
+    ) -> Option<BinWindow> {
+        if bin_count == 0 || !span_hz.is_finite() || span_hz <= 0.0 {
+            return None;
+        }
+
+        let visible = (bin_count / zoom.max(1)).max(1).min(bin_count);
+        let first = (bin_count / 2)
+            .saturating_sub(visible / 2)
+            .min(bin_count - visible);
+        let intervals = self.interval_count(bin_count)?;
+        let bin_hz = span_hz / intervals as f64;
+        let visible_intervals = self.interval_count(visible)?;
+
+        Some(BinWindow {
+            first_bin: first,
+            bin_count: visible,
+            left_hz: center_hz as f64 - span_hz / 2.0 + first as f64 * bin_hz,
+            span_hz: visible_intervals as f64 * bin_hz,
+        })
+    }
+
+    /// Return a bin's frequency
+    ///
+    /// The last FFT bin starts below the right edge.
+    pub fn frequency_of_bin(
+        self,
+        left_hz: f64,
+        span_hz: f64,
+        bin_count: usize,
+        index: usize,
+    ) -> Option<f64> {
+        if bin_count == 0 || index >= bin_count {
+            return None;
+        }
+        let intervals = self.interval_count(bin_count)?;
+        if !left_hz.is_finite() || !span_hz.is_finite() || span_hz <= 0.0 {
+            return None;
+        }
+        Some(left_hz + index as f64 * span_hz / intervals as f64)
+    }
+
+    /// Look up the FFT interval containing `frequency_hz`
+    ///
+    /// The right edge reads the last bin. Frequencies outside the window return `None`.
+    pub fn nearest_bin(
+        self,
+        left_hz: f64,
+        span_hz: f64,
+        bin_count: usize,
+        frequency_hz: f64,
+    ) -> Option<usize> {
+        if !left_hz.is_finite()
+            || !span_hz.is_finite()
+            || span_hz <= 0.0
+            || !frequency_hz.is_finite()
+            || !(left_hz..=left_hz + span_hz).contains(&frequency_hz)
+        {
+            return None;
+        }
+        let intervals = self.interval_count(bin_count)?;
+        let position = (frequency_hz - left_hz) * intervals as f64 / span_hz;
+        let index = match self {
+            Self::FftBins => position.floor() as usize,
+        };
+        Some(index.min(bin_count.saturating_sub(1)))
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct FftFrame {
@@ -18,6 +119,24 @@ pub struct FftFrame {
     pub channel_power_dbfs: f32,
     pub occupied_bw_hz: u64,
     pub enbw_hz: f64,
+    pub bin_axis: BinAxis,
+}
+
+impl FftFrame {
+    pub fn window(&self, zoom: usize) -> Option<BinWindow> {
+        self.bin_axis.window(
+            self.center_freq_hz,
+            self.sample_rate,
+            self.bins_dbfs.len(),
+            zoom,
+        )
+    }
+
+    pub fn frequency_of_bin(&self, index: usize) -> Option<f64> {
+        let window = self.window(1)?;
+        self.bin_axis
+            .frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, index)
+    }
 }
 
 pub struct WaterfallBuffer {
@@ -174,6 +293,78 @@ mod min_rows_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fft_bins_keep_n_intervals() {
+        let axis = BinAxis::FftBins;
+        let window = axis.window(100_000_000, 64_000_000.0, 64, 1).unwrap();
+        assert_eq!(axis.interval_count(64), Some(64));
+        assert_eq!(window.first_bin, 0);
+        assert_eq!(window.bin_count, 64);
+        assert_eq!(window.left_hz, 68_000_000.0);
+        assert_eq!(window.span_hz, 64_000_000.0);
+        assert_eq!(
+            axis.frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, 63),
+            Some(131_000_000.0)
+        );
+        for (frequency, index) in [
+            (68_000_000.0, 0),
+            (100_000_000.0, 32),
+            (131_000_000.0, 63),
+            (132_000_000.0, 63),
+        ] {
+            assert_eq!(
+                axis.nearest_bin(window.left_hz, window.span_hz, window.bin_count, frequency),
+                Some(index)
+            );
+        }
+    }
+
+    #[test]
+    fn fft_zoom_preserves_bin_spacing_and_clamps_to_one_bin() {
+        let axis = BinAxis::FftBins;
+        assert_eq!(
+            axis.window(100, 10.0, 10, 3),
+            Some(BinWindow {
+                first_bin: 4,
+                bin_count: 3,
+                left_hz: 99.0,
+                span_hz: 3.0,
+            })
+        );
+        assert_eq!(axis.window(100, 10.0, 10, 0), axis.window(100, 10.0, 10, 1));
+        for count in [1, 10] {
+            let window = axis.window(100, 10.0, count, usize::MAX).unwrap();
+            assert_eq!(window.bin_count, 1);
+            assert_eq!(window.span_hz, 10.0 / count as f64);
+            assert_eq!(
+                axis.nearest_bin(window.left_hz, window.span_hz, 1, window.left_hz),
+                Some(0)
+            );
+        }
+    }
+
+    #[test]
+    fn bin_axis_rejects_invalid_bounds() {
+        let axis = BinAxis::FftBins;
+        assert_eq!(axis.interval_count(0), None);
+        assert!(axis.window(100, 10.0, 0, 1).is_none());
+        assert!(axis.frequency_of_bin(0.0, 10.0, 0, 0).is_none());
+        assert!(axis.frequency_of_bin(0.0, 10.0, 4, 4).is_none());
+        assert!(axis.nearest_bin(0.0, 10.0, 0, 0.0).is_none());
+        for span in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(axis.window(100, span, 32, 1).is_none());
+            assert!(axis.frequency_of_bin(0.0, span, 4, 0).is_none());
+            assert!(axis.nearest_bin(0.0, span, 4, 0.0).is_none());
+        }
+        for left in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(axis.frequency_of_bin(left, 10.0, 4, 0).is_none());
+            assert!(axis.nearest_bin(left, 10.0, 4, 0.0).is_none());
+        }
+        for frequency in [-1.0, 11.0, f64::NAN, f64::INFINITY] {
+            assert!(axis.nearest_bin(0.0, 10.0, 4, frequency).is_none());
+        }
+    }
 
     #[test]
     fn push_adds_newest_row_first() {

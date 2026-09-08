@@ -248,6 +248,7 @@ fn refresh_spectrum(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
         channel_power_dbfs: r.channel_power_dbfs,
         occupied_bw_hz: r.occupied_bw_hz,
         enbw_hz: snap.enbw_hz,
+        bin_axis: crate::state::BinAxis::FftBins,
     });
 }
 
@@ -404,6 +405,8 @@ mod tests {
 
         let published = m.waterfall.last_fft.expect("a frame was published");
         assert_eq!(published.bins_dbfs[0], -70.0, "the new trace");
+        assert_eq!(published.bin_axis, crate::state::BinAxis::FftBins);
+        assert_eq!(published.frequency_of_bin(48), Some(100_250_000.0));
         let held = being_drawn.waterfall.last_fft.expect("the UI's copy");
         assert_eq!(held.bins_dbfs[0], -40.0, "still the frame it was drawing");
     }

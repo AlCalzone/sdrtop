@@ -22,12 +22,14 @@ fn recall_pip(slot_hz: u64, state: &SdrMetrics, stale: bool) -> Option<(&'static
         return None;
     }
     let fr = state.waterfall.last_fft.as_ref()?;
-    let half_sr = (fr.sample_rate / 2.0) as u64;
-    let center = state.radio.frequency;
-    if slot_hz < center.saturating_sub(half_sr) || slot_hz > center + half_sr {
-        return None;
-    }
-    let peaks = rail_peaks(&fr.bins_dbfs, fr.noise_floor, center, fr.sample_rate, 8);
+    let window = fr.window(1)?;
+    fr.bin_axis.nearest_bin(
+        window.left_hz,
+        window.span_hz,
+        window.bin_count,
+        slot_hz as f64,
+    )?;
+    let peaks = rail_peaks(fr, 8);
     let close = peaks.iter().any(|&(f, _)| f.abs_diff(slot_hz) < 250_000);
     let strong = peaks
         .iter()
@@ -101,4 +103,25 @@ pub(super) fn lines(state: &SdrMetrics, stale: bool, theme: &crate::Theme) -> Ve
     // is the same whichever section is being edited.
     out.push(Line::raw(""));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_uses_the_captured_frame_after_retuning() {
+        let mut state = SdrMetrics::fixture();
+        state.radio.frequency = 100_000_000;
+        state.radio.config_sample_rate = 32_000_000.0;
+        let mut state = state.with_carrier(8_000_000.0, 70.0);
+        state.radio.frequency = 200_000_000;
+        assert_eq!(recall_pip(108_000_000, &state, false), Some(("⣿⡇", true)));
+        assert_eq!(recall_pip(208_000_000, &state, false), None);
+        assert_eq!(recall_pip(108_000_000, &state, true), None);
+        assert_eq!(
+            rail_peaks(state.waterfall.last_fft.as_ref().unwrap(), 3),
+            vec![(108_000_000, -30.0)]
+        );
+    }
 }

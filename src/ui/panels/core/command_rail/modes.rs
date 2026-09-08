@@ -57,24 +57,15 @@ pub(super) fn mode_tabs_line(active: RailMode, iw: usize, theme: &crate::Theme) 
 /// `(freq_hz, dbfs)`, strongest-first. A thin wrapper over the spectrum panel's
 /// [`detect_peaks`] (shared prominence ≥ NF+10 dB + min-separation logic) plus
 /// the bin→Hz map, so HUNT and the MONITOR activity count agree with the markers.
-pub(super) fn rail_peaks(
-    bins: &[f32],
-    noise_floor: f32,
-    center_hz: u64,
-    sample_rate: f64,
-    n: usize,
-) -> Vec<(u64, f32)> {
-    if sample_rate <= 0.0 || bins.is_empty() {
-        return Vec::new();
-    }
+pub(super) fn rail_peaks(frame: &crate::state::FftFrame, n: usize) -> Vec<(u64, f32)> {
+    let bins = &frame.bins_dbfs;
     let len = bins.len();
     let sep = (len / 48).max(2);
-    let left_hz = center_hz as f64 - sample_rate / 2.0;
-    detect_peaks(bins, noise_floor, n, sep)
+    detect_peaks(bins, frame.noise_floor, n, sep)
         .into_iter()
-        .map(|i| {
-            let hz = (left_hz + i as f64 / len as f64 * sample_rate).max(0.0) as u64;
-            (hz, bins[i])
+        .filter_map(|i| {
+            let hz = frame.frequency_of_bin(i)?.max(0.0) as u64;
+            Some((hz, bins[i]))
         })
         .collect()
 }
@@ -140,13 +131,7 @@ pub(super) fn mode_card_lines(
             let Some(fr) = fft else {
                 return vec![dim("scanning…".into())];
             };
-            let peaks = rail_peaks(
-                &fr.bins_dbfs,
-                fr.noise_floor,
-                state.radio.frequency,
-                fr.sample_rate,
-                3,
-            );
+            let peaks = rail_peaks(fr, 3);
             if peaks.is_empty() {
                 return vec![dim("no peaks".into())];
             }
@@ -192,16 +177,7 @@ pub(super) fn mode_card_lines(
                 .last_fft
                 .as_ref()
                 .filter(|_| !stale)
-                .map_or(0, |fr| {
-                    rail_peaks(
-                        &fr.bins_dbfs,
-                        fr.noise_floor,
-                        state.radio.frequency,
-                        fr.sample_rate,
-                        8,
-                    )
-                    .len()
-                });
+                .map_or(0, |fr| rail_peaks(fr, 8).len());
             vec![
                 Line::from(vec![
                     Span::raw(" "),
@@ -278,6 +254,16 @@ pub(super) fn mode_card_lines(
 mod tests {
     use super::*;
 
+    fn frame(bins: &[f32], noise_floor: f32, sample_rate: f64) -> crate::state::FftFrame {
+        let state = SdrMetrics::fixture().with_carrier(0.0, 20.0);
+        let mut frame = state.waterfall.last_fft.unwrap();
+        frame.bins_dbfs = std::sync::Arc::new(bins.to_vec());
+        frame.noise_floor = noise_floor;
+        frame.center_freq_hz = 100_000_000;
+        frame.sample_rate = sample_rate;
+        frame
+    }
+
     #[test]
     fn rail_peaks_maps_bins_to_frequency_strongest_first() {
         // Two lobes above the −80 dB noise floor: a tall one left of centre
@@ -285,7 +271,7 @@ mod tests {
         let bins = [
             -90.0, -40.0, -10.0, -40.0, -80.0, -50.0, -25.0, -50.0, -90.0,
         ];
-        let peaks = rail_peaks(&bins, -80.0, 100_000_000, 10_000_000.0, 3);
+        let peaks = rail_peaks(&frame(&bins, -80.0, 10_000_000.0), 3);
         assert_eq!(peaks.len(), 2, "two distinct lobes above NF+10");
         assert!(peaks[0].1 > peaks[1].1, "strongest first");
         assert!((peaks[0].1 - (-10.0)).abs() < 1e-3);
@@ -296,9 +282,9 @@ mod tests {
     #[test]
     fn rail_peaks_empty_without_signal_or_rate() {
         // All near the floor → nothing clears NF+10 dB.
-        assert!(rail_peaks(&[-90.0, -88.0, -90.0], -90.0, 100_000_000, 6_000_000.0, 3).is_empty());
+        assert!(rail_peaks(&frame(&[-90.0, -88.0, -90.0], -90.0, 6_000_000.0), 3).is_empty());
         // No sample rate → no usable frequency map.
-        assert!(rail_peaks(&[-90.0, -10.0, -90.0], -90.0, 100_000_000, 0.0, 3).is_empty());
+        assert!(rail_peaks(&frame(&[-90.0, -10.0, -90.0], -90.0, 0.0), 3).is_empty());
     }
 
     #[test]

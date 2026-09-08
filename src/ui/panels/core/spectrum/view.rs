@@ -89,6 +89,12 @@ impl SpectrumView {
         self.bin_axis.interval_count(self.n_bins).unwrap_or(1) as f64
     }
 
+    pub fn bin_end(&self, index: usize) -> f64 {
+        match self.bin_axis {
+            BinAxis::FftBins => (index + 1) as f64,
+        }
+    }
+
     /// The level at `freq_hz`, or `None` when it falls outside the window.
     pub fn level_at(&self, freq_hz: u64) -> Option<f32> {
         let idx = self
@@ -239,6 +245,27 @@ mod tests {
             super::super::scale::freq_to_canvas_x(108_000_000.0, view.left_hz, view.bw, view.n(),),
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn sub_bin_lookup_stays_in_its_fft_interval_at_high_zoom() {
+        let bins = ramp(256);
+        let view = SpectrumView::new(
+            &bins,
+            &bins,
+            None,
+            100_000_000,
+            32_000_000.0,
+            32,
+            BinAxis::FftBins,
+        )
+        .unwrap();
+        for i in 0..view.n_bins {
+            let hz = view.freq_of_bin(i) as u64;
+            for offset in [0, 62_500, 100_000, 124_999] {
+                assert_eq!(view.level_at(hz + offset), Some(view.bins[i]));
+            }
+        }
     }
 
     #[test]

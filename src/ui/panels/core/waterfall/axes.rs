@@ -82,14 +82,14 @@ pub(super) fn indicator(
     area: Rect,
     state: &SdrMetrics,
     rows: &VecDeque<(Instant, Arc<Vec<f32>>)>,
-    columns: &Columns,
+    columns: Option<&Columns>,
     skip_data: usize,
     cursor_col: Option<usize>,
     stride: usize,
     theme: &crate::Theme,
 ) {
-    let text = match (state.waterfall.cursor_freq, cursor_col) {
-        (Some(cf), Some(col)) => cursor_readout(cf, col, rows, columns, skip_data),
+    let text = match (state.waterfall.cursor_freq, cursor_col.zip(columns)) {
+        (Some(cf), Some((col, columns))) => cursor_readout(cf, col, rows, columns, skip_data),
         // A cursor set outside the current zoom window: name it, but there is
         // nothing on screen to read a level from.
         (Some(cf), None) => format!("  cur: {:.3} MHz  \u{2190} \u{2192}  M", cf as f64 / 1e6),

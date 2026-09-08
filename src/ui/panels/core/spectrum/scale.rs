@@ -38,13 +38,14 @@ pub(super) fn freq_to_canvas_x(freq_hz: f64, left_hz: f64, bw: f64, max_x: f64) 
     }
 }
 
-/// Map a canvas x-coordinate to a terminal column inside `width`
+/// Map a canvas x-coordinate to the column painted by the Braille canvas
 pub(super) fn canvas_x_to_col(x: f64, max_x: f64, width: u16) -> u16 {
     if max_x <= 0.0 || width == 0 {
         return 0;
     }
-    let frac = (x / max_x).clamp(0.0, 1.0);
-    ((frac * width as f64).round() as u16).min(width - 1)
+    let x = x.clamp(0.0, max_x);
+    let dot = (x * (2.0 * width as f64 - 1.0) / max_x) as usize;
+    (dot / 2) as u16
 }
 
 /// The occupied-bandwidth window as a symmetric span around `center_hz` - the
@@ -151,6 +152,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn columns_match_the_rendered_braille_dot() {
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            widgets::{
+                canvas::{Canvas, Points},
+                Widget,
+            },
+        };
+        for width in [1, 2, 40, 160] {
+            for x in [0.0, 0.1, 7.9, 8.0, 16.0, 24.0, 31.9, 32.0] {
+                let area = Rect::new(0, 0, width, 1);
+                let mut buffer = Buffer::empty(area);
+                Canvas::default()
+                    .x_bounds([0.0, 32.0])
+                    .y_bounds([0.0, 1.0])
+                    .paint(|ctx| {
+                        ctx.draw(&Points {
+                            coords: &[(x, 0.0)],
+                            color: Color::Red,
+                        })
+                    })
+                    .render(area, &mut buffer);
+                let painted = (0..width)
+                    .find(|col| buffer.get(*col, 0).fg == Color::Red)
+                    .unwrap();
+                assert_eq!(
+                    canvas_x_to_col(x, 32.0, width),
+                    painted,
+                    "width {width} x {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn canvas_x_and_column_are_not_interchangeable() {
         let max_x = 2048.0;
         assert_eq!(canvas_x_to_col(0.0, max_x, 160), 0);
@@ -159,7 +196,7 @@ mod tests {
             159,
             "the right edge is the last column"
         );
-        assert_eq!(canvas_x_to_col(max_x * 0.75, max_x, 160), 120);
+        assert_eq!(canvas_x_to_col(max_x * 0.75, max_x, 160), 119);
         assert_eq!(canvas_x_to_col(500.0, 0.0, 160), 0);
         assert_eq!(canvas_x_to_col(500.0, max_x, 0), 0);
     }

@@ -5,12 +5,15 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Define how bins cover a frequency span
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BinAxis {
+    /// Each FFT bin owns one interval starting at its frequency
     #[default]
     FftBins,
 }
 
+/// A nonempty centre slice retains the full frame's bin spacing
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BinWindow {
     pub first_bin: usize,
@@ -20,12 +23,15 @@ pub struct BinWindow {
 }
 
 impl BinAxis {
+    /// Return the number of frequency intervals, or `None` for an empty axis
     pub fn interval_count(self, bin_count: usize) -> Option<usize> {
         match self {
             Self::FftBins => (bin_count > 0).then_some(bin_count),
         }
     }
 
+    /// Select a centre slice with at least one bin. Zero zoom means full span.
+    /// Empty axes and non-positive or non-finite spans have no window.
     pub fn window(
         self,
         center_hz: u64,
@@ -53,6 +59,9 @@ impl BinAxis {
         })
     }
 
+    /// Return a bin's frequency
+    ///
+    /// The last FFT bin starts below the right edge.
     pub fn frequency_of_bin(
         self,
         left_hz: f64,
@@ -70,6 +79,9 @@ impl BinAxis {
         Some(left_hz + index as f64 * span_hz / intervals as f64)
     }
 
+    /// Look up the FFT interval containing `frequency_hz`
+    ///
+    /// The right edge reads the last bin. Frequencies outside the window return `None`.
     pub fn nearest_bin(
         self,
         left_hz: f64,
@@ -86,7 +98,10 @@ impl BinAxis {
             return None;
         }
         let intervals = self.interval_count(bin_count)?;
-        let index = ((frequency_hz - left_hz) * intervals as f64 / span_hz).round() as usize;
+        let position = (frequency_hz - left_hz) * intervals as f64 / span_hz;
+        let index = match self {
+            Self::FftBins => position.floor() as usize,
+        };
         Some(index.min(bin_count.saturating_sub(1)))
     }
 }

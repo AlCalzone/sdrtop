@@ -139,13 +139,7 @@ fn peak_bin(fr: &FftFrame) -> Option<(f32, u64)> {
     let n = bins.len();
     let radius = crate::signal::fft::centre_radius_bins(n, fr.sample_rate);
     let (idx, best) = crate::signal::fft::strongest_real_bin(bins, Some(radius))?;
-    let left = fr.center_freq_hz as f64 - fr.sample_rate / 2.0;
-    let span_frac = if n > 1 {
-        idx as f64 / (n - 1) as f64
-    } else {
-        0.0
-    };
-    let freq = (left + span_frac * fr.sample_rate).max(0.0).round() as u64;
+    let freq = fr.frequency_of_bin(idx)?.max(0.0).round() as u64;
     Some((best, freq))
 }
 
@@ -206,7 +200,7 @@ mod tests {
     fn peak_bin_maps_index_to_frequency() {
         let (lvl, hz) = peak_bin(&peaked_at(75)).unwrap();
         assert!((lvl + 10.0).abs() < 1e-6, "peak level is the max bin");
-        assert_eq!(hz, 100_100_000, "three quarters across the span");
+        assert_eq!(hz, 100_097_030);
     }
 
     #[test]
@@ -222,7 +216,7 @@ mod tests {
             (lvl + 30.0).abs() < 1e-6,
             "reported a station out of channel: {lvl}"
         );
-        assert_eq!(hz, 100_100_000);
+        assert_eq!(hz, 100_097_030);
     }
 
     #[test]
@@ -235,7 +229,7 @@ mod tests {
         bins[60] = -30.0; // a real, weaker carrier
         let (lvl, hz) = peak_bin(&frame(bins, 100_000_000, 400_000.0)).unwrap();
         assert!((lvl + 30.0).abs() < 1e-6, "reported the artefact: {lvl}");
-        assert_eq!(hz, 100_040_000);
+        assert_eq!(hz, 100_037_624);
     }
 
     #[test]

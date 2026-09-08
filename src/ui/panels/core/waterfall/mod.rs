@@ -252,15 +252,21 @@ fn contents(
     }
     let cols = plot.width as usize;
 
-    // The frequency window, narrowed by the shared zoom around the tuned centre.
-    let bin_window = wf
-        .last_fft
+    // Two data rows occupy each character row
+    let data_rows = plot.height as usize * 2;
+    let max_scroll = buf.rows.len().saturating_sub(data_rows) / 2;
+    let skip_data = wf.scroll_offset.min(max_scroll) * 2;
+
+    let columns_for_row = |row_bins| columns_for_row(wf, row_bins, cols);
+    let columns = buf
+        .rows
+        .get(skip_data)
+        .and_then(|(_, row)| columns_for_row(row.len()));
+    let window = columns
         .as_ref()
-        .and_then(|frame| frame.window(wf.hz_zoom as usize));
-    let window = bin_window
-        .map(|window| Window {
-            left_hz: window.left_hz,
-            bw: window.span_hz,
+        .map(|columns| Window {
+            left_hz: columns.window.left_hz,
+            bw: columns.window.span_hz,
         })
         .unwrap_or(Window {
             left_hz: 0.0,
@@ -278,30 +284,16 @@ fn contents(
             .then(|| ((frac * cols as f64) as usize).min(cols - 1))
     });
 
-    // Two rows of history per character cell, so every scroll figure exists in
-    // both units: `skip_chars` on screen, `skip_data` into the buffer.
-    let data_rows = plot.height as usize * 2;
-    let max_scroll = buf.rows.len().saturating_sub(data_rows) / 2;
-    let skip_data = wf.scroll_offset.min(max_scroll) * 2;
-
-    let row_bins = buf.rows.front().map(|(_, r)| r.len()).unwrap_or(1);
-    let columns = bin_window
-        .zip(wf.last_fft.as_ref())
-        .map(|(window, frame)| {
-            Columns::new(
-                row_bins,
-                window.first_bin,
-                window.bin_count,
-                cols,
-                frame.bin_axis,
-            )
-        })
-        .unwrap_or_else(|| {
-            Columns::new(row_bins, 0, row_bins, cols, crate::state::BinAxis::FftBins)
-        });
-
     cells::draw(
-        f, plot, &buf.rows, &columns, cursor_col, skip_data, wf.db_min, wf.palette, theme,
+        f,
+        plot,
+        &buf.rows,
+        columns_for_row,
+        cursor_col,
+        skip_data,
+        wf.db_min,
+        wf.palette,
+        theme,
     );
 
     // Bonded, the spectrum above already carries the band plan; twice is noise.
@@ -326,7 +318,7 @@ fn contents(
             area,
             state,
             &buf.rows,
-            &columns,
+            columns.as_ref(),
             skip_data,
             cursor_col,
             status.stride,
@@ -335,9 +327,83 @@ fn contents(
     }
 }
 
+fn columns_for_row(
+    wf: &crate::state::WaterfallState,
+    row_bins: usize,
+    cols: usize,
+) -> Option<Columns> {
+    let (axis, center_hz, span_hz) = wf
+        .last_fft
+        .as_ref()
+        .map_or((crate::state::BinAxis::FftBins, 0, 1.0), |frame| {
+            (frame.bin_axis, frame.center_freq_hz, frame.sample_rate)
+        });
+    let window = axis.window(center_hz, span_hz, row_bins, wf.hz_zoom as usize)?;
+    Some(Columns::new(window, cols, axis))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn paused_history_keeps_its_own_bin_window_after_fft_size_changes() {
+        let mut state = crate::state::SdrMetrics::fixture().with_carrier(0.0, 70.0);
+        state.waterfall.hz_zoom = 4;
+        state.waterfall.buffer.paused = true;
+        let old_row = Arc::clone(&state.waterfall.buffer.rows.front().unwrap().1);
+        let frame = state.waterfall.last_fft.as_mut().unwrap();
+        frame.bins_dbfs = Arc::new(vec![-90.0; 1024]);
+        assert!(!state.waterfall.buffer.push(&frame.bins_dbfs));
+
+        let columns = columns_for_row(&state.waterfall, old_row.len(), 64).unwrap();
+        assert_eq!(columns.window.first_bin, 96);
+        assert_eq!(columns.window.bin_count, 64);
+        assert_eq!(columns.range(0), (96, 97));
+        assert_eq!(columns.range(63), (159, 160));
+        assert!(columns_for_row(&state.waterfall, 0, 64).is_none());
+    }
+
+    #[test]
+    fn mixed_size_history_rows_draw_their_own_centre_slices() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let state = crate::state::SdrMetrics::fixture().with_carrier(0.0, 70.0);
+        let mut wf = state.waterfall;
+        wf.hz_zoom = 4;
+        let mut top = vec![-120.0; 256];
+        let mut bottom = vec![-120.0; 1024];
+        top[96] = -20.0;
+        bottom[384] = -20.0;
+        wf.buffer.rows.clear();
+        wf.buffer
+            .rows
+            .push_back((std::time::Instant::now(), Arc::new(top)));
+        wf.buffer
+            .rows
+            .push_back((std::time::Instant::now(), Arc::new(bottom)));
+        let mut terminal = Terminal::new(TestBackend::new(64, 1)).unwrap();
+        let theme = crate::theme::Theme::sdr();
+        terminal
+            .draw(|f| {
+                cells::draw(
+                    f,
+                    Rect::new(0, 0, 64, 1),
+                    &wf.buffer.rows,
+                    |n| columns_for_row(&wf, n, 64),
+                    None,
+                    0,
+                    wf.db_min,
+                    wf.palette,
+                    &theme,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.get(0, 0).fg, buffer.get(0, 0).bg);
+        assert_ne!(buffer.get(0, 0).fg, buffer.get(1, 0).fg);
+        assert_ne!(buffer.get(0, 0).bg, buffer.get(1, 0).bg);
+    }
 
     #[test]
     fn the_ladders_walk_and_stop_at_their_ends() {

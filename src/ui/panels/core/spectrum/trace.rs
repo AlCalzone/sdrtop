@@ -151,6 +151,26 @@ pub(super) struct Layers {
     pub noise_floor: f32,
 }
 
+fn series_segments(
+    values: &[f32],
+    tail_width: f64,
+) -> impl Iterator<Item = (f64, f32, f64, f32)> + '_ {
+    let joined = values
+        .windows(2)
+        .enumerate()
+        .map(|(i, pair)| (i as f64, pair[0], (i + 1) as f64, pair[1]));
+    // Extend the last FFT sample across its final interval
+    let tail = values.last().filter(|_| tail_width > 0.0).map(|&last| {
+        (
+            (values.len() - 1) as f64,
+            last,
+            (values.len() - 1) as f64 + tail_width,
+            last,
+        )
+    });
+    joined.chain(tail)
+}
+
 /// Paint the trace and everything drawn on the canvas itself.
 pub(super) fn draw(
     f: &mut Frame,
@@ -168,6 +188,7 @@ pub(super) fn draw(
     } = layers;
     let pal = Palette::new(theme);
     let n = view.n();
+    let tail_width = view.bin_end(0);
     let (y_min, y_max) = (vert.min as f64, vert.max as f64);
 
     // The closure takes ownership, so everything it needs is moved in.
@@ -208,12 +229,12 @@ pub(super) fn draw(
                     };
                 let series =
                     |ctx: &mut ratatui::widgets::canvas::Context, v: &[f32], color: Color| {
-                        for i in 1..v.len() {
+                        for (x1, y1, x2, y2) in series_segments(v, tail_width) {
                             ctx.draw(&CanvasLine {
-                                x1: (i - 1) as f64,
-                                y1: v[i - 1].clamp(v_min, v_max) as f64,
-                                x2: i as f64,
-                                y2: v[i].clamp(v_min, v_max) as f64,
+                                x1,
+                                y1: y1.clamp(v_min, v_max) as f64,
+                                x2,
+                                y2: y2.clamp(v_min, v_max) as f64,
                                 color,
                             });
                         }
@@ -251,7 +272,7 @@ pub(super) fn draw(
                                 ctx.draw(&CanvasLine {
                                     x1: start as f64,
                                     y1: yb as f64,
-                                    x2: (i - 1) as f64,
+                                    x2: view.bin_end(i - 1),
                                     y2: yb as f64,
                                     color,
                                 });
@@ -265,13 +286,12 @@ pub(super) fn draw(
                 //    height. Only Braille draws it: Fill's bright body is its own
                 //    edge, Scatter has no line.
                 if style == SpectrumStyle::Braille {
-                    for i in 1..bins.len() {
-                        let (y0, y1) =
-                            (bins[i - 1].clamp(v_min, v_max), bins[i].clamp(v_min, v_max));
+                    for (x0, y0, x1, y1) in series_segments(&bins, tail_width) {
+                        let (y0, y1) = (y0.clamp(v_min, v_max), y1.clamp(v_min, v_max));
                         ctx.draw(&CanvasLine {
-                            x1: (i - 1) as f64,
+                            x1: x0,
                             y1: y0 as f64,
-                            x2: i as f64,
+                            x2: x1,
                             y2: y1 as f64,
                             color: bright_at((y0 + y1) * 0.5),
                         });
@@ -335,6 +355,95 @@ pub(super) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_keep_connected_samples_and_extend_only_the_final_interval() {
+        assert_eq!(
+            series_segments(&[-80.0, -20.0], 1.0).collect::<Vec<_>>(),
+            vec![(0.0, -80.0, 1.0, -20.0), (1.0, -20.0, 2.0, -20.0)]
+        );
+        assert_eq!(
+            series_segments(&[-80.0, -20.0], 0.0).collect::<Vec<_>>(),
+            vec![(0.0, -80.0, 1.0, -20.0)]
+        );
+        assert_eq!(series_segments(&[], 1.0).count(), 0);
+        assert_eq!(
+            series_segments(&[-20.0], 1.0).collect::<Vec<_>>(),
+            vec![(0.0, -20.0, 1.0, -20.0)]
+        );
+    }
+
+    fn render_style(
+        style: SpectrumStyle,
+        bins: Vec<f32>,
+        held: Option<Arc<Vec<f32>>>,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
+        let theme = crate::theme::Theme::sdr();
+        let bins = Arc::new(bins);
+        let view = SpectrumView::new(
+            &bins,
+            &Arc::new(Vec::new()),
+            held,
+            100_000_000,
+            32_000_000.0,
+            1,
+            crate::state::BinAxis::FftBins,
+        )
+        .unwrap();
+        terminal
+            .draw(|f| {
+                draw(
+                    f,
+                    f.size(),
+                    &view,
+                    &Vertical::new(-100.0, 0.0, 10, &theme),
+                    Layers {
+                        rules: Rules {
+                            markers: vec![],
+                            obw: (None, None),
+                            cursor: None,
+                        },
+                        ghosts: LabGhosts {
+                            trace: None,
+                            ref_dbfs: None,
+                        },
+                        style,
+                        noise_floor: -100.0,
+                    },
+                    &theme,
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn final_fft_interval_is_filled_without_turning_scatter_into_a_line() {
+        for bins in [vec![-100.0, -20.0], vec![-20.0]] {
+            let braille = render_style(SpectrumStyle::Braille, bins.clone(), None);
+            let fill = render_style(SpectrumStyle::Fill, bins.clone(), None);
+            let scatter = render_style(SpectrumStyle::Scatter, bins.clone(), None);
+            let background = render_style(SpectrumStyle::Scatter, vec![-100.0; bins.len()], None);
+            // Column 35 lies inside the final FFT interval at both bin counts
+            assert_ne!(braille.get(35, 4), background.get(35, 4));
+            assert_ne!(fill.get(35, 4), background.get(35, 4));
+            assert_eq!(scatter.get(35, 4), background.get(35, 4));
+            assert_ne!(braille.get(35, 1), background.get(35, 1));
+        }
+    }
+
+    #[test]
+    fn held_trace_reaches_the_end_of_its_last_interval() {
+        let background = render_style(SpectrumStyle::Scatter, vec![-100.0; 2], None);
+        let held = render_style(
+            SpectrumStyle::Scatter,
+            vec![-100.0; 2],
+            Some(Arc::new(vec![-20.0; 2])),
+        );
+        assert_ne!(held.get(35, 1), background.get(35, 1));
+    }
 
     #[test]
     fn band_of_is_monotone_and_never_indexes_past_the_palette() {

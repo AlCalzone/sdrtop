@@ -29,6 +29,7 @@ fn strongest_bin_frequency(frame: &crate::state::FftFrame) -> Option<u64> {
         .map(|(index, _)| index)?;
     frame
         .frequency_of_bin(peak_bin)
+        .filter(|frequency| *frequency >= 0.0)
         .map(|frequency| frequency.round() as u64)
 }
 
@@ -324,5 +325,19 @@ mod tests {
         let mut frame = state.waterfall.last_fft.unwrap();
         frame.bins_dbfs = std::sync::Arc::new(Vec::new());
         assert_eq!(strongest_bin_frequency(&frame), None);
+    }
+
+    #[test]
+    fn peak_jump_falls_back_for_a_negative_frequency() {
+        let mut state = crate::state::SdrMetrics::fixture();
+        state.radio.frequency = 1_000_000;
+        state.radio.config_sample_rate = 32_000_000.0;
+        let state = state.with_carrier(-8_000_000.0, 70.0);
+        let frame = state.waterfall.last_fft.as_ref().unwrap();
+        assert_eq!(strongest_bin_frequency(frame), None);
+        assert_eq!(
+            strongest_bin_frequency(frame).unwrap_or(state.radio.frequency),
+            1_000_000
+        );
     }
 }

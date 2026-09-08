@@ -119,6 +119,10 @@ pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) -> bool {
     }
     let mode = m.net.mode.toggled();
     m.net.mode = mode;
+    // Survey and lock are different regimes for how often the radio is looking
+    // at any one megahertz, so the coverage accounting starts again. The
+    // measurements stay: they are still what was on the air.
+    m.net.band.restart_watch();
     // The band keeps what it measured, and every cell keeps the time it was
     // measured at, so the panel goes on showing the last pass while the new mode
     // fills in over it. Clearing it here would throw away good measurements to

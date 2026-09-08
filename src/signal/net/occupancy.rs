@@ -221,6 +221,17 @@ pub fn bin_cells(centre_hz: f64, rate_hz: f64, span_hz: f64, n: usize) -> Vec<Op
     let observed = cells_observed(centre_hz, span_hz);
     (0..n)
         .map(|k| {
+            // **The bins at DC are dropped**, for the reason
+            // `signal::fft::carrier` drops them: both front ends park their own
+            // DC offset and LO leakage on the centre bin, and on a quiet band
+            // that artefact is the strongest thing in the spectrum - measured
+            // live at 46 dB above the floor with nothing on air. Left in, it
+            // reads as a fully busy megahertz at every hop centre, so the survey
+            // paints one bright stripe per position at exactly the frequencies
+            // it is tuned to.
+            if k.min(n - k) <= DC_GUARD_BINS {
+                return None;
+            }
             let offset = if k * 2 < n {
                 k as f64
             } else {
@@ -230,6 +241,28 @@ pub fn bin_cells(centre_hz: f64, rate_hz: f64, span_hz: f64, n: usize) -> Vec<Op
             cell_of(hz).filter(|c| observed.contains(c))
         })
         .collect()
+}
+
+/// Bins either side of centre treated as the DC artefact rather than as signal.
+///
+/// The same two `signal::fft::carrier` uses, and for the same reason: a single
+/// spectral line, which the Hann window spreads over about three bins.
+pub const DC_GUARD_BINS: usize = 2;
+
+/// The cells a hop centred here cannot measure, because its own DC sits in them.
+///
+/// **A hop plan has to arrange that no cell is in this set on every pass**, or
+/// the survey carries a permanent blind stripe it never mentions. See
+/// `survey::Plan`, which walks the positions one cell along on alternate passes
+/// for exactly this reason.
+pub fn dc_shadow(centre_hz: f64, rate_hz: f64, n: usize) -> std::ops::Range<usize> {
+    let guard = DC_GUARD_BINS as f64 * rate_hz / n as f64;
+    match (cell_of(centre_hz - guard), cell_of(centre_hz + guard)) {
+        (Some(a), Some(b)) => a..b + 1,
+        (Some(a), None) => a..a + 1,
+        (None, Some(b)) => b..b + 1,
+        (None, None) => 0..0,
+    }
 }
 
 /// The noise floor and threshold for a plane of window-by-cell powers.
@@ -566,11 +599,11 @@ mod tests {
         let cells = bin_cells(2_437_000_000.0, 20_000_000.0, 18_000_000.0, 16);
         assert_eq!(cells.len(), 16);
         // Bin 0 is DC, which is the tuned frequency: 2437 MHz, cell 37.
-        assert_eq!(cells[0], Some(37));
-        // Bin 1 is 1.25 MHz up.
-        assert_eq!(cells[1], Some(38));
-        // Bin 15 is 1.25 MHz *down*, not 18.75 MHz up.
-        assert_eq!(cells[15], Some(35));
+        assert_eq!(cells[4], Some(42), "5 MHz up");
+        // Bin 3 is 3.75 MHz up, clear of the DC guard below.
+        assert_eq!(cells[3], Some(40));
+        // Bin 13 is 3.75 MHz *down*, not 16.25 MHz up.
+        assert_eq!(cells[13], Some(33));
         // 8.75 MHz up is 2445.75, whose whole cell is inside the 18 MHz span.
         assert_eq!(cells[7], Some(45));
         // The Nyquist bin is 10 MHz *down*, past the span, and is dropped rather
@@ -582,7 +615,15 @@ mod tests {
         // else in the pipeline knows the front end rolled them off.
         let narrow = bin_cells(2_437_000_000.0, 20_000_000.0, 14_000_000.0, 16);
         assert_eq!(narrow[7], None, "2445.75 is outside a 14 MHz span");
-        assert_eq!(narrow[1], Some(38), "and the middle is untouched");
+        assert_eq!(narrow[3], Some(40), "and the middle is untouched");
+
+        // The DC bins are dropped whatever they would have mapped to: the
+        // front end's own leakage sits there and reads as a full megahertz.
+        assert_eq!(cells[0], None, "DC");
+        assert_eq!(cells[1], None, "one bin up is still the artefact");
+        assert_eq!(cells[15], None, "and one bin down");
+        assert_eq!(cells[2], None, "two bins out is still the artefact");
+        assert_eq!(cells[3], Some(40), "three bins out is signal again");
 
         // A tuning outside the band puts every bin nowhere.
         let none = bin_cells(100_000_000.0, 20_000_000.0, 18_000_000.0, 16);

@@ -485,6 +485,45 @@ panels = [
 ]
 "#;
 
+    /// **A key nobody reads is a key nobody notices.**
+    ///
+    /// `PanelSpec` is not `deny_unknown_fields`, deliberately - a user preset
+    /// written against a newer version must still load rather than refusing the
+    /// whole file over one key. The cost is that a typo in a *built-in* is
+    /// silent: `net_survey` asked for `width = 46` when the field is
+    /// `width_pct` and is a percentage, so the right-hand column got no width
+    /// and the panel simply was not drawn. Everything else on the screen looked
+    /// right.
+    ///
+    /// Built-ins are ours, so they are held to the stricter rule here.
+    #[test]
+    fn no_builtin_preset_names_a_key_that_is_never_read() {
+        const PANEL_KEYS: &[&str] = &["name", "position", "height", "width_pct"];
+        const PRESET_KEYS: &[&str] = &["panels", "section", "slot", "title", "blurb"];
+
+        for (name, text) in BUILTIN_PRESETS {
+            let value: toml::Value =
+                toml::from_str(text).unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+            let table = value.as_table().expect("a preset is a table");
+            for key in table.keys() {
+                assert!(
+                    PRESET_KEYS.contains(&key.as_str()),
+                    "{name} sets '{key}', which nothing reads"
+                );
+            }
+            for panel in table["panels"].as_array().expect("panels is an array") {
+                let panel = panel.as_table().expect("a panel is a table");
+                for key in panel.keys() {
+                    assert!(
+                        PANEL_KEYS.contains(&key.as_str()),
+                        "{name} panel '{}' sets '{key}', which nothing reads",
+                        panel["name"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_builtin_preset_parses() {
         // This is what makes `parse_builtin`'s `expect` safe: the text is compiled

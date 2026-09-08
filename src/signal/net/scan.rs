@@ -235,6 +235,7 @@ impl Scan {
                 // than about this one.
                 coverage: None,
                 measured: None,
+                observed_s: 0.0,
             })
             .collect();
         let n = self.floors.max(1) as f64;
@@ -245,6 +246,9 @@ impl Scan {
             tail: self.tail_sum / n,
             spread: self.spread_sum / n,
             window_s: self.n as f64 / self.rate_hz.max(1.0),
+            // A dwell has no watch of its own: how often the radio comes back
+            // here is a fact about the sequence of dwells, and `absorb` owns it.
+            watch_start: None,
         };
         self.reset();
         out

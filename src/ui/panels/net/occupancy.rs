@@ -333,6 +333,7 @@ mod tests {
             tail: 2.07,
             spread: 40.2,
             window_s: 6.4e-6,
+            watch_start: None,
         };
         m
     }

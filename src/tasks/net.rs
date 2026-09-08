@@ -33,9 +33,14 @@ const IDLE_POLL: Duration = Duration::from_millis(100);
 pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrDevice>) {
     tokio::spawn(async move {
         let mut surveying = false;
+        // Alternate passes walk one cell along, so no megahertz stays in a
+        // position's DC shadow. See `Plan::DODGE_HZ`.
+        let mut pass = 0u64;
+        // Said once, not once a poll.
+        let mut refused = false;
 
         loop {
-            let (active, span_hz, tuned) = {
+            let (active, span_hz, rate_hz, tuned) = {
                 let m = state.lock().unwrap_or_else(|e| e.into_inner());
                 let span = if m.radio.bb_filter_hz > 0 {
                     (m.radio.bb_filter_hz as f64).min(m.radio.config_sample_rate)
@@ -45,6 +50,7 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
                 (
                     m.ui.is_net_section() && m.net.mode == NetMode::Survey && m.radio.hw_streaming,
                     span,
+                    m.radio.config_sample_rate,
                     m.radio.frequency,
                 )
             };
@@ -76,11 +82,27 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
                 continue;
             }
 
-            let plan = Plan::for_span(span_hz);
-            if plan.hops.is_empty() {
+            let plan = Plan::for_span(span_hz, pass);
+            let bins = crate::signal::net::scan::bins_for(rate_hz);
+            // A receiver too narrow to see past its own oscillator has positions
+            // to visit and nothing to learn at any of them. The gate asked
+            // whether this radio can receive the cheapest mode; whether it can
+            // survey a band is a different question, and this is where it is
+            // answered.
+            if plan.hops.is_empty() || !plan.covers_anything(rate_hz, bins) {
+                if !refused {
+                    refused = true;
+                    let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                    m.push_log(format!(
+                        "NET survey: {:.1} MHz of view is too narrow to measure past the \
+                         local oscillator; lock to a channel instead",
+                        span_hz / 1e6
+                    ));
+                }
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
+            refused = false;
             if !surveying {
                 surveying = true;
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -89,7 +111,7 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
                 // plan if its positions between them see the whole band, and a
                 // radio whose usable span left a gap would otherwise report that
                 // stretch as unobserved for ever with nothing saying why.
-                let covered = plan.covered().iter().filter(|c| **c).count();
+                let covered = plan.covered(rate_hz, bins).iter().filter(|c| **c).count();
                 m.push_log(format!(
                     "NET survey: {} positions of {:.1} MHz, {} ms a pass, {covered} of {} MHz covered",
                     plan.hops.len(),
@@ -117,6 +139,7 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
                 }
                 tokio::time::sleep(SETTLE + DWELL).await;
             }
+            pass = pass.wrapping_add(1);
         }
     });
 }

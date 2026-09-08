@@ -173,12 +173,18 @@ pub struct CellReading {
     /// Mean and peak power in the cell, relative to the converter's full scale.
     pub mean_dbfs: f64,
     pub peak_dbfs: f64,
-    /// What fraction of wall time this cell was actually under observation,
-    /// between its last two measurements.
+    /// What fraction of wall time this cell has actually been under observation.
     ///
     /// About one in [`crate::signal::net::survey::Plan::hops`] while surveying,
-    /// and one while locked. `None` until a cell has been measured twice, which
-    /// is when the question first has an answer.
+    /// and one while locked. `None` until there is any elapsed time to be a
+    /// fraction of.
+    ///
+    /// **Measured over the whole watch, not between the last two dwells**, and
+    /// the difference is not subtle. A dwell publishes every fifty milliseconds
+    /// of observation and a hop lasts a hundred, so two dwells land inside one
+    /// visit - and the gap between *those* two is fifty milliseconds of looking
+    /// in fifty milliseconds of wall clock, which is one. On a live radio with
+    /// five positions this read 87 % where the honest answer is 16 %.
     ///
     /// **The duty cycle is not scaled by this**, and the temptation to is worth
     /// naming: a channel busy all the time, seen for a sixth of the time, is
@@ -188,7 +194,19 @@ pub struct CellReading {
     /// reported as an uncertainty.
     pub coverage: Option<f64>,
     /// When this cell was last measured.
+    ///
+    /// Written but not yet read: rule 4 says all testimony is dated, and a
+    /// survey that has not come back to a cell for a minute is showing a
+    /// minute-old reading with nothing on screen saying so. The panel needs this
+    /// to say it, and does not yet.
+    #[allow(dead_code)]
     pub measured: Option<std::time::Instant>,
+    /// Seconds this cell has been under observation since the watch began.
+    ///
+    /// The numerator of [`Self::coverage`]. Accumulated rather than differenced,
+    /// because what a survey costs is only visible over a whole pass and a
+    /// difference between two dwells cannot see one.
+    pub observed_s: f64,
 }
 
 impl CellReading {
@@ -214,6 +232,11 @@ pub struct BandOccupancy {
     /// believed.
     pub tail: f64,
     pub spread: f64,
+    /// When the coverage accounting began.
+    ///
+    /// Restarted when the mode changes, because survey and lock are different
+    /// regimes and averaging across the switch would describe neither.
+    pub watch_start: Option<std::time::Instant>,
     /// How long one transform window was. The resolution every duty cycle here
     /// was measured at, and what turns a window count back into seconds.
     pub window_s: f64,
@@ -236,24 +259,28 @@ impl BandOccupancy {
         if self.cells.len() != dwell.cells.len() {
             self.cells = vec![CellReading::default(); dwell.cells.len()];
         }
+        // The watch begins when the *observing* began, not when the first dwell
+        // was published: that dwell already carries the time it took to gather,
+        // and counting it against a clock that started afterwards makes the
+        // first reading look better than it is.
+        let first_dwell =
+            dwell.cells.iter().map(|c| c.windows).max().unwrap_or(0) as f64 * dwell.window_s;
+        let watch_start = *self
+            .watch_start
+            .get_or_insert(now - std::time::Duration::from_secs_f64(first_dwell.max(0.0)));
+        let watched = now.saturating_duration_since(watch_start).as_secs_f64();
         for (old, new) in self.cells.iter_mut().zip(dwell.cells.iter()) {
             if new.windows == 0 {
                 continue;
             }
-            let observed_s = new.windows as f64 * dwell.window_s;
-            // Coverage needs two measurements to be a fraction of anything, and
-            // the honest answer before that is that nobody knows yet.
-            let coverage = old.measured.map(|then| {
-                let elapsed = now.duration_since(then).as_secs_f64();
-                if elapsed > 0.0 {
-                    (observed_s / elapsed).min(1.0)
-                } else {
-                    1.0
-                }
-            });
+            let observed_s = old.observed_s + new.windows as f64 * dwell.window_s;
+            // A fraction needs something to be a fraction of, and until the
+            // watch has run for a moment there is nothing.
+            let coverage = (watched > 0.0).then(|| (observed_s / watched).min(1.0));
             *old = CellReading {
                 coverage,
                 measured: Some(now),
+                observed_s,
                 ..*new
             };
         }
@@ -262,6 +289,19 @@ impl BandOccupancy {
         self.tail = dwell.tail;
         self.spread = dwell.spread;
         self.window_s = dwell.window_s;
+    }
+
+    /// Start the coverage accounting again.
+    ///
+    /// Called when the mode changes. The measurements themselves are kept: they
+    /// are still what was on the air. What is thrown away is the accounting of
+    /// how often we were looking, because that is the thing the mode changed.
+    pub fn restart_watch(&mut self) {
+        self.watch_start = None;
+        for c in self.cells.iter_mut() {
+            c.observed_s = 0.0;
+            c.coverage = None;
+        }
     }
 }
 
@@ -344,6 +384,7 @@ mod tests {
             tail: 2.1,
             spread: 30.0,
             window_s: 6.4e-6,
+            watch_start: None,
         };
         for &(c, duty, windows) in cells {
             out.cells[c] = CellReading {
@@ -353,6 +394,7 @@ mod tests {
                 peak_dbfs: -30.0,
                 coverage: None,
                 measured: None,
+                observed_s: 0.0,
             };
         }
         out
@@ -394,28 +436,54 @@ mod tests {
     /// time. Scaling its reading to sixteen percent would not be a sampled
     /// measurement, it would be a wrong one - and it is the obvious thing to
     /// write, which is why it is asserted against.
+    ///
+    /// The coverage itself is the second half: it is a running average over the
+    /// whole watch, so it converges on the fraction of wall time the radio
+    /// actually spends here. Measured between the last two dwells instead, it
+    /// read 87 % on a live five-position survey, because two dwells fit inside
+    /// one hop and the gap between *those* is all observation.
     #[test]
     fn the_coverage_is_reported_and_never_multiplied_into_the_duty_cycle() {
         let t0 = Instant::now();
         let mut band = BandOccupancy::default();
 
-        // A saturated cell, measured over 8000 windows of 6.4 us: 51 ms of
-        // looking.
-        band.absorb(dwell(&[(10, 1.0, 8_000)]), t0);
-        assert_eq!(band.cells[10].duty, 1.0);
-        assert_eq!(
-            band.cells[10].coverage, None,
-            "one measurement is not a fraction of anything yet"
-        );
-
-        // A pass later - 625 ms - the same cell is measured again.
-        band.absorb(dwell(&[(10, 1.0, 8_000)]), t0 + Duration::from_millis(625));
+        // A saturated cell, visited once per 625 ms pass. **Two dwells land
+        // inside each visit**, fifty milliseconds apart, because the scan
+        // publishes every fifty milliseconds of observation and a hop lasts a
+        // hundred. That is the shape the old measure got wrong: the gap between
+        // those two is all observation, so it read one, and the panel showed
+        // 87 % on a five-position survey.
+        for pass in 0..40u32 {
+            let visit = t0 + Duration::from_millis(625 * pass as u64);
+            band.absorb(dwell(&[(10, 1.0, 8_000)]), visit);
+            band.absorb(
+                dwell(&[(10, 1.0, 8_000)]),
+                visit + Duration::from_millis(51),
+            );
+        }
         assert_eq!(band.cells[10].duty, 1.0, "still busy all the time");
-        let coverage = band.cells[10].coverage.expect("two measurements");
+
+        let coverage = band.cells[10].coverage.expect("a watch has run");
+        // Two dwells of 51 ms in every 625: a hundred milliseconds of looking a
+        // pass, which is the sixth a five-position survey spends here.
+        let want = 2.0 * 0.0512 / 0.625;
         assert!(
-            (coverage - 0.0819).abs() < 0.001,
-            "51 ms of looking in 625: {coverage}"
+            (coverage - want).abs() < 0.005,
+            "51 ms of looking in every 625: wanted {want:.3}, got {coverage:.3}"
         );
+    }
+
+    /// The very first reading is not flattered by a clock that started after the
+    /// observing did.
+    #[test]
+    fn the_watch_begins_when_the_looking_did() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+        band.absorb(dwell(&[(10, 1.0, 8_000)]), t0);
+        // One dwell, and nothing but that dwell has happened: the radio has been
+        // looking here the whole time it has been looking at all.
+        let coverage = band.cells[10].coverage.expect("a watch has run");
+        assert!((coverage - 1.0).abs() < 1e-9, "got {coverage}");
     }
 
     /// Locked, the receiver is looking almost all the time, and the coverage
@@ -424,13 +492,44 @@ mod tests {
     fn locking_shows_as_coverage_rather_than_being_assumed() {
         let t0 = Instant::now();
         let mut band = BandOccupancy::default();
-        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0);
-        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0 + Duration::from_millis(52));
+        // Back to back: 51 ms of looking every 52 ms of clock.
+        for i in 0..40u32 {
+            band.absorb(
+                dwell(&[(10, 0.3, 8_000)]),
+                t0 + Duration::from_millis(52 * i as u64),
+            );
+        }
         let coverage = band.cells[10].coverage.unwrap();
         assert!(coverage > 0.95, "{coverage}");
-        // It never exceeds one, however the clock lands.
-        band.absorb(dwell(&[(10, 0.3, 8_000)]), t0 + Duration::from_millis(52));
-        assert!(band.cells[10].coverage.unwrap() <= 1.0);
+        assert!(
+            coverage <= 1.0,
+            "never more than all of the time: {coverage}"
+        );
+    }
+
+    /// Switching mode starts the accounting again, and keeps the measurements.
+    ///
+    /// Survey and lock are different regimes for how often the radio looks at
+    /// any one megahertz. Averaging across the switch would describe neither,
+    /// and the reading would take a minute to catch up with what the user just
+    /// did.
+    #[test]
+    fn changing_mode_restarts_the_watch_but_keeps_what_was_measured() {
+        let t0 = Instant::now();
+        let mut band = BandOccupancy::default();
+        for pass in 0..20u32 {
+            band.absorb(
+                dwell(&[(10, 0.42, 8_000)]),
+                t0 + Duration::from_millis(625 * pass as u64),
+            );
+        }
+        assert!(band.cells[10].coverage.unwrap() < 0.2);
+
+        band.restart_watch();
+        assert_eq!(band.cells[10].coverage, None, "nothing to be a fraction of");
+        assert_eq!(band.cells[10].observed_s, 0.0);
+        assert_eq!(band.cells[10].duty, 0.42, "the measurement stands");
+        assert!(band.cells[10].observed(), "and the cell is still observed");
     }
 
     /// The floor is the receiver's, not the position's, so the newest wins.

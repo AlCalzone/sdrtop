@@ -62,6 +62,7 @@ impl App {
         registry.register(ui::SweepStripPanel);
         registry.register(ui::MicroSweepPanel);
         registry.register(ui::NetCapabilityPanel);
+        registry.register(ui::NetCensusPanel);
         registry.register(ui::NetDecodeHealthPanel);
         registry.register(ui::NetOccupancyPanel);
 

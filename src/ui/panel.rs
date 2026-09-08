@@ -99,6 +99,13 @@ pub enum Tag {
     Survey,
     /// `[LOCK]` - parked on one channel: complete inside it, blind outside it.
     Lock,
+    /// `[↓PKTS]` - what orders a table, and which way.
+    ///
+    /// Design section 9.1: the sort key is shown in the chrome "so the panel
+    /// says how it is ordered rather than the user having to remember". A table
+    /// whose order is only visible in a marker halfway across the header is one
+    /// people read wrong from the other side of the room.
+    Sorted(&'static str, bool),
 }
 
 /// The *shape* of a panel's frame. Its colour is [`FrameTone`]; the two are

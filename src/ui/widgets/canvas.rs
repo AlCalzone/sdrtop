@@ -38,16 +38,24 @@ pub(crate) type Duty = Option<f32>;
 
 /// The colour for one cell.
 ///
-/// Unobserved is the frame's own dark, so the eye reads it as absence rather
-/// than as a very quiet channel. Everything else rides the theme's palette, the
+/// **Unobserved is `theme.stale`**, which is the ink the occupancy profile
+/// already uses for a cell nobody looked at, so one meaning has one colour
+/// across the section (rule 5). Everything else rides the theme's palette, the
 /// same ramp the waterfall uses, so one intensity means one thing across the
 /// app.
+///
+/// The first version used `border_dim`, which passed the test that the three
+/// inks differ and failed on the radio: in the default theme it is *lighter*
+/// than the palette's floor, so the part of the band nobody had measured was
+/// the brightest thing on the panel. An ink for absence has to sit below the
+/// scale, not above it, and the test below now says so rather than only that it
+/// is different.
 pub(crate) fn ink(duty: Duty, theme: &crate::Theme) -> Color {
     match duty.filter(|d| d.is_finite()) {
         Some(d) => theme.palette_color(d.clamp(0.0, 1.0)),
         // Not the palette's floor: that is a measurement of an empty channel,
         // and this is the absence of one.
-        None => theme.border_dim,
+        None => theme.stale,
     }
 }
 
@@ -137,6 +145,25 @@ mod tests {
         // And the ramp is the theme's, not a literal.
         assert_eq!(busy, t.palette_color(1.0));
         assert_eq!(empty, t.palette_color(0.0));
+
+        // **Absence sits below the scale, not above it.** Differing is not
+        // enough: the first version used an ink that is lighter than the
+        // palette's floor, so the part of the band nobody had measured was the
+        // brightest thing on the panel. Only visible on a radio, which is what
+        // this panel's acceptance criterion is for.
+        let luma = |c: ratatui::style::Color| match c {
+            ratatui::style::Color::Rgb(r, g, b) => {
+                0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64
+            }
+            _ => panic!("the theme is truecolor"),
+        };
+        assert!(
+            luma(unseen) <= luma(empty),
+            "unobserved ({unseen:?}) is brighter than an empty channel ({empty:?})"
+        );
+
+        // And it is the same ink the occupancy profile uses for the same thing.
+        assert_eq!(unseen, t.stale);
     }
 
     /// A busier cell is further up the ramp, monotonically.

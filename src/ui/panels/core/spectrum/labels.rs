@@ -285,7 +285,11 @@ pub(super) fn signal_annotations(
     // Noise-floor label - near the left edge, on the row the line actually sits.
     let nf_row =
         ((vert.frac_down_to(noise_floor) * (ch - 1) as f32) as u16).min(ch.saturating_sub(2));
-    let nf_label = format!("noise floor {:.0} dBFS", noise_floor);
+    let nf_label = format!(
+        "noise floor {:.0} {}",
+        noise_floor,
+        state.caps.level_unit.label()
+    );
     let nf_lw = nf_label.chars().count() as u16;
     if nf_lw < area.width {
         f.render_widget(

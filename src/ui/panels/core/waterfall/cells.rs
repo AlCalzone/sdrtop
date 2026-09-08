@@ -24,10 +24,6 @@ use ratatui::{
 use crate::palette::{magnitude_to_color_palette, ColorDepth, WaterfallPalette};
 use crate::state::{BinAxis, BinWindow};
 
-/// Top of the colour scale. The waterfall is always referenced to full scale;
-/// only the floor (`db_min`) moves, under `↑`/`↓`.
-pub(super) const DB_MAX: f32 = 0.0;
-
 /// Max dB over the bin range `[start, end)` of one waterfall row, clamped to the
 /// row's own length. Rows are normally all the (fixed) FFT bin count, but reading
 /// each row against its own length means a row that ever differs - e.g. if the FFT
@@ -89,12 +85,13 @@ pub(super) fn draw(
     cursor_col: Option<usize>,
     skip_data: usize,
     db_min: f32,
+    db_max: f32,
     palette: WaterfallPalette,
     theme: &crate::Theme,
 ) {
     let cols = area.width as usize;
     let depth = ColorDepth::detect();
-    let color = |db: f32| magnitude_to_color_palette(db, db_min, DB_MAX, depth, theme, palette);
+    let color = |db: f32| magnitude_to_color_palette(db, db_min, db_max, depth, theme, palette);
     let floor = color(f32::NEG_INFINITY);
 
     let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);
@@ -140,6 +137,43 @@ mod tests {
             .window(100_000_000, 32_000_000.0, row_bins, zoom)
             .unwrap();
         Columns::new(window, cols, axis)
+    }
+    #[test]
+    fn cell_colors_use_the_configured_ceiling() {
+        let theme = crate::Theme::sdr();
+        let palette = WaterfallPalette::default();
+        let rows = VecDeque::from([(Instant::now(), Arc::new(vec![-10.0]))]);
+        for max in [0.0, -10.0] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(1, 1)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw(
+                        f,
+                        f.size(),
+                        &rows,
+                        |row_bins| Some(columns(row_bins, 1, 1)),
+                        None,
+                        0,
+                        -110.0,
+                        max,
+                        palette,
+                        &theme,
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                terminal.backend().buffer().get(0, 0).fg,
+                magnitude_to_color_palette(
+                    -10.0,
+                    -110.0,
+                    max,
+                    ColorDepth::detect(),
+                    &theme,
+                    palette
+                )
+            );
+        }
     }
 
     #[test]

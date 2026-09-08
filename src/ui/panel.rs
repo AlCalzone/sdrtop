@@ -26,16 +26,12 @@ pub enum Staleness {
     /// Stale whenever the radio is not streaming. For anything read from
     /// hardware counters: timing, drops, gain staging, IQ balance.
     NotStreaming,
-    /// Stale when the newest FFT frame has aged past [`FFT_STALE_MS`], or there
-    /// is no frame yet. For anything derived from the spectrum.
+    /// Mark spectrum readings stale when the frame exceeds the device's trace-age limit
+    /// Missing frames are stale
     FftAge,
     /// Never stale. For panels that show configuration rather than measurement.
     Never,
 }
-
-/// How old the newest FFT frame may get before an [`Staleness::FftAge`] panel
-/// calls its readings stale. Shared with `widgets::micro_common::fft_stale`.
-pub const FFT_STALE_MS: u128 = 500;
 
 impl Staleness {
     /// Resolve the rule against a metrics snapshot.
@@ -47,16 +43,19 @@ impl Staleness {
                 .last_fft
                 .as_ref()
                 .map(|fr| fr.timestamp.elapsed().as_millis()),
+            state.caps.trace_stale_ms,
         )
     }
 
     /// The rule itself, on plain inputs: `fft_age_ms` is `None` when no frame has
     /// arrived yet. Split out from [`resolve`](Self::resolve) so the decision can
     /// be tested without building a whole metrics snapshot.
-    fn decide(self, streaming: bool, fft_age_ms: Option<u128>) -> bool {
+    fn decide(self, streaming: bool, fft_age_ms: Option<u128>, trace_stale_ms: u128) -> bool {
         match self {
             Staleness::NotStreaming => !streaming,
-            Staleness::FftAge => fft_age_ms.map(|ms| ms > FFT_STALE_MS).unwrap_or(true),
+            Staleness::FftAge => fft_age_ms
+                .map(|milliseconds| milliseconds > trace_stale_ms)
+                .unwrap_or(true),
             Staleness::Never => false,
         }
     }
@@ -373,21 +372,51 @@ mod tests {
 
     #[test]
     fn staleness_rules_are_independent_of_each_other() {
+        let stale_ms = crate::hardware::IQ_TRACE_STALE_MS;
         // A dead radio staleness NotStreaming, and nothing else.
-        assert!(Staleness::NotStreaming.decide(false, Some(0)));
+        assert!(Staleness::NotStreaming.decide(false, Some(0), stale_ms));
         assert!(
-            !Staleness::FftAge.decide(false, Some(0)),
+            !Staleness::FftAge.decide(false, Some(0), stale_ms),
             "fresh frame, dead radio → live"
         );
-        assert!(!Staleness::Never.decide(false, None), "Never means never");
+        assert!(
+            !Staleness::Never.decide(false, None, stale_ms),
+            "Never means never"
+        );
 
         // A streaming radio whose FFT has dried up staleness only FftAge.
-        assert!(!Staleness::NotStreaming.decide(true, None));
-        assert!(Staleness::FftAge.decide(true, None), "no frame yet → stale");
-        assert!(Staleness::FftAge.decide(true, Some(FFT_STALE_MS + 1)));
+        assert!(!Staleness::NotStreaming.decide(true, None, stale_ms));
         assert!(
-            !Staleness::FftAge.decide(true, Some(FFT_STALE_MS)),
+            Staleness::FftAge.decide(true, None, stale_ms),
+            "no frame yet → stale"
+        );
+        assert!(Staleness::FftAge.decide(true, Some(stale_ms + 1), stale_ms));
+        assert!(
+            !Staleness::FftAge.decide(true, Some(stale_ms), stale_ms),
             "the threshold itself is live"
         );
+    }
+
+    #[test]
+    fn trace_staleness_uses_the_device_limit() {
+        let mut state = SdrMetrics::fixture().streaming().with_carrier(0.0, 20.0);
+        std::sync::Arc::make_mut(&mut state.caps).trace_stale_ms = 60_000;
+        state.waterfall.last_fft.as_mut().unwrap().timestamp =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(!Staleness::FftAge.resolve(&state));
+
+        std::sync::Arc::make_mut(&mut state.caps).trace_stale_ms = 100;
+        assert!(Staleness::FftAge.resolve(&state));
+
+        state.waterfall.last_fft = None;
+        assert!(Staleness::FftAge.resolve(&state));
+    }
+
+    #[test]
+    fn trace_age_threshold_is_inclusive_for_each_device() {
+        for limit in [0, 100, 500, 60_000] {
+            assert!(!Staleness::FftAge.decide(false, Some(limit), limit));
+            assert!(Staleness::FftAge.decide(true, Some(limit + 1), limit));
+        }
     }
 }

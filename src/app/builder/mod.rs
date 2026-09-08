@@ -89,7 +89,7 @@ impl App {
         let state = Arc::new(Mutex::new(initial_metrics(
             &cfg,
             Boot::normal(&cfg, Arc::clone(&caps), tuning, &info),
-        )));
+        )?));
 
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,7 +204,7 @@ impl App {
         let state = Arc::new(Mutex::new(initial_metrics(
             &cfg,
             Boot::observer(&cfg, &sysinfo, profile),
-        )));
+        )?));
 
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());

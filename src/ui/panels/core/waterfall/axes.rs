@@ -23,7 +23,7 @@ use crate::palette::{magnitude_to_color_palette, ColorDepth, WaterfallPalette};
 use crate::state::SdrMetrics;
 use crate::ui::panels::core::spectrum::fmt_spectrum_step;
 
-use super::cells::{band_max, Columns, DB_MAX};
+use super::cells::{band_max, Columns};
 
 /// Width of the dB gutter. Matches the spectrum's label column so the two plots
 /// start at the same x.
@@ -35,6 +35,7 @@ pub(super) fn db_legend(
     f: &mut Frame,
     area: Rect,
     db_min: f32,
+    db_max: f32,
     palette: WaterfallPalette,
     theme: &crate::Theme,
 ) {
@@ -46,9 +47,9 @@ pub(super) fn db_legend(
     let steps = (h * 2).max(2);
     let at = |t: f32| {
         magnitude_to_color_palette(
-            DB_MAX + (db_min - DB_MAX) * t,
+            db_max + (db_min - db_max) * t,
             db_min,
-            DB_MAX,
+            db_max,
             depth,
             theme,
             palette,
@@ -60,9 +61,9 @@ pub(super) fn db_legend(
             let top = at((row * 2) as f32 / (steps - 1) as f32);
             let bot = at((row * 2 + 1) as f32 / (steps - 1) as f32);
             let label = match row {
-                0 => format!("{:>+4} ", DB_MAX as i32),
+                0 => format!("{:>+4} ", db_max as i32),
                 r if r == h.saturating_sub(1) => format!("{:>4} ", db_min as i32),
-                r if r == h / 2 => format!("{:>4} ", ((DB_MAX + db_min) / 2.0) as i32),
+                r if r == h / 2 => format!("{:>4} ", ((db_max + db_min) / 2.0) as i32),
                 _ => "     ".to_string(),
             };
             Line::from(vec![
@@ -89,7 +90,14 @@ pub(super) fn indicator(
     theme: &crate::Theme,
 ) {
     let text = match (state.waterfall.cursor_freq, cursor_col.zip(columns)) {
-        (Some(cf), Some((col, columns))) => cursor_readout(cf, col, rows, columns, skip_data),
+        (Some(cf), Some((col, columns))) => cursor_readout(
+            cf,
+            col,
+            rows,
+            columns,
+            skip_data,
+            state.caps.level_unit.label(),
+        ),
         // A cursor set outside the current zoom window: name it, but there is
         // nothing on screen to read a level from.
         (Some(cf), None) => format!("  cur: {:.3} MHz  \u{2190} \u{2192}  M", cf as f64 / 1e6),
@@ -120,6 +128,7 @@ fn cursor_readout(
     rows: &VecDeque<(Instant, Arc<Vec<f32>>)>,
     columns: &Columns,
     skip_data: usize,
+    unit: &str,
 ) -> String {
     let mhz = freq_hz as f64 / 1e6;
     let Some((ts, row)) = rows.get(skip_data) else {
@@ -129,10 +138,32 @@ fn cursor_readout(
     let db = band_max(row, lo, hi);
     if db.is_finite() {
         format!(
-            "  cur: {mhz:.3} MHz  {db:.1} dBFS  {}s ago  \u{2190} \u{2192}  M",
+            "  cur: {mhz:.3} MHz  {db:.1} {unit}  {}s ago  \u{2190} \u{2192}  M",
             ts.elapsed().as_secs()
         )
     } else {
         format!("  cur: {mhz:.3} MHz  \u{2190} \u{2192}  M")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_readout_keeps_the_iq_unit_and_level() {
+        let rows = VecDeque::from([(Instant::now(), Arc::new(vec![-60.0]))]);
+        let window = crate::state::BinAxis::FftBins
+            .window(100_000_000, 1.0, 1, 1)
+            .unwrap();
+        let text = cursor_readout(
+            100_000_000,
+            0,
+            &rows,
+            &Columns::new(window, 1, crate::state::BinAxis::FftBins),
+            0,
+            crate::hardware::LevelUnit::Dbfs.label(),
+        );
+        assert!(text.starts_with("  cur: 100.000 MHz  -60.0 dBFS  "));
     }
 }

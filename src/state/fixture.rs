@@ -35,6 +35,7 @@ impl SdrMetrics {
     /// also the state most likely to be got wrong - every "waiting for RX" and
     /// `[STALE]` path runs through it.
     pub(crate) fn fixture() -> Self {
+        let caps = Arc::new(crate::hardware::native::hackrf::caps());
         SdrMetrics {
             radio: RadioState {
                 frequency: 100_000_000,
@@ -74,15 +75,20 @@ impl SdrMetrics {
             observer: ObserverState::default(),
             spectrum: SpectrumState {
                 step_hz: 100_000,
-                y_min: -120.0,
-                y_max: 0.0,
+                y_min: caps.level_min_db,
+                y_max: caps.level_max_db,
                 hold: None,
                 cursor_freq: None,
                 markers: vec![],
                 pending_marker: None,
                 style: SpectrumStyle::default(),
             },
-            waterfall: WaterfallState::new(512, crate::palette::WaterfallPalette::default()),
+            waterfall: WaterfallState::new(
+                512,
+                crate::palette::WaterfallPalette::default(),
+                caps.level_min_db,
+                caps.level_max_db,
+            ),
             system: SystemState {
                 // The HackRF fixture reports its own firmware, so no stack row.
                 stack: None,
@@ -101,7 +107,7 @@ impl SdrMetrics {
             lab: LabState::default(),
             demod: DemodState::default(),
             net: crate::state::NetState::default(),
-            caps: Arc::new(crate::hardware::native::hackrf::caps()),
+            caps,
             acc: Accumulators::default(),
         }
     }
@@ -160,12 +166,11 @@ impl SdrMetrics {
         self
     }
 
-    /// Age the newest FFT frame past [`crate::ui::panel::FFT_STALE_MS`], so the
-    /// staleness paths can be rendered without a test sleeping.
+    /// Age the newest FFT frame past the IQ trace limit
     pub(crate) fn with_stale_fft(mut self) -> Self {
         if let Some(fr) = self.waterfall.last_fft.as_mut() {
             fr.timestamp = Instant::now()
-                - std::time::Duration::from_millis(crate::ui::panel::FFT_STALE_MS as u64 + 50);
+                - std::time::Duration::from_millis(crate::hardware::IQ_TRACE_STALE_MS as u64 + 50);
         }
         self
     }

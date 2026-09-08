@@ -12,6 +12,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelUnit {
+    Dbfs,
+}
+
+pub const IQ_TRACE_STALE_MS: u128 = 500;
+
+impl LevelUnit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dbfs => "dBFS",
+        }
+    }
+}
+
 /// How raw USB bytes encode each I/Q component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleFormat {
@@ -616,6 +631,14 @@ pub enum DeliveryModel {
 /// truth for every clamp, default, and UI capability check. Built once at open.
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
+    /// Spectral levels and display bounds use this unit
+    pub level_unit: LevelUnit,
+    /// The finite display floor must be below `level_max_db`
+    pub level_min_db: f32,
+    /// The finite display ceiling must form a finite span with `level_min_db`
+    pub level_max_db: f32,
+    /// A trace becomes stale after this positive millisecond budget
+    pub trace_stale_ms: u128,
     pub freq_min_hz: u64,
     pub freq_max_hz: u64,
     pub sample_rate_min_hz: f64,
@@ -648,6 +671,27 @@ pub struct DeviceCapabilities {
     /// between.
     #[cfg_attr(not(test), allow(dead_code))]
     pub delivery: DeliveryModel,
+}
+
+impl DeviceCapabilities {
+    /// Reject invalid display bounds or a zero trace-age budget before initializing views
+    pub fn validate_display(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.level_min_db.is_finite()
+                && self.level_max_db.is_finite()
+                && self.level_min_db < self.level_max_db
+                && (self.level_max_db - self.level_min_db).is_finite(),
+            "Invalid display level bounds: {}..{} {}; expected finite ordered bounds with a finite span",
+            self.level_min_db,
+            self.level_max_db,
+            self.level_unit.label(),
+        );
+        anyhow::ensure!(
+            self.trace_stale_ms > 0,
+            "Invalid trace_stale_ms: expected a positive millisecond budget",
+        );
+        Ok(())
+    }
 }
 
 /// The software layer between sdrtop and a radio that has no firmware of its

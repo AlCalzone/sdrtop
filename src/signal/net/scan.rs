@@ -249,6 +249,10 @@ impl Scan {
             // A dwell has no watch of its own: how often the radio comes back
             // here is a fact about the sequence of dwells, and `absorb` owns it.
             watch_start: None,
+            // A dwell has no past: the history is the band's, and `absorb`
+            // owns it.
+            history: Default::default(),
+            last_column: None,
         };
         self.reset();
         out

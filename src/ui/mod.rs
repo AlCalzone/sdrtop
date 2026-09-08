@@ -64,6 +64,7 @@ pub use panels::lab::timing_vitals::TimingVitalsPanel;
 
 pub use panels::net::capability::NetCapabilityPanel;
 pub use panels::net::census::NetCensusPanel;
+pub use panels::net::coexist::NetCoexistPanel;
 pub use panels::net::decode_health::NetDecodeHealthPanel;
 pub use panels::net::occupancy::NetOccupancyPanel;
 

@@ -230,6 +230,21 @@ impl CensusState {
     }
 }
 
+/// How often the band is written onto the time axis.
+///
+/// Half a second. A canvas column is a moment, and this is about the finest a
+/// person reads a minute-long picture at; faster columns would cost memory and
+/// redraw for detail nobody can resolve at two metres, which is the acceptance
+/// criterion for the panel that draws them.
+pub const COLUMN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How much of the past the canvas keeps.
+///
+/// Two minutes at [`COLUMN_INTERVAL`], which is long enough to see a device come
+/// and go and short enough that eighty-three cells of it is under a hundred
+/// kilobytes.
+pub const HISTORY_COLUMNS: usize = 240;
+
 /// One megahertz of the band, as measured over the last dwell.
 ///
 /// A cell that was never inside the observed span has `windows` of zero, and
@@ -305,6 +320,16 @@ pub struct BandOccupancy {
     /// believed.
     pub tail: f64,
     pub spread: f64,
+    /// The band as it was, one column per moment, oldest first.
+    ///
+    /// **A column is a moment, not a pass.** The survey refreshes any one cell
+    /// once per pass, so a column taken faster than that repeats the last
+    /// measurement for most cells - which is what the cell's value *is*, and the
+    /// coverage line already says how often it is renewed. Tying columns to
+    /// passes instead would make the time axis stop when the mode is locked.
+    pub history: std::collections::VecDeque<Vec<f32>>,
+    /// When the newest column was taken.
+    pub last_column: Option<std::time::Instant>,
     /// When the coverage accounting began.
     ///
     /// Restarted when the mode changes, because survey and lock are different
@@ -362,6 +387,30 @@ impl BandOccupancy {
         self.tail = dwell.tail;
         self.spread = dwell.spread;
         self.window_s = dwell.window_s;
+        self.record_column(now);
+    }
+
+    /// Push the band as it stands onto the history, if it is time for a column.
+    fn record_column(&mut self, now: std::time::Instant) {
+        let due = self
+            .last_column
+            .is_none_or(|t| now.saturating_duration_since(t) >= COLUMN_INTERVAL);
+        if !due || self.cells.is_empty() {
+            return;
+        }
+        self.last_column = Some(now);
+        // Unobserved reads as a negative, so the canvas can draw "nobody looked
+        // here" differently from "nothing was here" - the same distinction the
+        // occupancy profile makes, carried into the time axis.
+        self.history.push_back(
+            self.cells
+                .iter()
+                .map(|c| if c.observed() { c.duty as f32 } else { -1.0 })
+                .collect(),
+        );
+        while self.history.len() > HISTORY_COLUMNS {
+            self.history.pop_front();
+        }
     }
 
     /// Start the coverage accounting again.
@@ -531,6 +580,10 @@ mod tests {
             spread: 30.0,
             window_s: 6.4e-6,
             watch_start: None,
+            // A dwell has no past: the history is the band's, and `absorb`
+            // owns it.
+            history: Default::default(),
+            last_column: None,
         };
         for &(c, duty, windows) in cells {
             out.cells[c] = CellReading {

@@ -334,6 +334,10 @@ mod tests {
             spread: 40.2,
             window_s: 6.4e-6,
             watch_start: None,
+            // A dwell has no past: the history is the band's, and `absorb`
+            // owns it.
+            history: Default::default(),
+            last_column: None,
         };
         m
     }

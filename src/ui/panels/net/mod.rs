@@ -10,5 +10,6 @@
 
 pub mod capability;
 pub mod census;
+pub mod coexist;
 pub mod decode_health;
 pub mod occupancy;

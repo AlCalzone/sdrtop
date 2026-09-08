@@ -52,9 +52,18 @@ pub struct Scan {
     /// Transform size, and the window applied before it.
     n: usize,
     window: Vec<f32>,
-    /// `(sum of the window)^2`, the gain a full-scale tone would pick up. Cell
-    /// powers are divided by it, so a cell holding a full-scale carrier reads
-    /// 0 dBFS whatever the transform size.
+    /// `n * sum(w^2)`, the gain a *band* of power picks up through the window.
+    ///
+    /// **A window has two gains and this is the one a cell power needs.** A tone
+    /// concentrated in a single bin picks up the coherent gain `(sum w)^2`; a
+    /// signal spread across bins picks up the power gain `n * sum(w^2)`, and
+    /// Parseval says the sum of `|X_k|^2` over a band is the second. A cell
+    /// power sums bins, so it is a band power.
+    ///
+    /// Dividing by the coherent gain instead read every level `10*log10(2/3)`
+    /// high - 1.76 dB for a Hann window, whatever the transform size - which put
+    /// peaks *above full scale* on a live radio. A number above the top of the
+    /// scale is not a loud reading, it is a broken scale.
     window_gain: f64,
     /// Which cell each bin lands in, or `None` for one outside the usable span.
     bin_cells: Vec<Option<usize>>,
@@ -98,12 +107,12 @@ impl Scan {
     pub fn new(centre_hz: f64, rate_hz: f64, span_hz: f64) -> Self {
         let n = bins_for(rate_hz);
         let window = compute_window(WindowFn::Hann, n);
-        let sum: f64 = window.iter().map(|w| *w as f64).sum();
+        let power_gain: f64 = window.iter().map(|w| (*w as f64).powi(2)).sum::<f64>() * n as f64;
         Self {
             fft: FftPlanner::<f32>::new().plan_fft_forward(n),
             n,
             window,
-            window_gain: sum * sum,
+            window_gain: power_gain,
             bin_cells: occupancy::bin_cells(centre_hz, rate_hz, span_hz, n),
             centre_hz,
             rate_hz,
@@ -263,5 +272,130 @@ fn dbfs(power: f64) -> f64 {
         (10.0 * power.log10()).max(crate::signal::fft::DB_FLOOR as f64)
     } else {
         crate::signal::fft::DB_FLOOR as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::SampleFormat;
+    use crate::signal::dsp::testkit::Rng;
+    use std::f64::consts::TAU;
+
+    const RATE: f64 = 20_000_000.0;
+    const CENTRE: f64 = 2_437_000_000.0;
+    const SPAN: f64 = 18_000_000.0;
+
+    fn eight_bit() -> SampleGeometry {
+        SampleGeometry {
+            format: SampleFormat::Int8,
+            full_scale: 128.0,
+        }
+    }
+
+    /// Interleaved 8-bit bytes for a complex signal built by `f`.
+    fn bytes(pairs: usize, mut f: impl FnMut(usize) -> (f64, f64)) -> Vec<u8> {
+        let mut out = Vec::with_capacity(pairs * 2);
+        for i in 0..pairs {
+            let (re, im) = f(i);
+            out.push((re * 127.0).round().clamp(-127.0, 127.0) as i8 as u8);
+            out.push((im * 127.0).round().clamp(-127.0, 127.0) as i8 as u8);
+        }
+        out
+    }
+
+    fn run(bytes: &[u8]) -> crate::state::BandOccupancy {
+        let mut scan = Scan::new(CENTRE, RATE, SPAN);
+        scan.push(bytes, eight_bit());
+        scan.take()
+    }
+
+    /// **A full-scale signal reads 0 dBFS, and nothing ever reads above it.**
+    ///
+    /// The whole point of a full-scale reference is that it is the top. A number
+    /// above it is not a loud reading, it is a broken scale - and this panel
+    /// printed `3.5 peak dBFS` off a live radio, which is what sent me looking.
+    ///
+    /// The cause is that a window has two gains and only one of them was used. A
+    /// tone concentrated in one bin picks up the *coherent* gain `(sum w)^2`; a
+    /// signal spread over many bins picks up the *power* gain `n * sum w^2`. The
+    /// cell power here is a band power - it sums bins - so it is the second, and
+    /// dividing it by the first read every level 1.76 dB high.
+    #[test]
+    fn a_full_scale_signal_reads_zero_dbfs() {
+        // A tone 3.5 MHz above centre is 2440.5 MHz, the middle of cell 40.
+        // The middle matters: 3.0 MHz lands on the 2440 boundary and Hann puts
+        // the tone's skirts either side of it, so half the power is measured in
+        // cell 39 and the reading is low for a reason that is not a bug.
+        let tone = bytes(128 * 64, |i| {
+            let ph = TAU * 3_500_000.0 * i as f64 / RATE;
+            (ph.cos(), ph.sin())
+        });
+        let band = run(&tone);
+        let cell = 40;
+        assert!(band.cells[cell].observed());
+        let peak = band.cells[cell].peak_dbfs;
+        assert!(
+            peak.abs() < 0.3,
+            "a full-scale tone should read 0 dBFS, got {peak:.2}"
+        );
+        // And nowhere in the band does anything read above full scale.
+        for (i, c) in band.cells.iter().enumerate() {
+            assert!(
+                c.peak_dbfs <= 0.3,
+                "cell {i} reads {:.2} dBFS, above full scale",
+                c.peak_dbfs
+            );
+        }
+    }
+
+    /// The same scale for a signal that is not a tone, which is the case the
+    /// coherent gain gets wrong.
+    ///
+    /// Noise filling the span puts its power *in total* across the cells, not in
+    /// each: the power is shared out, and a band power that did not add up would
+    /// be the same bug wearing a different hat.
+    ///
+    /// Twenty decibels below full scale rather than at it, because a Gaussian at
+    /// unit total power spends much of its time outside the eight-bit rails and
+    /// the clipping, not the window, would then be what the test measured.
+    #[test]
+    fn a_noise_floor_adds_up_across_the_cells() {
+        let mut rng = Rng::new(4);
+        let noise = rng.noise(128 * 64, 0.01);
+        let raw = bytes(128 * 64, |i| (noise[i].re as f64, noise[i].im as f64));
+        let band = run(&raw);
+
+        let total: f64 = band
+            .cells
+            .iter()
+            .filter(|c| c.observed())
+            .map(|c| 10f64.powf(c.mean_dbfs / 10.0))
+            .sum();
+        // The observed span is 18 of the 20 MHz sampled, so nine tenths of the
+        // power is inside it: -20 dBFS, less 10*log10(20/18).
+        let db = 10.0 * total.log10();
+        let want = -20.0 + 10.0 * (18.0f64 / 20.0).log10();
+        assert!(
+            (db - want).abs() < 0.5,
+            "18 MHz of a -20 dBFS noise floor should read {want:.2}, got {db:.2}"
+        );
+    }
+
+    /// Half amplitude is six decibels down, whatever the transform size.
+    #[test]
+    fn the_scale_is_the_same_at_every_transform_size() {
+        for amp in [1.0f64, 0.5, 0.25] {
+            let tone = bytes(128 * 64, |i| {
+                let ph = TAU * 3_500_000.0 * i as f64 / RATE;
+                (amp * ph.cos(), amp * ph.sin())
+            });
+            let peak = run(&tone).cells[40].peak_dbfs;
+            let want = 20.0 * amp.log10();
+            assert!(
+                (peak - want).abs() < 0.4,
+                "amplitude {amp} should read {want:.1} dBFS, got {peak:.2}"
+            );
+        }
     }
 }

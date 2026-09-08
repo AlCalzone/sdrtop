@@ -134,3 +134,18 @@ pub(super) fn toggle_net_mode(ctx: &mut InputCtx<'_>) -> bool {
     }
     true
 }
+
+/// `[y]` - establish the frequency reference from what is on centre now.
+///
+/// Design section 7: every ppm reading in the app contains our own oscillator's
+/// error, and this is the one action that takes it out of all of them at once.
+/// It asks; the FFT worker answers on its next block, because that is where the
+/// raw samples already are.
+pub(super) fn capture_reference(ctx: &mut InputCtx<'_>) {
+    let mut m = metrics(ctx.state);
+    if !m.radio.hw_streaming {
+        m.push_log("Frequency reference: start RX first".to_string());
+        return;
+    }
+    m.radio.reference_request = true;
+}

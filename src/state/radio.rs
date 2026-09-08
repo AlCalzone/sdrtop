@@ -31,6 +31,18 @@ pub struct RadioState {
     pub current_throughput_bps: u64,
     pub throughput_history: VecDeque<u64>,
     pub sample_rate_history: VecDeque<u64>,
+    /// Our own oscillator's error, once somebody has established it.
+    ///
+    /// `None` until then, which is not the same as zero: zero is a measurement
+    /// and this is the absence of one. See [`FrequencyReference`].
+    pub reference: Option<FrequencyReference>,
+    /// Set by the key, cleared by whoever takes the capture.
+    ///
+    /// A flag rather than a channel because the measurement needs raw samples
+    /// and the FFT worker is already holding them: asking it to look once is a
+    /// bool, and a fourth sample feed for a once-a-session measurement would be
+    /// a lot of plumbing for one keypress.
+    pub reference_request: bool,
 }
 
 impl RadioState {
@@ -93,5 +105,254 @@ impl RadioState {
         v.filter(|x| x.is_finite())
             .map(|x| x.max(0.0).round() as u32)
             .unwrap_or(0)
+    }
+}
+
+/// How long a frequency reference stays a reference.
+///
+/// **A policy, and stated as one rather than dressed up as physics.** A crystal
+/// drifts with temperature and a board warms up; fifteen minutes is the
+/// timescale over which a room and a radio change measurably. What actually
+/// decides it is the asymmetry: expiring early costs one keypress, and expiring
+/// late puts a stale correction on every ppm reading in the app where nobody
+/// will question it. When somebody measures a HackRF's drift against
+/// temperature, this becomes a number with a source and this paragraph goes.
+pub const REFERENCE_STALE_S: u64 = 15 * 60;
+
+/// What a ppm reading is worth, which depends entirely on what it was measured
+/// against.
+///
+/// Design section 7.1. The three are not degrees of confidence in one quantity;
+/// they are three different quantities that happen to share a unit, and a panel
+/// showing one while meaning another is the failure this enum exists to make
+/// impossible.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Provenance {
+    /// No reference has been established. **Relative only**: differences between
+    /// devices are valid, absolute values are not, and the panel says so.
+    #[default]
+    Unreferenced,
+    /// The user parked on a transmitter they trust and called its offset zero.
+    /// Relative to that transmitter, which is named on screen.
+    ///
+    /// Nothing sets this yet: the `[Y]` capture only recognises the standard
+    /// stations, which are traceable, and "a transmitter I trust" needs the user
+    /// to say which and how far they trust it. That control belongs with the
+    /// census work, where naming a transmitter is already the idiom.
+    #[allow(dead_code)]
+    Referenced,
+    /// Measured against a source whose accuracy is guaranteed by regulation.
+    /// Absolute, within the stated uncertainty.
+    Traceable,
+}
+
+impl Provenance {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Provenance::Unreferenced => "RELATIVE",
+            Provenance::Referenced => "REFERENCED",
+            Provenance::Traceable => "TRACEABLE",
+        }
+    }
+}
+
+/// Our own oscillator's error, once somebody has established it.
+///
+/// Design section 7.2: it carries its value, its uncertainty, its provenance
+/// **and its age**, and it expires. A reference measured an hour ago in a cold
+/// room is not a reference now, and the readings that depend on it fall back to
+/// [`Provenance::Unreferenced`] rather than silently going on being corrected.
+#[derive(Clone, Debug)]
+pub struct FrequencyReference {
+    /// Our oscillator's fractional error in ppm, and its standard uncertainty.
+    pub ppm: f64,
+    pub sigma_ppm: f64,
+    /// What it was measured against, as captured.
+    pub provenance: Provenance,
+    /// The transmitter's name, for the panel to show beside the number.
+    pub source: String,
+    /// When it was captured.
+    pub at: std::time::Instant,
+}
+
+impl FrequencyReference {
+    pub fn age(&self, now: std::time::Instant) -> std::time::Duration {
+        now.saturating_duration_since(self.at)
+    }
+
+    /// **Declared here, never computed in a panel.** The same rule every lab
+    /// panel's staleness already lives under: a panel that decided for itself
+    /// when a reading went cold would be one more place for the answer to
+    /// differ.
+    pub fn is_stale(&self, now: std::time::Instant) -> bool {
+        self.age(now).as_secs() >= REFERENCE_STALE_S
+    }
+
+    /// What this reference is worth *now*.
+    ///
+    /// A stale one is worth what no reference is worth, which is the whole point
+    /// of section 7.2: it does not quietly keep being applied.
+    pub fn effective(&self, now: std::time::Instant) -> Provenance {
+        if self.is_stale(now) {
+            Provenance::Unreferenced
+        } else {
+            self.provenance.clone()
+        }
+    }
+}
+
+impl RadioState {
+    /// Correct a raw ppm reading for our own oscillator, and say what the result
+    /// is worth.
+    ///
+    /// **Provenance travels with the number, and that is the whole function.**
+    /// Every ppm reading in the app is our error plus theirs; subtracting ours
+    /// is arithmetic, and the interesting part is that the answer's meaning
+    /// changes with what we know. With no reference, or a stale one, the raw
+    /// reading comes back untouched and marked relative - untouched rather than
+    /// corrected-by-zero, because a correction of zero is a claim and this is
+    /// the absence of one.
+    ///
+    /// The uncertainties add in quadrature: ours and theirs are independent.
+    #[allow(dead_code)] // the first ppm reading to correct arrives with an arc
+    pub fn corrected_ppm(
+        &self,
+        raw: crate::signal::dsp::uncertainty::Uncertain,
+        now: std::time::Instant,
+    ) -> (crate::signal::dsp::uncertainty::Uncertain, Provenance) {
+        use crate::signal::dsp::uncertainty::Uncertain;
+        let Some(r) = self.reference.as_ref().filter(|r| !r.is_stale(now)) else {
+            return (raw, Provenance::Unreferenced);
+        };
+        let corrected = Uncertain::from_variance(
+            raw.value() - r.ppm,
+            raw.sigma().powi(2) + r.sigma_ppm.powi(2),
+        );
+        (corrected, r.effective(now))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::dsp::uncertainty::Uncertain;
+    use std::time::Duration;
+
+    fn reference(ppm: f64, at: Instant, provenance: Provenance) -> FrequencyReference {
+        FrequencyReference {
+            ppm,
+            sigma_ppm: 0.3,
+            provenance,
+            source: "WWV 10 MHz".to_string(),
+            at,
+        }
+    }
+
+    fn radio(reference: Option<FrequencyReference>) -> RadioState {
+        let mut r = crate::state::SdrMetrics::fixture().radio;
+        r.reference = reference;
+        r
+    }
+
+    /// **Provenance travels with the number.**
+    ///
+    /// A reading is our oscillator's error plus theirs. Subtracting ours is
+    /// arithmetic; what makes it worth doing is that the answer's *meaning*
+    /// changes, and a panel that got the number without the meaning would print
+    /// an absolute claim it has no right to.
+    #[test]
+    fn a_reading_from_an_unreferenced_radio_is_relative_and_untouched() {
+        let now = Instant::now();
+        let raw = Uncertain::from_sigma(12.0, 0.4);
+
+        let (out, p) = radio(None).corrected_ppm(raw, now);
+        assert_eq!(p, Provenance::Unreferenced);
+        // Untouched, not corrected by zero: a correction of zero is a claim, and
+        // this is the absence of one. The uncertainty must not grow either.
+        assert_eq!(out.value(), 12.0);
+        assert_eq!(out.sigma(), 0.4);
+    }
+
+    #[test]
+    fn a_traceable_reference_makes_the_reading_absolute() {
+        let now = Instant::now();
+        let raw = Uncertain::from_sigma(12.0, 0.4);
+        let radio = radio(Some(reference(2.0, now, Provenance::Traceable)));
+
+        let (out, p) = radio.corrected_ppm(raw, now);
+        assert_eq!(p, Provenance::Traceable);
+        assert!((out.value() - 10.0).abs() < 1e-12, "ours comes off theirs");
+        // Independent, so in quadrature and never by simple addition.
+        let want = (0.4f64.powi(2) + 0.3f64.powi(2)).sqrt();
+        assert!((out.sigma() - want).abs() < 1e-12, "got {}", out.sigma());
+        assert!(
+            out.sigma() > 0.4,
+            "correcting cannot make a reading sharper"
+        );
+    }
+
+    /// **A stale reference falls back rather than quietly going on being
+    /// applied.** Design section 7.2, and the failure it prevents is the quiet
+    /// one: an hour-old correction from a cold room, still subtracted, on a
+    /// number nobody will re-derive.
+    #[test]
+    fn a_stale_reference_falls_back_to_unreferenced() {
+        let now = Instant::now();
+        let old = now - Duration::from_secs(REFERENCE_STALE_S + 1);
+        let raw = Uncertain::from_sigma(12.0, 0.4);
+        let radio = radio(Some(reference(2.0, old, Provenance::Traceable)));
+
+        let (out, p) = radio.corrected_ppm(raw, now);
+        assert_eq!(
+            p,
+            Provenance::Unreferenced,
+            "a stale reference is no reference"
+        );
+        assert_eq!(out.value(), 12.0, "and the old correction is not applied");
+        assert_eq!(out.sigma(), 0.4);
+    }
+
+    /// Expiry is declared by the state, on the interval the state names, and a
+    /// panel never works it out for itself.
+    #[test]
+    fn the_reference_expires_on_the_declared_interval() {
+        let now = Instant::now();
+        let fresh = reference(2.0, now, Provenance::Traceable);
+        assert!(!fresh.is_stale(now));
+        assert_eq!(fresh.effective(now), Provenance::Traceable);
+
+        // One second short of the interval is still a reference.
+        let nearly = reference(
+            2.0,
+            now - Duration::from_secs(REFERENCE_STALE_S - 1),
+            Provenance::Traceable,
+        );
+        assert!(!nearly.is_stale(now));
+        assert_eq!(nearly.effective(now), Provenance::Traceable);
+
+        // The interval itself is the boundary, and it is inclusive.
+        let expired = reference(
+            2.0,
+            now - Duration::from_secs(REFERENCE_STALE_S),
+            Provenance::Traceable,
+        );
+        assert!(expired.is_stale(now));
+        assert_eq!(expired.effective(now), Provenance::Unreferenced);
+        // The stored provenance is untouched: what expired is its worth now, not
+        // the record of what it was measured against.
+        assert_eq!(expired.provenance, Provenance::Traceable);
+        assert!(expired.age(now).as_secs() >= REFERENCE_STALE_S);
+    }
+
+    /// A reference the user established against a transmitter they trust is
+    /// still only as good as that trust, and it says so.
+    #[test]
+    fn a_referenced_radio_is_not_a_traceable_one() {
+        let now = Instant::now();
+        let radio = radio(Some(reference(2.0, now, Provenance::Referenced)));
+        let (_, p) = radio.corrected_ppm(Uncertain::from_sigma(12.0, 0.4), now);
+        assert_eq!(p, Provenance::Referenced);
+        assert_eq!(p.label(), "REFERENCED");
+        assert_eq!(Provenance::Unreferenced.label(), "RELATIVE");
     }
 }

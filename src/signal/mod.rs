@@ -12,6 +12,7 @@ pub mod net;
 pub mod noise_slope;
 pub mod rds;
 pub mod rds_demod;
+pub mod reference;
 mod stats;
 pub mod stream;
 

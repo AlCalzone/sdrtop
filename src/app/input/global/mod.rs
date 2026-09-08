@@ -40,6 +40,7 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         // ── The radio ───────────────────────────────────────────────────────
         KeyCode::Char(' ') => radio::toggle_rx(ctx),
         KeyCode::Char('r') => radio::reset_defaults(ctx),
+        KeyCode::Char('y') => radio::capture_reference(ctx),
         KeyCode::Char('f') => radio::begin_frequency_input(ctx),
         KeyCode::Char('s') => radio::begin_sample_rate_input(ctx),
         // Section-scoped, and it declines rather than absorbing: outside NET
@@ -423,7 +424,7 @@ mod tests {
         let mut h = Harness::new();
         let preset = h.engine.active_preset().to_string();
         let logs_before = metrics(&h.state).ui.log.len();
-        for c in ['x', 'y', 'z', '@'] {
+        for c in ['x', 'z', '@'] {
             assert_eq!(h.press(c), KeyAction::Continue);
         }
         assert_eq!(h.engine.active_preset(), preset);

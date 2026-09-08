@@ -137,6 +137,11 @@ pub const GLOBAL: &[(&str, &[Binding])] = &[
                 Some('m'),
                 "NET: survey the band, or lock where you are",
             ),
+            b(
+                "Y",
+                Some('y'),
+                "on a standard station: set the frequency reference",
+            ),
             b("W", Some('w'), "pause or resume the waterfall"),
             b("H", Some('h'), "freeze a ghost trace, or clear it"),
             b("Tab", None, "show or hide the footer"),

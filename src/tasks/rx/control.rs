@@ -23,6 +23,37 @@ use crate::state::{SdrMetrics, ADC_COMFORT_DBFS as AUTOGAIN_COMFORT_DBFS};
 use super::metrics::RateTracker;
 use super::publish::Throughput;
 
+pub(super) enum RxRequestTransition {
+    Unchanged(bool),
+    Started,
+    StartFailed(anyhow::Error),
+    Stopped(anyhow::Result<()>),
+}
+
+pub(super) fn request_transition(
+    rx_enabled: bool,
+    hw_rx_active: bool,
+    start: impl FnOnce() -> anyhow::Result<()>,
+    stop: impl FnOnce() -> anyhow::Result<()>,
+) -> RxRequestTransition {
+    match (rx_enabled, hw_rx_active) {
+        (true, false) => match start() {
+            Ok(()) => RxRequestTransition::Started,
+            Err(error) => RxRequestTransition::StartFailed(error),
+        },
+        (false, true) => RxRequestTransition::Stopped(stop()),
+        (_, active) => RxRequestTransition::Unchanged(active),
+    }
+}
+
+pub(super) fn unexpected_stop(
+    hw_rx_active: bool,
+    hw_streaming: bool,
+    cleanup: impl FnOnce() -> anyhow::Result<()>,
+) -> Option<anyhow::Result<()>> {
+    (hw_rx_active && !hw_streaming).then(cleanup)
+}
+
 /// Notice that the radio stopped streaming without being asked, and say so.
 ///
 /// Returns the new `hw_rx_active`. The device is told to stop as well: it has
@@ -34,10 +65,9 @@ pub(super) fn note_unexpected_stop(
     hw_rx_active: bool,
     hw_streaming: bool,
 ) -> bool {
-    if !hw_rx_active || hw_streaming {
+    let Some(_) = unexpected_stop(hw_rx_active, hw_streaming, || device.stop_rx()) else {
         return hw_rx_active;
-    }
-    let _ = device.stop_rx();
+    };
     let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
     m.radio.rx_enabled = false;
     m.radio.hw_streaming = false;
@@ -57,30 +87,29 @@ pub(super) fn apply_rx_request(
     rx_enabled: bool,
     hw_rx_active: bool,
 ) -> bool {
-    match (rx_enabled, hw_rx_active) {
-        (true, false) => match device.start_rx(Arc::clone(rx_ctx)) {
-            Ok(()) => {
-                // Fresh per-session throughput statistics, and a rate baseline
-                // that does not span the stop. Averaging across one would mix a
-                // silent stretch into the sample-rate offset.
-                tp.reset();
-                rate.reset();
-                let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                m.radio.rx_start_time = Some(Instant::now());
-                m.timing.jitter_session_max_us = 0;
-                m.push_log("RX streaming started");
-                true
-            }
-            Err(e) => {
-                let msg = format!("Error starting RX: {}", e);
-                let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                m.radio.rx_enabled = false;
-                m.push_log(msg);
-                false
-            }
-        },
-        (false, true) => {
-            let result = device.stop_rx();
+    match request_transition(
+        rx_enabled,
+        hw_rx_active,
+        || device.start_rx(Arc::clone(rx_ctx)),
+        || device.stop_rx(),
+    ) {
+        RxRequestTransition::Started => {
+            // Keep the sample-rate baseline within one RX session
+            tp.reset();
+            rate.reset();
+            let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+            m.radio.rx_start_time = Some(Instant::now());
+            m.timing.jitter_session_max_us = 0;
+            m.push_log("RX streaming started");
+            true
+        }
+        RxRequestTransition::StartFailed(error) => {
+            let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+            m.radio.rx_enabled = false;
+            m.push_log(format!("Error starting RX: {error}"));
+            false
+        }
+        RxRequestTransition::Stopped(result) => {
             rate.reset();
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
             m.radio.rx_start_time = None;
@@ -90,7 +119,7 @@ pub(super) fn apply_rx_request(
             }
             false
         }
-        (_, active) => active,
+        RxRequestTransition::Unchanged(active) => active,
     }
 }
 
@@ -252,6 +281,7 @@ pub(super) fn advance_noise_sweep(state: &Arc<Mutex<SdrMetrics>>, device: &Arc<d
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn the_comfort_window_is_closed_at_both_ends() {
@@ -270,5 +300,94 @@ mod tests {
             AUTOGAIN_COMFORT_DBFS.contains(&opt),
             "the optimum {opt} dBFS must be inside the comfort window"
         );
+    }
+
+    #[test]
+    fn request_transitions_call_only_the_needed_device_action() {
+        let starts = Cell::new(0);
+        let stops = Cell::new(0);
+        let started = request_transition(
+            true,
+            false,
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+            || {
+                stops.set(stops.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(started, RxRequestTransition::Started));
+        assert_eq!((starts.get(), stops.get()), (1, 0));
+
+        let stopped = request_transition(
+            false,
+            true,
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+            || {
+                stops.set(stops.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(stopped, RxRequestTransition::Stopped(Ok(()))));
+        assert_eq!((starts.get(), stops.get()), (1, 1));
+    }
+
+    #[test]
+    fn unchanged_requests_do_not_call_the_device() {
+        for active in [false, true] {
+            let transition = request_transition(
+                active,
+                active,
+                || panic!("unexpected start"),
+                || panic!("unexpected stop"),
+            );
+            assert!(matches!(transition, RxRequestTransition::Unchanged(value) if value == active));
+        }
+    }
+
+    #[test]
+    fn request_transitions_preserve_device_errors() {
+        let started = request_transition(
+            true,
+            false,
+            || anyhow::bail!("start failed"),
+            || panic!("unexpected stop"),
+        );
+        assert!(
+            matches!(started, RxRequestTransition::StartFailed(error) if error.to_string() == "start failed")
+        );
+
+        let stopped = request_transition(
+            false,
+            true,
+            || panic!("unexpected start"),
+            || anyhow::bail!("stop failed"),
+        );
+        assert!(
+            matches!(stopped, RxRequestTransition::Stopped(Err(error)) if error.to_string() == "stop failed")
+        );
+    }
+
+    #[test]
+    fn unexpected_stop_runs_cleanup_once() {
+        let cleanups = Cell::new(0);
+        let result = unexpected_stop(true, false, || {
+            cleanups.set(cleanups.get() + 1);
+            anyhow::bail!("cleanup failed")
+        });
+        assert!(matches!(result, Some(Err(_))));
+        assert_eq!(cleanups.get(), 1);
+        for (active, streaming) in [(false, false), (false, true), (true, true)] {
+            assert!(unexpected_stop(active, streaming, || panic!("unexpected cleanup")).is_none());
+        }
+        assert!(matches!(
+            unexpected_stop(true, false, || Ok(())),
+            Some(Ok(()))
+        ));
     }
 }

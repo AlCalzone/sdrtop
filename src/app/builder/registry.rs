@@ -386,6 +386,8 @@ mod tests {
         m.waterfall = WaterfallState::new(
             WATERFALL_MIN_ROWS,
             crate::palette::WaterfallPalette::default(),
+            m.caps.level_min_db,
+            m.caps.level_max_db,
         );
         for i in 0..WATERFALL_MIN_ROWS {
             let bins: Vec<f32> = (0..256)

@@ -32,6 +32,18 @@ fn strongest_bin_frequency(frame: &crate::state::FftFrame) -> Option<u64> {
         .filter(|frequency| *frequency >= 0.0)
         .map(|frequency| frequency.round() as u64)
 }
+const LEVEL_ZOOM_STEP_DB: f32 = 10.0;
+const LEVEL_MIN_WINDOW_DB: f32 = 20.0;
+fn adjust_level_floor(
+    floor: f32,
+    ceiling: f32,
+    delta: f32,
+    caps: &crate::hardware::DeviceCapabilities,
+) -> f32 {
+    let window = LEVEL_MIN_WINDOW_DB.min(caps.level_max_db - caps.level_min_db);
+    let highest_floor = (ceiling.min(caps.level_max_db) - window).max(caps.level_min_db);
+    (floor + delta).clamp(caps.level_min_db, highest_floor)
+}
 
 // ── Spectrum focus keys ───────────────────────────────────────────────────────
 
@@ -110,7 +122,12 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Up => {
             let mut m = metrics(state);
-            let new_min = (m.spectrum.y_min + 10.0).min(m.spectrum.y_max - 20.0);
+            let new_min = adjust_level_floor(
+                m.spectrum.y_min,
+                m.spectrum.y_max,
+                LEVEL_ZOOM_STEP_DB,
+                &m.caps,
+            );
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
             let unit = m.caps.level_unit.label();
@@ -118,7 +135,12 @@ pub(super) fn spectrum(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.spectrum.y_min - 10.0).max(m.caps.level_min_db);
+            let new_min = adjust_level_floor(
+                m.spectrum.y_min,
+                m.spectrum.y_max,
+                -LEVEL_ZOOM_STEP_DB,
+                &m.caps,
+            );
             m.spectrum.y_min = new_min;
             let ymax = m.spectrum.y_max;
             let unit = m.caps.level_unit.label();
@@ -222,7 +244,12 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
     match key.code {
         KeyCode::Up => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min + 10.0).min(m.waterfall.db_max - 20.0);
+            let new_min = adjust_level_floor(
+                m.waterfall.db_min,
+                m.waterfall.db_max,
+                LEVEL_ZOOM_STEP_DB,
+                &m.caps,
+            );
             m.waterfall.db_min = new_min;
             let max = m.waterfall.db_max;
             let unit = m.caps.level_unit.label();
@@ -232,7 +259,12 @@ pub(super) fn waterfall(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         }
         KeyCode::Down => {
             let mut m = metrics(state);
-            let new_min = (m.waterfall.db_min - 10.0).max(m.caps.level_min_db);
+            let new_min = adjust_level_floor(
+                m.waterfall.db_min,
+                m.waterfall.db_max,
+                -LEVEL_ZOOM_STEP_DB,
+                &m.caps,
+            );
             m.waterfall.db_min = new_min;
             let max = m.waterfall.db_max;
             let unit = m.caps.level_unit.label();
@@ -358,8 +390,33 @@ mod tests {
     }
 
     #[test]
+    fn either_zoom_direction_keeps_the_floor_within_device_limits() {
+        let mut caps = crate::hardware::native::hackrf::caps();
+        for (min, max) in [(-120.0, 0.0), (-10.0, 0.0), (-10.5, -10.0)] {
+            caps.level_min_db = min;
+            caps.level_max_db = max;
+            for delta in [-LEVEL_ZOOM_STEP_DB, LEVEL_ZOOM_STEP_DB] {
+                for floor in [min - 100.0, min, max, max + 100.0] {
+                    for ceiling in [max - 5.0, max, max + 100.0] {
+                        let adjusted = adjust_level_floor(floor, ceiling, delta, &caps);
+                        assert!((min..max).contains(&adjusted));
+                        assert!(adjusted <= max - (max - min).min(20.0));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn level_zoom_uses_device_bounds_and_preserves_iq_log_text() {
-        for (min, max) in [(-120.0, 0.0), (-110.0, -10.0)] {
+        for (min, max) in [
+            (-120.0_f32, 0.0),
+            (-120.0, 20.0),
+            (-110.0, -10.0),
+            (-10.0, 0.0),
+            (-10.5, -10.0),
+        ] {
+            let highest_floor = max - (max - min).min(20.0_f32);
             for is_waterfall in [false, true] {
                 let mut m = SdrMetrics::fixture();
                 Arc::make_mut(&mut m.caps).level_min_db = min;
@@ -398,7 +455,10 @@ mod tests {
                 press(KeyCode::Up);
                 assert_eq!(
                     metrics(&state).ui.log.back().unwrap().text.as_ref(),
-                    format!("{prefix}: {:.0}\u{2026}{max:.0} dBFS", min + 10.0)
+                    format!(
+                        "{prefix}: {:.0}\u{2026}{max:.0} dBFS",
+                        (min + 10.0).min(highest_floor)
+                    )
                 );
                 for _ in 0..20 {
                     press(KeyCode::Up);
@@ -410,7 +470,7 @@ mod tests {
                     } else {
                         m.spectrum.y_min
                     };
-                    assert_eq!(floor, max - 20.0);
+                    assert_eq!(floor, highest_floor);
                 }
                 for _ in 0..20 {
                     press(KeyCode::Down);

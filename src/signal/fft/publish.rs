@@ -13,7 +13,7 @@
 //! comment, the way `tasks/rx/` makes its two lock blocks visible.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::state::{FftFrame, SdrMetrics};
 
@@ -25,10 +25,6 @@ use super::analysis::Reading;
 /// lockstep. Signal metrics stay at full rate.
 const ROWS_PER_WATERFALL_LINE: u32 = 2;
 
-/// Never let the drawn frame age past the panels' 500 ms STALE threshold, even at
-/// large frames or row strides.
-const SPECTRUM_STALE_GUARD: Duration = Duration::from_millis(400);
-
 /// How much of a marker's channel the measured-bandwidth cut-offs bracket.
 const MARKER_BW_LOW: f32 = 0.005;
 const MARKER_BW_HIGH: f32 = 0.995;
@@ -36,30 +32,32 @@ const MARKER_BW_HIGH: f32 = 0.995;
 /// The display-paced spectrum refresh's state, carried between frames.
 pub(super) struct Pacing {
     rows_since_spectrum: u32,
-    last_update: Instant,
+    last_update: Option<Instant>,
 }
 
 impl Pacing {
     pub(super) fn new() -> Self {
         Self {
             rows_since_spectrum: 0,
-            last_update: Instant::now()
-                .checked_sub(SPECTRUM_STALE_GUARD)
-                .unwrap_or_else(Instant::now),
+            last_update: None,
         }
     }
 
     /// Whether to redraw the spectrum: there is none yet, a visible waterfall line
     /// has gone by, or it would otherwise age toward `[STALE]`.
-    fn due(&self, has_frame: bool) -> bool {
+    fn due(&self, has_frame: bool, trace_stale_ms: u128, now: Instant) -> bool {
+        // Reserve one fifth of the trace-age budget for display scheduling
+        let guard_ms = trace_stale_ms - trace_stale_ms.div_ceil(5);
         !has_frame
             || self.rows_since_spectrum >= ROWS_PER_WATERFALL_LINE
-            || self.last_update.elapsed() >= SPECTRUM_STALE_GUARD
+            || self
+                .last_update
+                .is_none_or(|last| now.duration_since(last).as_millis() >= guard_ms)
     }
 
-    fn mark(&mut self) {
+    fn mark(&mut self, now: Instant) {
         self.rows_since_spectrum = 0;
-        self.last_update = Instant::now();
+        self.last_update = Some(now);
     }
 }
 
@@ -118,8 +116,9 @@ pub(super) fn publish(
         pacing.rows_since_spectrum += 1;
     }
 
-    if pacing.due(m.waterfall.last_fft.is_some()) {
-        pacing.mark();
+    let now = Instant::now();
+    if pacing.due(m.waterfall.last_fft.is_some(), m.caps.trace_stale_ms, now) {
+        pacing.mark(now);
         refresh_spectrum(&mut m, &snap);
     }
     Some(alpha)
@@ -256,6 +255,37 @@ fn refresh_spectrum(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
 mod tests {
     use super::*;
     use crate::state::SpectrumMarker;
+    use std::time::Duration;
+
+    #[test]
+    fn pacing_reserves_one_fifth_of_each_trace_age_budget() {
+        let now = Instant::now();
+        let mut pacing = Pacing::new();
+        for (budget, guard_ms) in [(500, 400), (100, 80), (5_000, 4_000), (2, 1)] {
+            pacing.mark(now);
+            assert!(!pacing.due(true, budget, now + Duration::from_millis(guard_ms - 1)));
+            assert!(pacing.due(true, budget, now + Duration::from_millis(guard_ms)));
+        }
+        assert!(pacing.due(true, 1, now));
+        assert!(!pacing.due(true, u128::MAX, now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn pacing_still_refreshes_initial_frames_and_visible_waterfall_lines() {
+        let now = Instant::now();
+        let mut pacing = Pacing::new();
+        assert!(pacing.due(true, 500, now));
+        pacing.mark(now);
+        assert!(pacing.due(false, 500, now));
+        assert!(!pacing.due(true, 500, now));
+        pacing.rows_since_spectrum = 1;
+        assert!(!pacing.due(true, 500, now));
+        pacing.rows_since_spectrum = 2;
+        assert!(pacing.due(true, 500, now));
+        pacing.mark(now);
+        assert_eq!(pacing.rows_since_spectrum, 0);
+        assert!(!pacing.due(true, 500, now));
+    }
 
     fn marker(freq_hz: u64, channel_bw_hz: u64, measured_bw_hz: Option<u64>) -> SpectrumMarker {
         SpectrumMarker {

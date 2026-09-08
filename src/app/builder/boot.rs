@@ -301,7 +301,7 @@ pub fn resolve_gains(radio: &RadioConfig, gm: &GainModel) -> (Vec<f64>, Vec<Stri
 /// Everything not reached through `boot` is the same on both startups by
 /// definition: history ring buffers sized but empty, every measurement at its
 /// no-measurement value.
-pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
+pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> anyhow::Result<SdrMetrics> {
     let Boot {
         caps,
         tuning,
@@ -311,7 +311,9 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         recall,
     } = boot;
 
-    SdrMetrics {
+    caps.validate_display()?;
+
+    Ok(SdrMetrics {
         radio: RadioState {
             frequency: tuning.frequency_hz,
             config_sample_rate: tuning.sample_rate,
@@ -372,15 +374,12 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         // Clamped, not trusted: `save_config` writes the live buffer depth back,
         // so a config written before the floor existed carries a value too small
         // to fill a full-height waterfall. See [`WATERFALL_MIN_ROWS`].
-        waterfall: {
-            let mut waterfall = WaterfallState::new(
-                cfg.display.waterfall_max_rows.max(WATERFALL_MIN_ROWS),
-                cfg.display.waterfall_palette,
-            );
-            waterfall.db_min = caps.level_min_db;
-            waterfall.db_max = caps.level_max_db;
-            waterfall
-        },
+        waterfall: WaterfallState::new(
+            cfg.display.waterfall_max_rows.max(WATERFALL_MIN_ROWS),
+            cfg.display.waterfall_palette,
+            caps.level_min_db,
+            caps.level_max_db,
+        ),
         system: SystemState {
             board_name: Arc::from(identity.board_name.as_str()),
             serial: Arc::from(identity.serial.as_str()),
@@ -411,7 +410,7 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> SdrMetrics {
         net: crate::state::NetState::default(),
         caps,
         acc: Accumulators::default(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -569,6 +568,7 @@ mod tests {
                 ),
             ),
         ] {
+            let m = m.unwrap();
             assert!(!m.radio.rx_enabled);
             assert!(!m.radio.hw_streaming);
             assert_eq!(m.radio.actual_sample_rate, 0);
@@ -597,7 +597,8 @@ mod tests {
                     tuning,
                     &hardware::DeviceInfo::default(),
                 ),
-            );
+            )
+            .unwrap();
             assert!(!metrics.radio.rx_enabled);
             assert!(!metrics.radio.hw_streaming);
             assert_eq!(metrics.spectrum.y_min, -120.0);
@@ -625,13 +626,86 @@ mod tests {
                 tuning,
                 &hardware::DeviceInfo::default(),
             ),
-        );
+        )
+        .unwrap();
         assert!(!metrics.radio.rx_enabled);
         assert!(!metrics.radio.hw_streaming);
         assert_eq!(metrics.spectrum.y_min, -110.0);
         assert_eq!(metrics.spectrum.y_max, -10.0);
         assert_eq!(metrics.waterfall.db_min, -110.0);
         assert_eq!(metrics.waterfall.db_max, -10.0);
+    }
+
+    #[test]
+    fn startup_rejects_invalid_display_capabilities() {
+        let cfg = AppConfig::default();
+        for (min, max, budget, error) in [
+            (0.0, 0.0, 500, "Invalid display level bounds"),
+            (0.0, -10.0, 500, "Invalid display level bounds"),
+            (f32::NAN, 0.0, 500, "Invalid display level bounds"),
+            (-120.0, f32::NAN, 500, "Invalid display level bounds"),
+            (f32::NEG_INFINITY, 0.0, 500, "Invalid display level bounds"),
+            (-120.0, f32::INFINITY, 500, "Invalid display level bounds"),
+            (-f32::MAX, f32::MAX, 500, "Invalid display level bounds"),
+            (-120.0, 0.0, 0, "Invalid trace_stale_ms"),
+        ] {
+            let mut caps = hardware::native::hackrf::caps();
+            caps.level_min_db = min;
+            caps.level_max_db = max;
+            caps.trace_stale_ms = budget;
+            let tuning = resolve_tuning(&cfg.radio, &caps);
+            let result = initial_metrics(
+                &cfg,
+                Boot::normal(
+                    &cfg,
+                    Arc::new(caps),
+                    tuning,
+                    &hardware::DeviceInfo::default(),
+                ),
+            );
+            assert!(result
+                .err()
+                .expect("invalid caps must fail")
+                .to_string()
+                .contains(error));
+        }
+    }
+
+    #[test]
+    fn startup_accepts_valid_display_capabilities() {
+        let cfg = AppConfig::default();
+        for (min, max, budget) in [(-10.0, 0.0, 1), (-120.0, 20.0, 5_000)] {
+            let mut caps = hardware::native::hackrf::caps();
+            caps.level_min_db = min;
+            caps.level_max_db = max;
+            caps.trace_stale_ms = budget;
+            let tuning = resolve_tuning(&cfg.radio, &caps);
+            let m = initial_metrics(
+                &cfg,
+                Boot::normal(
+                    &cfg,
+                    Arc::new(caps),
+                    tuning,
+                    &hardware::DeviceInfo::default(),
+                ),
+            )
+            .unwrap();
+            assert_eq!((m.spectrum.y_min, m.spectrum.y_max), (min, max));
+            assert_eq!((m.waterfall.db_min, m.waterfall.db_max), (min, max));
+            assert_eq!(m.caps.trace_stale_ms, budget);
+        }
+    }
+
+    #[test]
+    fn observer_startup_also_rejects_invalid_display_capabilities() {
+        let cfg = AppConfig::default();
+        let mut boot = Boot::observer(&cfg, &sysinfo(), profile(hardware::DeviceKind::HackRf));
+        Arc::make_mut(&mut boot.caps).trace_stale_ms = 0;
+        assert!(initial_metrics(&cfg, boot)
+            .err()
+            .expect("invalid observer caps must fail")
+            .to_string()
+            .contains("Invalid trace_stale_ms"));
     }
 
     /// A config that asks for less waterfall history than a full-height panel
@@ -647,7 +721,8 @@ mod tests {
         let m = initial_metrics(
             &cfg,
             Boot::observer(&cfg, &sysinfo(), profile(hardware::DeviceKind::HackRf)),
-        );
+        )
+        .unwrap();
         assert_eq!(
             m.waterfall.buffer.max_rows,
             crate::state::WATERFALL_MIN_ROWS
@@ -662,7 +737,8 @@ mod tests {
         let m = initial_metrics(
             &cfg,
             Boot::observer(&cfg, &sysinfo(), profile(hardware::DeviceKind::HackRf)),
-        );
+        )
+        .unwrap();
         assert_eq!(m.waterfall.buffer.max_rows, 4_096);
     }
 
@@ -685,14 +761,16 @@ mod tests {
                 resolve_tuning(&cfg.radio, &hardware::native::hackrf::caps()),
                 &hardware::DeviceInfo::default(),
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(live.spectrum.markers.len(), 1);
         assert_eq!(live.ui.recall[0], Some(100_000_000));
 
         let obs = initial_metrics(
             &cfg,
             Boot::observer(&cfg, &sysinfo(), profile(hardware::DeviceKind::HackRf)),
-        );
+        )
+        .unwrap();
         assert!(obs.spectrum.markers.is_empty());
         assert!(obs.ui.recall.iter().all(|s| s.is_none()));
         assert!(obs.observer.active);

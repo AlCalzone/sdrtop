@@ -251,10 +251,16 @@ pub struct WaterfallState {
 }
 
 impl WaterfallState {
-    pub fn new(max_rows: usize, palette: crate::palette::WaterfallPalette) -> Self {
+    /// Initialize the view with finite ordered bounds from validated device capabilities
+    pub fn new(
+        max_rows: usize,
+        palette: crate::palette::WaterfallPalette,
+        db_min: f32,
+        db_max: f32,
+    ) -> Self {
         Self {
-            db_min: -120.0,
-            db_max: 0.0,
+            db_min,
+            db_max,
             scroll_offset: 0,
             cursor_freq: None,
             hz_zoom: 1,

@@ -135,8 +135,8 @@ pub fn handle_key(
 pub(super) fn complete_device_option(
     state: &Arc<Mutex<SdrMetrics>>,
     completion: DeviceOptionCompletion,
-) {
-    menu::complete_device_option(state, completion);
+) -> bool {
+    menu::complete_device_option(state, completion)
 }
 
 /// Fold an uppercase letter key onto its lowercase twin, leaving every other key

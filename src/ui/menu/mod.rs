@@ -216,6 +216,7 @@ mod tests {
     use super::*;
     use crate::config::LayoutConfig;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::Arc;
 
     /// Render the menu at a fixed size and hand back the buffer as lines.
     ///
@@ -413,7 +414,7 @@ mod tests {
         };
         let mut metrics = SdrMetrics::fixture();
         for index in 0..6 {
-            metrics.device_options.push(crate::hardware::DeviceOption {
+            Arc::make_mut(&mut metrics.device_options).push(crate::hardware::DeviceOption {
                 id: format!("option-{index}"),
                 label: format!("Option {index}"),
                 choices: vec!["Off".into(), "On".into()],

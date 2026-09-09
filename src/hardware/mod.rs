@@ -36,42 +36,38 @@ pub use traits::{
     IQ_TRACE_STALE_MS,
 };
 
-pub(crate) fn sanitize_device_options(
-    options: Vec<DeviceOption>,
-) -> (Vec<DeviceOption>, Vec<String>) {
-    let mut valid = Vec::with_capacity(options.len());
-    let mut notes = Vec::new();
-    for mut option in options {
-        let name = if option.label.is_empty() {
-            option.id.as_str()
-        } else {
-            option.label.as_str()
-        };
-        let Some(first) = option.choices.first().cloned() else {
-            notes.push(format!(
-                "Warning: device option '{name}' has no choices. Hiding it."
-            ));
-            continue;
-        };
-        if !option.choices.contains(&option.selected_choice) {
-            notes.push(format!(
-                "Warning: device option '{name}' selected unavailable choice '{}'. Using '{first}'.",
-                option.selected_choice
-            ));
-            option.selected_choice = first;
+pub(crate) fn debug_assert_device_options(options: &[DeviceOption]) {
+    #[cfg(debug_assertions)]
+    {
+        let mut ids = std::collections::HashSet::with_capacity(options.len());
+        for option in options {
+            debug_assert!(
+                !option.choices.is_empty(),
+                "device option '{}' must advertise a choice",
+                option.id
+            );
+            debug_assert!(
+                option.choices.contains(&option.selected_choice),
+                "device option '{}' selected an unavailable choice",
+                option.id
+            );
+            debug_assert!(
+                ids.insert(option.id.as_str()),
+                "device option IDs must be unique within a snapshot"
+            );
         }
-        valid.push(option);
     }
-    (valid, notes)
+    #[cfg(not(debug_assertions))]
+    let _ = options;
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 
-    fn option(choices: &[&str], selected: &str) -> DeviceOption {
+    fn option(id: &str, choices: &[&str], selected: &str) -> DeviceOption {
         DeviceOption {
-            id: "bandwidth".into(),
+            id: id.into(),
             label: "Bandwidth".into(),
             choices: choices.iter().map(|choice| (*choice).into()).collect(),
             selected_choice: selected.into(),
@@ -79,22 +75,23 @@ mod tests {
     }
 
     #[test]
-    fn options_without_choices_are_hidden_and_reported() {
-        let (options, notes) = sanitize_device_options(vec![option(&[], "")]);
-
-        assert!(options.is_empty());
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("Bandwidth"));
-        assert!(notes[0].contains("no choices"));
+    #[should_panic(expected = "must advertise a choice")]
+    fn option_contract_rejects_an_empty_choice_list() {
+        debug_assert_device_options(&[option("bandwidth", &[], "")]);
     }
 
     #[test]
-    fn an_unavailable_selected_choice_uses_the_first_choice() {
-        let (options, notes) =
-            sanitize_device_options(vec![option(&["Narrow", "Wide"], "Missing")]);
+    #[should_panic(expected = "selected an unavailable choice")]
+    fn option_contract_rejects_an_unavailable_selection() {
+        debug_assert_device_options(&[option("bandwidth", &["Narrow", "Wide"], "Missing")]);
+    }
 
-        assert_eq!(options[0].selected_choice, "Narrow");
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("unavailable choice"));
+    #[test]
+    #[should_panic(expected = "must be unique")]
+    fn option_contract_rejects_duplicate_ids() {
+        debug_assert_device_options(&[
+            option("bandwidth", &["Narrow"], "Narrow"),
+            option("bandwidth", &["Wide"], "Wide"),
+        ]);
     }
 }

@@ -132,24 +132,39 @@ pub struct LogEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum DeviceOptionUpdate {
     #[default]
-    Ready,
+    Idle,
     Pending {
-        request_id: u64,
-        id: String,
-        label: String,
-        choice: String,
+        request: crate::event::DeviceOptionRequest,
+        quit_requested: bool,
     },
-    Completed {
-        request_id: u64,
+    Failed {
         id: String,
-        choice: String,
     },
-    Error {
-        request_id: u64,
-        id: String,
-        choice: String,
-        message: String,
-    },
+}
+
+impl DeviceOptionUpdate {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                quit_requested: true,
+                ..
+            }
+        )
+    }
+
+    pub fn request_quit(&mut self) -> bool {
+        let Self::Pending { quit_requested, .. } = self else {
+            return false;
+        };
+        let already_requested = *quit_requested;
+        *quit_requested = true;
+        already_requested
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -219,8 +234,6 @@ pub struct UiState {
     /// See [`MenuState`].
     pub menu: Option<MenuState>,
     pub device_option_update: DeviceOptionUpdate,
-    pub next_device_option_request: u64,
-    pub quit_after_device_option: bool,
 }
 
 /// Which pane the menu's right column is showing.
@@ -355,8 +368,6 @@ impl Default for UiState {
             log_overlay: false,
             menu: None,
             device_option_update: DeviceOptionUpdate::default(),
-            next_device_option_request: 0,
-            quit_after_device_option: false,
         }
     }
 }

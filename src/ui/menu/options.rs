@@ -131,10 +131,10 @@ fn option_line(
     let choice_width = content_width - label_width;
     let label = fit_cell(&option.label, label_width);
     let shown = match update {
-        DeviceOptionUpdate::Pending { id, choice, .. } if id == &option.id => {
-            format!("{} -> {choice}...", option.selected_choice)
+        DeviceOptionUpdate::Pending { request, .. } if request.id == option.id => {
+            format!("{} -> {}...", option.selected_choice, request.choice)
         }
-        DeviceOptionUpdate::Error { id, .. } if id == &option.id => {
+        DeviceOptionUpdate::Failed { id } if id == &option.id => {
             format!("{} (failed)", option.selected_choice)
         }
         _ => option.selected_choice.clone(),
@@ -197,6 +197,7 @@ pub fn render(f: &mut Frame, area: Rect, m: &SdrMetrics, selected: usize, theme:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// The pane's whole job right now is to name itself and admit it is empty,
     /// so both halves are worth pinning.
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn options_name_their_current_choices() {
         let mut m = SdrMetrics::fixture();
-        m.device_options.push(crate::hardware::DeviceOption {
+        Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
             id: "bandwidth".into(),
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
@@ -256,7 +257,7 @@ mod tests {
     fn the_selected_option_stays_in_a_short_viewport() {
         let mut m = SdrMetrics::fixture();
         for index in 0..6 {
-            m.device_options.push(crate::hardware::DeviceOption {
+            Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
                 id: format!("option-{index}"),
                 label: format!("Option {index}"),
                 choices: vec!["Off".into(), "On".into()],
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn the_selected_option_uses_the_only_available_row() {
         let mut m = SdrMetrics::fixture();
-        m.device_options.push(crate::hardware::DeviceOption {
+        Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
             id: "bandwidth".into(),
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
@@ -295,7 +296,7 @@ mod tests {
     #[test]
     fn backend_text_never_exceeds_the_pane_width() {
         let mut m = SdrMetrics::fixture();
-        m.device_options.push(crate::hardware::DeviceOption {
+        Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
             id: "long".into(),
             label: "A device-provided label that is much too long".into(),
             choices: vec!["A device-provided choice that is much too long".into()],
@@ -316,17 +317,19 @@ mod tests {
     #[test]
     fn pending_change_keeps_the_accepted_choice_visible() {
         let mut m = SdrMetrics::fixture();
-        m.device_options.push(crate::hardware::DeviceOption {
+        Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
             id: "bandwidth".into(),
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Narrow".into(),
         });
         m.ui.device_option_update = DeviceOptionUpdate::Pending {
-            request_id: 1,
-            id: "bandwidth".into(),
-            label: "Bandwidth".into(),
-            choice: "Wide".into(),
+            request: crate::event::DeviceOptionRequest {
+                id: "bandwidth".into(),
+                label: "Bandwidth".into(),
+                choice: "Wide".into(),
+            },
+            quit_requested: false,
         };
 
         let text = lines(&m, 0, 80, 1, &crate::Theme::sdr())
@@ -340,17 +343,14 @@ mod tests {
     #[test]
     fn failed_change_keeps_the_accepted_choice_visible() {
         let mut m = SdrMetrics::fixture();
-        m.device_options.push(crate::hardware::DeviceOption {
+        Arc::make_mut(&mut m.device_options).push(crate::hardware::DeviceOption {
             id: "bandwidth".into(),
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Narrow".into(),
         });
-        m.ui.device_option_update = DeviceOptionUpdate::Error {
-            request_id: 1,
+        m.ui.device_option_update = DeviceOptionUpdate::Failed {
             id: "bandwidth".into(),
-            choice: "Wide".into(),
-            message: "device rejected choice".into(),
         };
 
         let text = lines(&m, 0, 80, 1, &crate::Theme::sdr())

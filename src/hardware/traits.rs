@@ -66,6 +66,10 @@ pub struct DirectSweepConfig {
 }
 
 /// One configurable choice exposed by a device.
+///
+/// Every snapshot must use unique IDs. Each option must advertise at least one
+/// choice. `selected_choice` must be one of those choices. Choice strings are
+/// stable values passed back to [`SdrDevice::set_option`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceOption {
     pub id: String,

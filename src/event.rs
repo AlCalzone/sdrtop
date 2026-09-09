@@ -10,7 +10,6 @@ use crate::hardware::DeviceOption;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceOptionRequest {
-    pub request_id: u64,
     pub id: String,
     pub label: String,
     pub choice: String,
@@ -18,7 +17,6 @@ pub struct DeviceOptionRequest {
 
 #[derive(Debug)]
 pub struct DeviceOptionCompletion {
-    pub request: DeviceOptionRequest,
     pub result: Result<Vec<DeviceOption>, String>,
 }
 
@@ -65,5 +63,10 @@ impl EventStream {
 
     pub fn sender(&self) -> Sender<AppEvent> {
         self.tx.clone()
+    }
+
+    #[cfg(test)]
+    pub fn from_channel(tx: Sender<AppEvent>, rx: Receiver<AppEvent>) -> Self {
+        Self { tx, rx }
     }
 }

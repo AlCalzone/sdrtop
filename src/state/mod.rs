@@ -81,7 +81,7 @@ pub struct SdrMetrics {
     /// rendering (gain model, BB filter / Friis applicability, ranges). Shared
     /// (Arc) so the per-frame `SdrMetrics` clone stays cheap.
     pub caps: std::sync::Arc<crate::hardware::DeviceCapabilities>,
-    pub device_options: Vec<crate::hardware::DeviceOption>,
+    pub device_options: std::sync::Arc<Vec<crate::hardware::DeviceOption>>,
     pub(crate) acc: Accumulators,
 }
 

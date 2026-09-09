@@ -333,13 +333,20 @@ fn trace_covers_requested_range(frequencies_hz: &[u64], start_hz: u64, stop_hz: 
         return false;
     }
     let points = frequencies_hz.len() as u64;
-    let remainder = stop_hz.saturating_sub(start_hz) % points;
+    let requested_span = stop_hz.saturating_sub(start_hz);
+    let remainder = requested_span % points;
+    let rounding_tolerance = requested_span
+        .div_ceil(1_u64 << (f32::MANTISSA_DIGITS - 1))
+        .saturating_add(1);
     let max_spacing = frequencies_hz
         .windows(2)
         .map(|pair| pair[1] - pair[0])
         .max()
         .unwrap_or_default();
-    max_spacing > 0 && stop_hz.saturating_sub(last) <= max_spacing.saturating_add(remainder)
+    let allowed_gap = max_spacing
+        .saturating_add(remainder)
+        .saturating_add(rounding_tolerance);
+    max_spacing > 0 && stop_hz.saturating_sub(last) <= allowed_gap
 }
 
 pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(f64, f64)> {
@@ -769,6 +776,24 @@ mod tests {
             &frequencies,
             400_000_000,
             500_000_000,
+        ));
+    }
+
+    #[test]
+    fn native_half_open_grid_allows_f32_offset_rounding() {
+        let start_hz = 100_000;
+        let stop_hz = 270_508_336;
+        let points = 450;
+        let step = ((stop_hz - start_hz) / points) as f32;
+        let frequencies = (0..points)
+            .map(|index| start_hz + (step * index as f32) as u64)
+            .collect::<Vec<_>>();
+
+        assert_eq!(frequencies.last(), Some(&269_907_232));
+        assert!(trace_covers_requested_range(
+            &frequencies,
+            start_hz,
+            stop_hz,
         ));
     }
 }

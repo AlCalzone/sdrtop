@@ -332,9 +332,14 @@ fn trace_covers_requested_range(frequencies_hz: &[u64], start_hz: u64, stop_hz: 
     if first != start_hz || last > stop_hz {
         return false;
     }
-    let intervals = frequencies_hz.len().saturating_sub(1) as u64;
-    let point_spacing = last.saturating_sub(first) / intervals;
-    point_spacing > 0 && stop_hz.saturating_sub(last) <= point_spacing
+    let points = frequencies_hz.len() as u64;
+    let remainder = stop_hz.saturating_sub(start_hz) % points;
+    let max_spacing = frequencies_hz
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .unwrap_or_default();
+    max_spacing > 0 && stop_hz.saturating_sub(last) <= max_spacing.saturating_add(remainder)
 }
 
 pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(f64, f64)> {
@@ -745,6 +750,25 @@ mod tests {
             &[100_000_000, 100_500_000, 101_000_000],
             90_000_000,
             110_000_000,
+        ));
+        assert!(!trace_covers_requested_range(
+            &[100_000_000, 100_250_000, 100_500_000],
+            100_000_000,
+            101_000_000,
+        ));
+    }
+
+    #[test]
+    fn native_half_open_sweep_grid_covers_requested_range() {
+        let frequencies = (0..450)
+            .map(|index| 400_000_000 + (222_222.0_f32 * index as f32) as u64)
+            .collect::<Vec<_>>();
+
+        assert_eq!(frequencies.last(), Some(&499_777_680));
+        assert!(trace_covers_requested_range(
+            &frequencies,
+            400_000_000,
+            500_000_000,
         ));
     }
 }

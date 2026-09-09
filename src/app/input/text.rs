@@ -200,10 +200,14 @@ pub(super) fn sweep_range(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, is_star
                     let (start, stop) = (m.sweep.config.start_hz, m.sweep.config.stop_hz);
                     let ordered = if is_start { hz < stop } else { hz > start };
                     if ordered {
+                        let changed = if is_start { hz != start } else { hz != stop };
                         if is_start {
                             m.sweep.config.start_hz = hz;
                         } else {
                             m.sweep.config.stop_hz = hz;
+                        }
+                        if changed {
+                            m.sweep.generation = m.sweep.generation.wrapping_add(1);
                         }
                         m.sweep.cycle_count = 0;
                         m.sweep.positions_done = 0;

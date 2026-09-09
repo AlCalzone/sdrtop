@@ -983,6 +983,9 @@ impl Panel for LabBannerPanel {
     fn name(&self) -> &'static str {
         "lab_banner"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (20, 1)
     }

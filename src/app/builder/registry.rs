@@ -147,6 +147,11 @@ impl App {
         acquisition: crate::hardware::AcquisitionKind,
     ) -> anyhow::Result<Vec<String>> {
         let mut warnings = Vec::new();
+        if acquisition == crate::hardware::AcquisitionKind::PowerTrace {
+            if let Some(preset) = config.presets.get_mut("lab_sweep") {
+                preset.panels.retain(|panel| panel.name != "signal_metrics");
+            }
+        }
         config.presets.retain(|name, preset| {
             if preset.panels.is_empty() {
                 warnings.push(format!("Preset '{name}' is unavailable because it has no panels"));
@@ -540,8 +545,40 @@ mod tests {
                 ..Default::default()
             },
         );
+        user.insert(
+            "my_sweep".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "header_slim".into(),
+                        position: crate::config::Position::Top,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "sweep_panel".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "system_resources".into(),
+                        position: crate::config::Position::Right,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "footer".into(),
+                        position: crate::config::Position::Bottom,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
 
-        let (engine, _) = App::build_ui_for(
+        let (mut engine, _) = App::build_ui_for(
             "my_trace",
             &user,
             None,
@@ -553,8 +590,11 @@ mod tests {
             "spectrum",
             "waterfall",
             "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
             "my_trace",
             "my_status",
+            "my_sweep",
         ] {
             assert!(engine.has_preset(available), "{available} was hidden");
         }
@@ -564,13 +604,31 @@ mod tests {
             "lab_rf",
             "lab_timing",
             "lab_signal",
-            "lab_sweep",
-            "micro_sweep",
             "my_iq",
         ] {
             assert!(!engine.has_preset(unavailable), "{unavailable} survived");
         }
         assert_eq!(engine.active_preset(), "my_trace");
+        engine.set_preset("my_sweep");
+        assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(engine.is_panel_visible("system_resources"));
+        engine.set_preset("lab_sweep");
+        assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(!engine.is_panel_visible("signal_metrics"));
+    }
+
+    #[test]
+    fn an_iq_device_keeps_signal_metrics_in_the_lab_sweep_layout() {
+        let (engine, _) = App::build_ui_for(
+            "lab_sweep",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionKind::IqSamples,
+        )
+        .unwrap();
+        assert_eq!(engine.active_preset(), "lab_sweep");
+        assert!(engine.is_panel_visible("signal_metrics"));
     }
 
     #[test]
@@ -665,7 +723,13 @@ mod tests {
     #[test]
     fn incompatible_overrides_cannot_leave_a_power_device_without_a_layout() {
         let mut user = HashMap::new();
-        for name in ["spectrum", "waterfall", "spectrum_waterfall"] {
+        for name in [
+            "spectrum",
+            "waterfall",
+            "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
+        ] {
             user.insert(
                 name.to_string(),
                 crate::config::PresetConfig {

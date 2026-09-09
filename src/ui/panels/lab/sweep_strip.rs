@@ -23,6 +23,9 @@ impl Panel for SweepStripPanel {
     fn name(&self) -> &'static str {
         "sweep_strip"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (40, 3)
     }

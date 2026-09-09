@@ -40,12 +40,29 @@ impl LevelUnit {
     }
 }
 
+/// Where a direct power trace should be published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerTraceTarget {
+    Spectrum,
+    Sweep,
+}
+
 /// One calibrated power-spectrum trace.
 #[derive(Debug)]
 pub struct PowerTrace {
+    pub target: PowerTraceTarget,
+    pub generation: u64,
     pub frequencies_hz: Vec<u64>,
     pub levels_dbm: Vec<f32>,
     pub rbw_hz: Option<u32>,
+}
+
+/// A native band sweep requested from a direct-power backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectSweepConfig {
+    pub start_hz: u64,
+    pub stop_hz: u64,
+    pub generation: u64,
 }
 
 /// How raw USB bytes encode each I/Q component.
@@ -941,6 +958,10 @@ pub trait SdrDevice: Send + Sync {
     }
     fn set_tuner_agc(&self, _on: bool) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn set_direct_sweep(&self, _config: Option<DirectSweepConfig>) -> anyhow::Result<()> {
+        anyhow::bail!("this backend does not support direct power sweeps")
     }
 
     /// Set one stage by position, exactly.

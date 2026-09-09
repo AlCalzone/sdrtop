@@ -30,6 +30,9 @@ impl Panel for MicroSweepPanel {
     fn name(&self) -> &'static str {
         "micro_sweep_panel"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (40, 8)
     }
@@ -152,7 +155,7 @@ impl Panel for MicroSweepPanel {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("  {:>6.1} dBFS", db),
+                        format!("  {:>6.1} {}", db, state.caps.level_unit.label()),
                         Style::default().fg(theme.value),
                     ),
                     Span::styled(band, Style::default().fg(theme.status_ok)),
@@ -168,5 +171,25 @@ impl Panel for MicroSweepPanel {
             lines
         };
         f.render_widget(Paragraph::new(lines), list_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::fixture::draw;
+
+    #[test]
+    fn power_sweep_peaks_use_dbm() {
+        let mut metrics = SdrMetrics::fixture()
+            .streaming()
+            .with_sweep(88_000_000, 108_000_000);
+        let mut caps = (*metrics.caps).clone();
+        caps.level_unit = crate::hardware::LevelUnit::Dbm;
+        metrics.caps = std::sync::Arc::new(caps);
+
+        let out = draw(MicroSweepPanel, 80, 14, &metrics).join("\n");
+        assert!(out.contains("dBm"), "{out}");
+        assert!(!out.contains("dBFS"), "{out}");
     }
 }

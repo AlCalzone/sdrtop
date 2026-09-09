@@ -79,6 +79,17 @@ pub struct SweepFrame {
 }
 
 impl SweepFrame {
+    pub fn point_spacing_hz(&self) -> Option<u64> {
+        let first = *self.freq_hz.first()?;
+        let last = *self.freq_hz.last()?;
+        let intervals = self
+            .freq_hz
+            .len()
+            .checked_sub(1)
+            .filter(|count| *count > 0)? as u64;
+        last.checked_sub(first).map(|span| span / intervals)
+    }
+
     /// Project the stitched curve onto `width` horizontal buckets: each bucket
     /// holds the maximum dBFS of the bins that fall in it (peak or mean per
     /// `peak`). Empty buckets read `f32::NEG_INFINITY`.
@@ -154,6 +165,7 @@ pub struct SweepState {
     pub positions_done: usize,
     pub cycle_count: u64,
     pub cycle_duration_ms: u64,
+    pub generation: u64,
     /// Render the peak curve (`true`) or the mean curve (`false`); toggled by `[M]`.
     pub show_peak: bool,
     /// Cursor position as a 0..1 fraction across the band, set in the panel's
@@ -197,6 +209,7 @@ impl Default for SweepState {
             positions_done: 0,
             cycle_count: 0,
             cycle_duration_ms: 0,
+            generation: 0,
             show_peak: true,
             cursor_frac: None,
             pending_tune: None,
@@ -343,6 +356,15 @@ mod tests {
         assert_eq!(f.freq_at_fraction(1.0), 500_000_000);
         // Clamps out-of-range fractions.
         assert_eq!(f.freq_at_fraction(-1.0), 400_000_000);
+    }
+
+    #[test]
+    fn point_spacing_uses_the_measured_trace() {
+        let mut f = frame();
+        f.freq_hz = vec![400_000_000, 400_333_333, 400_666_667, 401_000_000];
+        assert_eq!(f.point_spacing_hz(), Some(333_333));
+        f.freq_hz.truncate(1);
+        assert_eq!(f.point_spacing_hz(), None);
     }
 
     /// A sweep in progress, parked on the position 12 MHz into the band, having

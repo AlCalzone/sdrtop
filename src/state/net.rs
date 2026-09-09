@@ -69,6 +69,16 @@ pub struct NetExit {
 #[derive(Clone, Debug, Default)]
 pub struct NetState {
     pub mode: NetMode,
+    /// Why no survey is running, when the mode says one should be.
+    ///
+    /// **A refusal nobody can see is a silence.** The survey declines on a
+    /// receiver too narrow to see past its own oscillator, which is right, and
+    /// it said so only in the log - which the survey and coexistence screens do
+    /// not carry. What the user saw was a panel claiming to be waiting for RX
+    /// while the feed panel beside it counted blocks arriving. The sentence
+    /// belongs on the screen the reader is on, so it lives here rather than only
+    /// in the log.
+    pub survey_refused: Option<String>,
     pub census: CensusState,
     pub health: NetDecodeHealth,
     pub band: BandOccupancy,

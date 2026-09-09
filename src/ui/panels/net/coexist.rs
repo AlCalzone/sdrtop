@@ -102,9 +102,15 @@ impl Panel for NetCoexistPanel {
         let history = &state.net.band.history;
 
         if history.is_empty() {
+            // A pass that will never come is not a pass to wait for. The same
+            // distinction the occupancy profile makes, for the same reason.
+            let said = match &state.net.survey_refused {
+                Some(why) => format!("no pass is possible: {why}"),
+                None => "waiting for the first pass".to_string(),
+            };
             f.render_widget(
                 Paragraph::new(vec![Line::from(Span::styled(
-                    "waiting for the first pass".to_string(),
+                    said,
                     Style::default().fg(theme.stale),
                 ))]),
                 inner,
@@ -277,6 +283,17 @@ mod tests {
     fn an_empty_history_says_it_is_waiting() {
         let out = draw(NetCoexistPanel, 60, 20, &SdrMetrics::fixture().streaming()).join("\n");
         assert!(out.contains("waiting for the first pass"), "{out}");
+    }
+
+    /// A pass that will never come is not a pass to wait for.
+    #[test]
+    fn a_survey_that_cannot_run_is_not_a_pass_to_wait_for() {
+        let mut m = SdrMetrics::fixture().streaming();
+        m.net.survey_refused = Some("1.8 MHz of view is too narrow".to_string());
+        let out = draw(NetCoexistPanel, 60, 20, &m).join("\n");
+        assert!(out.contains("no pass is possible"), "{out}");
+        assert!(out.contains("1.8 MHz"), "{out}");
+        assert!(!out.contains("waiting"), "{out}");
     }
 
     /// A history shorter than the panel leaves the old end dark rather than

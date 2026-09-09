@@ -84,25 +84,15 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
 
             let plan = Plan::for_span(span_hz, pass);
             let bins = crate::signal::net::scan::bins_for(rate_hz);
-            // A receiver too narrow to see past its own oscillator has positions
-            // to visit and nothing to learn at any of them. The gate asked
-            // whether this radio can receive the cheapest mode; whether it can
-            // survey a band is a different question, and this is where it is
-            // answered.
-            if plan.hops.is_empty() || !plan.covers_anything(rate_hz, bins) {
-                if !refused {
-                    refused = true;
-                    let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
-                    m.push_log(format!(
-                        "NET survey: {:.1} MHz of view is too narrow to measure past the \
-                         local oscillator; lock to a channel instead",
-                        span_hz / 1e6
-                    ));
-                }
+            let refusal = refusal(&plan, rate_hz, bins, span_hz);
+            {
+                let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
+                refused = apply_refusal(&mut m, &refusal, refused);
+            }
+            if refusal.is_some() {
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
-            refused = false;
             if !surveying {
                 surveying = true;
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -142,4 +132,121 @@ pub fn spawn_net_survey_task(state: Arc<Mutex<SdrMetrics>>, device: Arc<dyn SdrD
             pass = pass.wrapping_add(1);
         }
     });
+}
+
+/// Put the decision on the state, and say it in the log the first time.
+///
+/// **The state is assigned, not set-and-cleared.** The first version set it on
+/// refusal and cleared it further down, which is one edit away from leaving a
+/// stale refusal on screen after the survey restarted - and no test would have
+/// noticed, because the task's side of this had none. Assigning from the
+/// decision makes the stale case unrepresentable.
+///
+/// Returns whether the refusal has now been logged, so the caller says it once
+/// rather than ten times a second.
+fn apply_refusal(
+    m: &mut crate::state::SdrMetrics,
+    refusal: &Option<String>,
+    already_logged: bool,
+) -> bool {
+    m.net.survey_refused = refusal.clone();
+    match refusal {
+        Some(why) if !already_logged => {
+            m.push_log(format!("NET survey: {why}; lock to a channel instead"));
+            true
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Why this plan cannot be surveyed, or `None` when it can.
+///
+/// **A receiver too narrow to see past its own oscillator has positions to visit
+/// and nothing to learn at any of them.** The gate asked whether the radio can
+/// receive the cheapest mode; whether it can survey a band is a different
+/// question, and this is where it is answered.
+///
+/// Pure, and lifted out of the task, because the task is sleeps and device calls
+/// while this is the decision a user sees the consequence of - and the task's
+/// side of it had no test at all until a deliberate break walked through it.
+fn refusal(plan: &Plan, rate_hz: f64, bins: usize, span_hz: f64) -> Option<String> {
+    if plan.hops.is_empty() || !plan.covers_anything(rate_hz, bins) {
+        return Some(format!(
+            "{:.1} MHz of view is too narrow to hold a whole megahertz clear of the \
+             local oscillator",
+            span_hz / 1e6
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::net::scan::bins_for;
+
+    /// The case the user hit: a radio set to two megasamples.
+    ///
+    /// Its baseband filter is narrower still, so the usable view is 1.8 MHz, and
+    /// a whole megahertz clear of the oscillator does not fit in it.
+    #[test]
+    fn a_two_megasample_receiver_is_refused_and_the_sentence_says_why() {
+        let span = 1_800_000.0;
+        let rate = 2_000_000.0;
+        let why = refusal(&Plan::for_span(span, 0), rate, bins_for(rate), span)
+            .expect("1.8 MHz cannot be surveyed");
+        // The figure the user can act on, in the units the header shows it in.
+        assert!(why.contains("1.8 MHz"), "{why}");
+        assert!(why.contains("oscillator"), "{why}");
+    }
+
+    /// And a receiver that can survey is not refused.
+    #[test]
+    fn a_wide_receiver_is_not_refused() {
+        for (span, rate) in [(18_000_000.0, 20_000_000.0), (4_000_000.0, 4_400_000.0)] {
+            assert_eq!(
+                refusal(&Plan::for_span(span, 0), rate, bins_for(rate), span),
+                None,
+                "{span} Hz of view should survey"
+            );
+        }
+    }
+
+    /// **A refusal that ends leaves nothing behind.**
+    ///
+    /// The failure this prevents is the quiet one: the survey starts working
+    /// again and the panel goes on explaining why it cannot. Asserted as
+    /// behaviour rather than as the shape of the code, because the shape can be
+    /// kept while the behaviour is lost.
+    #[test]
+    fn a_refusal_that_ends_clears_the_sentence_with_it() {
+        let mut m = crate::state::SdrMetrics::fixture();
+        let why = Some("1.8 MHz of view is too narrow".to_string());
+
+        let logged = apply_refusal(&mut m, &why, false);
+        assert_eq!(m.net.survey_refused, why);
+        assert!(logged);
+        let said = m.ui.log.len();
+
+        // Still refused: the state keeps saying so, the log does not repeat it.
+        let logged = apply_refusal(&mut m, &why, logged);
+        assert_eq!(m.net.survey_refused, why);
+        assert_eq!(m.ui.log.len(), said, "the log repeated itself");
+
+        // The rate is widened and the survey runs again.
+        let logged = apply_refusal(&mut m, &None, logged);
+        assert_eq!(
+            m.net.survey_refused, None,
+            "the panel would still be explaining a refusal that is over"
+        );
+        assert!(
+            !logged,
+            "and a later refusal is said again rather than swallowed"
+        );
+
+        // Refused once more, and it is said again.
+        apply_refusal(&mut m, &why, logged);
+        assert!(m.ui.log.len() > said);
+    }
 }

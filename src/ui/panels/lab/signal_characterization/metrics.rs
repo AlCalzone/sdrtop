@@ -155,6 +155,7 @@ mod tests {
             bins_dbfs: Arc::new(bins),
             noise_floor: -90.0,
             center_freq_hz: center,
+            axis_start_hz: center as f64 - sr / 2.0,
             sample_rate: sr,
             timestamp: Instant::now(),
             peak_to_nf_db: 40.0,

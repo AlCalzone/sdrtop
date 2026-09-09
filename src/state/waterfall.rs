@@ -11,6 +11,7 @@ pub enum BinAxis {
     /// Each FFT bin owns one interval starting at its frequency
     #[default]
     FftBins,
+    MeasuredPoints,
 }
 
 /// A nonempty centre slice retains the full frame's bin spacing
@@ -27,6 +28,7 @@ impl BinAxis {
     pub fn interval_count(self, bin_count: usize) -> Option<usize> {
         match self {
             Self::FftBins => (bin_count > 0).then_some(bin_count),
+            Self::MeasuredPoints => bin_count.checked_sub(1).filter(|count| *count > 0),
         }
     }
 
@@ -39,22 +41,40 @@ impl BinAxis {
         bin_count: usize,
         zoom: usize,
     ) -> Option<BinWindow> {
-        if bin_count == 0 || !span_hz.is_finite() || span_hz <= 0.0 {
+        self.window_from_start(center_hz as f64 - span_hz / 2.0, span_hz, bin_count, zoom)
+    }
+
+    pub fn window_from_start(
+        self,
+        start_hz: f64,
+        span_hz: f64,
+        bin_count: usize,
+        zoom: usize,
+    ) -> Option<BinWindow> {
+        if bin_count == 0 || !start_hz.is_finite() || !span_hz.is_finite() || span_hz <= 0.0 {
             return None;
         }
 
-        let visible = (bin_count / zoom.max(1)).max(1).min(bin_count);
+        let minimum = if self == Self::MeasuredPoints && bin_count > 1 {
+            2
+        } else {
+            1
+        };
+        let visible = (bin_count / zoom.max(1)).max(minimum).min(bin_count);
         let first = (bin_count / 2)
             .saturating_sub(visible / 2)
             .min(bin_count - visible);
         let intervals = self.interval_count(bin_count)?;
         let bin_hz = span_hz / intervals as f64;
-        let visible_intervals = self.interval_count(visible)?;
+        let visible_intervals = match self {
+            Self::FftBins => visible,
+            Self::MeasuredPoints => visible.saturating_sub(1),
+        };
 
         Some(BinWindow {
             first_bin: first,
             bin_count: visible,
-            left_hz: center_hz as f64 - span_hz / 2.0 + first as f64 * bin_hz,
+            left_hz: start_hz + first as f64 * bin_hz,
             span_hz: visible_intervals as f64 * bin_hz,
         })
     }
@@ -101,6 +121,7 @@ impl BinAxis {
         let position = (frequency_hz - left_hz) * intervals as f64 / span_hz;
         let index = match self {
             Self::FftBins => position.floor() as usize,
+            Self::MeasuredPoints => position.round() as usize,
         };
         Some(index.min(bin_count.saturating_sub(1)))
     }
@@ -113,6 +134,7 @@ pub struct FftFrame {
     pub peak_hold: Arc<Vec<f32>>,
     pub noise_floor: f32,
     pub center_freq_hz: u64,
+    pub axis_start_hz: f64,
     pub sample_rate: f64,
     pub timestamp: Instant,
     pub peak_to_nf_db: f32,
@@ -124,12 +146,12 @@ pub struct FftFrame {
 
 impl FftFrame {
     pub fn window(&self, zoom: usize) -> Option<BinWindow> {
-        self.bin_axis.window(
-            self.center_freq_hz,
-            self.sample_rate,
-            self.bins_dbfs.len(),
-            zoom,
-        )
+        self.window_for_bins(self.bins_dbfs.len(), zoom)
+    }
+
+    pub fn window_for_bins(&self, bin_count: usize, zoom: usize) -> Option<BinWindow> {
+        self.bin_axis
+            .window_from_start(self.axis_start_hz, self.sample_rate, bin_count, zoom)
     }
 
     pub fn frequency_of_bin(&self, index: usize) -> Option<f64> {
@@ -303,6 +325,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn measured_points_keep_endpoints_across_zoom() {
+        let full = BinAxis::MeasuredPoints
+            .window(131_500_000, 63_000_000.0, 64, 1)
+            .unwrap();
+        assert_eq!(full.left_hz, 100_000_000.0);
+        assert_eq!(full.span_hz, 63_000_000.0);
+        assert_eq!(
+            BinAxis::MeasuredPoints.frequency_of_bin(
+                full.left_hz,
+                full.span_hz,
+                full.bin_count,
+                63,
+            ),
+            Some(163_000_000.0)
+        );
+
+        let zoomed = BinAxis::MeasuredPoints
+            .window(131_500_000, 63_000_000.0, 64, 4)
+            .unwrap();
+        assert_eq!(zoomed.first_bin, 24);
+        assert_eq!(zoomed.bin_count, 16);
+        assert_eq!(zoomed.left_hz, 124_000_000.0);
+        assert_eq!(zoomed.span_hz, 15_000_000.0);
+    }
+
+    #[test]
+    fn measured_points_keep_odd_span_endpoints() {
+        let axis = BinAxis::MeasuredPoints;
+        let window = axis.window_from_start(100_000.0, 3.0, 4, 1).unwrap();
+        assert_eq!(window.left_hz, 100_000.0);
+        assert_eq!(window.span_hz, 3.0);
+        assert_eq!(
+            axis.frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, 3),
+            Some(100_003.0)
+        );
+        assert_eq!(
+            axis.nearest_bin(window.left_hz, window.span_hz, window.bin_count, 100_003.0,),
+            Some(3)
+        );
+    }
+
+    #[test]
     fn fft_bins_keep_n_intervals() {
         let axis = BinAxis::FftBins;
         let window = axis.window(100_000_000, 64_000_000.0, 64, 1).unwrap();
@@ -354,24 +418,26 @@ mod tests {
 
     #[test]
     fn bin_axis_rejects_invalid_bounds() {
-        let axis = BinAxis::FftBins;
-        assert_eq!(axis.interval_count(0), None);
-        assert!(axis.window(100, 10.0, 0, 1).is_none());
-        assert!(axis.frequency_of_bin(0.0, 10.0, 0, 0).is_none());
-        assert!(axis.frequency_of_bin(0.0, 10.0, 4, 4).is_none());
-        assert!(axis.nearest_bin(0.0, 10.0, 0, 0.0).is_none());
-        for span in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(axis.window(100, span, 32, 1).is_none());
-            assert!(axis.frequency_of_bin(0.0, span, 4, 0).is_none());
-            assert!(axis.nearest_bin(0.0, span, 4, 0.0).is_none());
+        for axis in [BinAxis::FftBins, BinAxis::MeasuredPoints] {
+            assert_eq!(axis.interval_count(0), None);
+            assert!(axis.window(100, 10.0, 0, 1).is_none());
+            assert!(axis.frequency_of_bin(0.0, 10.0, 0, 0).is_none());
+            assert!(axis.frequency_of_bin(0.0, 10.0, 4, 4).is_none());
+            assert!(axis.nearest_bin(0.0, 10.0, 0, 0.0).is_none());
+            for span in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert!(axis.window(100, span, 32, 1).is_none());
+                assert!(axis.frequency_of_bin(0.0, span, 4, 0).is_none());
+                assert!(axis.nearest_bin(0.0, span, 4, 0.0).is_none());
+            }
+            for left in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(axis.frequency_of_bin(left, 10.0, 4, 0).is_none());
+                assert!(axis.nearest_bin(left, 10.0, 4, 0.0).is_none());
+            }
+            for frequency in [-1.0, 11.0, f64::NAN, f64::INFINITY] {
+                assert!(axis.nearest_bin(0.0, 10.0, 4, frequency).is_none());
+            }
         }
-        for left in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(axis.frequency_of_bin(left, 10.0, 4, 0).is_none());
-            assert!(axis.nearest_bin(left, 10.0, 4, 0.0).is_none());
-        }
-        for frequency in [-1.0, 11.0, f64::NAN, f64::INFINITY] {
-            assert!(axis.nearest_bin(0.0, 10.0, 4, frequency).is_none());
-        }
+        assert!(BinAxis::MeasuredPoints.window(100, 10.0, 1, 1).is_none());
     }
 
     #[test]

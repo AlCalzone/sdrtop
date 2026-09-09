@@ -26,8 +26,8 @@ pub enum Staleness {
     /// Stale whenever the radio is not streaming. For anything read from
     /// hardware counters: timing, drops, gain staging, IQ balance.
     NotStreaming,
-    /// Mark spectrum readings stale when the frame exceeds the device's trace-age limit
-    /// Missing frames are stale
+    /// Stale when the newest FFT frame exceeds the device's trace-age limit, or
+    /// there is no frame yet. For anything derived from the spectrum.
     FftAge,
     /// Never stale. For panels that show configuration rather than measurement.
     Never,
@@ -36,15 +36,16 @@ pub enum Staleness {
 impl Staleness {
     /// Resolve the rule against a metrics snapshot.
     pub fn resolve(self, state: &SdrMetrics) -> bool {
-        self.decide(
-            state.radio.hw_streaming,
-            state
-                .waterfall
-                .last_fft
-                .as_ref()
-                .map(|fr| fr.timestamp.elapsed().as_millis()),
-            state.caps.trace_stale_ms,
-        )
+        let age = state
+            .waterfall
+            .last_fft
+            .as_ref()
+            .map(|frame| frame.timestamp.elapsed().as_millis());
+        let stale = self.decide(state.radio.hw_streaming, age, state.caps.trace_stale_ms);
+        stale
+            || (self == Staleness::FftAge
+                && state.caps.acquisition == crate::hardware::AcquisitionKind::PowerTrace
+                && !state.radio.hw_streaming)
     }
 
     /// The rule itself, on plain inputs: `fft_age_ms` is `None` when no frame has
@@ -276,6 +277,10 @@ pub trait Panel: Send + Sync {
     #[allow(dead_code)]
     fn min_size(&self) -> (u16, u16);
 
+    fn supports_acquisition(&self, acquisition: crate::hardware::AcquisitionKind) -> bool {
+        acquisition == crate::hardware::AcquisitionKind::IqSamples
+    }
+
     /// Draw the panel's contents into `area`.
     ///
     /// `area` is the **inner** rect the engine has already carved out, guaranteed
@@ -372,8 +377,8 @@ mod tests {
 
     #[test]
     fn staleness_rules_are_independent_of_each_other() {
-        let stale_ms = crate::hardware::IQ_TRACE_STALE_MS;
         // A dead radio staleness NotStreaming, and nothing else.
+        let stale_ms = crate::hardware::IQ_TRACE_STALE_MS;
         assert!(Staleness::NotStreaming.decide(false, Some(0), stale_ms));
         assert!(
             !Staleness::FftAge.decide(false, Some(0), stale_ms),
@@ -395,6 +400,29 @@ mod tests {
             !Staleness::FftAge.decide(true, Some(stale_ms), stale_ms),
             "the threshold itself is live"
         );
+    }
+
+    #[test]
+    fn power_trace_staleness_uses_the_device_limit_and_rx_state() {
+        let mut state = SdrMetrics::fixture().streaming().with_carrier(0.0, 20.0);
+        let mut caps = (*state.caps).clone();
+        caps.acquisition = crate::hardware::AcquisitionKind::PowerTrace;
+        caps.trace_stale_ms = 100;
+        state.caps = std::sync::Arc::new(caps);
+        state.waterfall.last_fft.as_mut().unwrap().timestamp =
+            std::time::Instant::now() - std::time::Duration::from_millis(50);
+
+        assert!(!Staleness::FftAge.resolve(&state));
+        state.caps = {
+            let mut caps = (*state.caps).clone();
+            caps.trace_stale_ms = 10;
+            std::sync::Arc::new(caps)
+        };
+        assert!(Staleness::FftAge.resolve(&state));
+
+        state.waterfall.last_fft.as_mut().unwrap().timestamp = std::time::Instant::now();
+        state.radio.hw_streaming = false;
+        assert!(Staleness::FftAge.resolve(&state));
     }
 
     #[test]

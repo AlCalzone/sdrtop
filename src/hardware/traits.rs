@@ -12,9 +12,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
 
+/// How a backend acquires spectrum data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquisitionKind {
+    /// Complex time-domain samples feed the FFT and diagnostic workers.
+    IqSamples,
+    /// The backend publishes calibrated power-spectrum traces.
+    PowerTrace,
+}
+
+/// Unit carried by spectral levels from a backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelUnit {
     Dbfs,
+    #[allow(dead_code)]
+    Dbm,
 }
 
 pub const IQ_TRACE_STALE_MS: u128 = 500;
@@ -23,8 +35,17 @@ impl LevelUnit {
     pub fn label(self) -> &'static str {
         match self {
             Self::Dbfs => "dBFS",
+            Self::Dbm => "dBm",
         }
     }
+}
+
+/// One calibrated power-spectrum trace.
+#[derive(Debug)]
+pub struct PowerTrace {
+    pub frequencies_hz: Vec<u64>,
+    pub levels_dbm: Vec<f32>,
+    pub rbw_hz: Option<u32>,
 }
 
 /// How raw USB bytes encode each I/Q component.
@@ -631,6 +652,7 @@ pub enum DeliveryModel {
 /// truth for every clamp, default, and UI capability check. Built once at open.
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
+    pub acquisition: AcquisitionKind,
     /// Spectral levels and display bounds use this unit
     pub level_unit: LevelUnit,
     /// The finite display floor must be below `level_max_db`
@@ -759,6 +781,9 @@ pub struct RxContext {
     pub net_tx: crossbeam_channel::Sender<StreamBlock>,
     /// What the NET feed did with the blocks handed to it, for the poll task.
     pub net_feed: FeedHealth,
+    /// Direct power-spectrum traces from backends that do not publish IQ.
+    #[allow(dead_code)]
+    pub power_tx: crossbeam_channel::Sender<PowerTrace>,
     pub geometry: SampleGeometry,
 }
 

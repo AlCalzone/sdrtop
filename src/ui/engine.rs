@@ -18,6 +18,7 @@ use crate::ui::registry::PanelRegistry;
 
 pub struct LayoutEngine {
     pub config: LayoutConfig,
+    saved_active_preset: String,
     registry: PanelRegistry,
     focused_panel: Option<String>,
     hidden_panels: HashSet<String>,
@@ -33,18 +34,35 @@ pub struct LayoutEngine {
     /// nothing does that outside the tests, and a preset added that way would be
     /// absent from the menu rather than break it.
     menu: menu::model::Menu,
+    startup_warnings: Vec<String>,
 }
 
 impl LayoutEngine {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(config: LayoutConfig, registry: PanelRegistry) -> Self {
+        let saved_active_preset = config.active_preset.clone();
+        Self::new_with_saved_preset(config, registry, saved_active_preset)
+    }
+
+    pub fn new_with_saved_preset(
+        config: LayoutConfig,
+        registry: PanelRegistry,
+        saved_active_preset: String,
+    ) -> Self {
         let menu = menu::model::build(&config.presets);
         Self {
             config,
+            saved_active_preset,
             registry,
             focused_panel: None,
             hidden_panels: HashSet::new(),
             menu,
+            startup_warnings: Vec::new(),
         }
+    }
+
+    pub fn set_startup_warnings(&mut self, warnings: Vec<String>) {
+        self.startup_warnings = warnings;
     }
 
     /// Anything odd found while building the menu, for the caller to log once at
@@ -52,6 +70,10 @@ impl LayoutEngine {
     /// mutex and stays testable as a pure function.
     pub fn menu_warnings(&self) -> &[String] {
         &self.menu.warnings
+    }
+
+    pub fn startup_warnings(&self) -> &[String] {
+        &self.startup_warnings
     }
 
     /// The section table the menu draws.
@@ -114,6 +136,10 @@ impl LayoutEngine {
         &self.config.active_preset
     }
 
+    pub fn saved_active_preset(&self) -> &str {
+        &self.saved_active_preset
+    }
+
     /// Names of every panel the registry knows.
     ///
     /// Nothing draws this. It exists so `builder.rs` can check the built-in
@@ -141,6 +167,7 @@ impl LayoutEngine {
     pub fn set_preset(&mut self, name: &str) {
         if self.config.presets.contains_key(name) {
             self.config.active_preset = name.to_string();
+            self.saved_active_preset = name.to_string();
         }
     }
 

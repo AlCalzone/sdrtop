@@ -25,7 +25,7 @@ use std::time::Duration;
 use crate::config::AppConfig;
 use crate::event::EventStream;
 use crate::hardware;
-use crate::signal::{DemodWorker, FftWorker, NetWorker};
+use crate::signal::{DemodWorker, FftWorker, NetWorker, PowerWorker};
 use crate::state::SdrMetrics;
 use crate::tasks;
 
@@ -157,6 +157,7 @@ impl App {
         // thread, and anything deeper starts hiding the losses rather than
         // absorbing them.
         let (net_tx, net_rx) = crossbeam_channel::bounded::<crate::hardware::StreamBlock>(4);
+        let (power_tx, power_rx) = crossbeam_channel::bounded::<hardware::PowerTrace>(4);
         let rx_ctx = Arc::new(hardware::RxContext {
             metrics: Arc::clone(&state),
             sample_tx,
@@ -164,35 +165,51 @@ impl App {
             demod_tx,
             net_tx,
             net_feed: hardware::FeedHealth::default(),
+            power_tx,
             geometry,
         });
 
-        let fft_state = Arc::clone(&state);
-        std::thread::spawn(move || FftWorker::new(sample_rx, fft_state, geometry).run());
-
-        let demod_state = Arc::clone(&state);
-        std::thread::spawn(move || DemodWorker::new(demod_rx, demod_state, geometry).run());
-
-        // Spawned whether or not the gate admitted the section: with no section
-        // on screen nothing is forwarded, so the thread costs one blocked
-        // `recv`. Deciding here would mean two places that know what admits the
-        // feature, and the one that already knows is `net::gate`.
-        let net_state = Arc::clone(&state);
-        std::thread::spawn(move || NetWorker::new(net_rx, net_state, geometry).run());
-
-        tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
-        tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));
-        tasks::spawn_net_survey_task(Arc::clone(&state), Arc::clone(&device));
-        tasks::spawn_sys_resource_task(Arc::clone(&state));
-
-        Ok(Self::assemble(
+        let app = Self::assemble(
             cfg,
             config_path,
-            state,
-            Some(device),
-            Some(rx_ctx),
+            Arc::clone(&state),
+            Some(Arc::clone(&device)),
+            Some(Arc::clone(&rx_ctx)),
             None,
-        ))
+        )?;
+
+        match caps.acquisition {
+            hardware::AcquisitionKind::IqSamples => {
+                let fft_state = Arc::clone(&state);
+                std::thread::spawn(move || FftWorker::new(sample_rx, fft_state, geometry).run());
+
+                let demod_state = Arc::clone(&state);
+                std::thread::spawn(move || DemodWorker::new(demod_rx, demod_state, geometry).run());
+
+                // Spawned whether or not the gate admitted the section: with no section
+                // on screen nothing is forwarded, so the thread costs one blocked
+                // `recv`. Deciding here would mean two places that know what admits the
+                // feature, and the one that already knows is `net::gate`.
+                let net_state = Arc::clone(&state);
+                std::thread::spawn(move || NetWorker::new(net_rx, net_state, geometry).run());
+
+                tasks::spawn_rx_task(Arc::clone(&state), Arc::clone(&device), Arc::clone(&rx_ctx));
+                tasks::spawn_sweep_task(Arc::clone(&state), Arc::clone(&device));
+                tasks::spawn_net_survey_task(Arc::clone(&state), Arc::clone(&device));
+            }
+            hardware::AcquisitionKind::PowerTrace => {
+                let power_state = Arc::clone(&state);
+                std::thread::spawn(move || PowerWorker::new(power_rx, power_state).run());
+                tasks::spawn_power_rx_task(
+                    Arc::clone(&state),
+                    Arc::clone(&device),
+                    Arc::clone(&rx_ctx),
+                );
+            }
+        }
+        tasks::spawn_sys_resource_task(Arc::clone(&state));
+
+        Ok(app)
     }
 
     pub(super) fn new_observer(
@@ -216,17 +233,17 @@ impl App {
             m.push_log("Device is in use by another process — hardware controls disabled");
         }
 
-        tasks::spawn_observer_task(Arc::clone(&state), sysinfo.bus, sysinfo.dev, profile);
-        tasks::spawn_sys_resource_task(Arc::clone(&state));
-
-        Ok(Self::assemble(
+        let app = Self::assemble(
             cfg,
             config_path,
-            state,
+            Arc::clone(&state),
             None,
             None,
             Some("observer"),
-        ))
+        )?;
+        tasks::spawn_observer_task(Arc::clone(&state), sysinfo.bus, sysinfo.dev, profile);
+        tasks::spawn_sys_resource_task(Arc::clone(&state));
+        Ok(app)
     }
 
     /// The tail both startups end in: resolve the config paths, build the theme
@@ -243,7 +260,7 @@ impl App {
         device: Option<Arc<dyn hardware::SdrDevice>>,
         rx_ctx: Option<Arc<hardware::RxContext>>,
         preset_override: Option<&str>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let themes_dir = config_path
             .as_deref()
             .and_then(crate::config::AppConfig::themes_dir);
@@ -261,8 +278,18 @@ impl App {
         };
 
         let active = preset_override.unwrap_or(&cfg.display.active_preset);
-        let (engine, focus_keys) =
-            Self::build_ui(active, &cfg.presets, presets_dir.as_deref(), net.is_ok());
+        let acquisition = state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .caps
+            .acquisition;
+        let (engine, focus_keys) = Self::build_ui_for(
+            active,
+            &cfg.presets,
+            presets_dir.as_deref(),
+            net.is_ok(),
+            acquisition,
+        )?;
 
         // A user preset that wanted a number key already taken says so, once,
         // here. `menu::model::build` collects these instead of logging them so it
@@ -271,6 +298,9 @@ impl App {
         {
             let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
             for warning in engine.menu_warnings() {
+                m.push_log(warning.clone());
+            }
+            for warning in engine.startup_warnings() {
                 m.push_log(warning.clone());
             }
             if let Err(why) = &net {
@@ -294,7 +324,7 @@ impl App {
             });
         }
 
-        Self {
+        Ok(Self {
             state,
             device,
             rx_ctx,
@@ -307,6 +337,6 @@ impl App {
             focus_keys,
             theme_config: cfg.theme.clone(),
             user_presets: cfg.presets,
-        }
+        })
     }
 }

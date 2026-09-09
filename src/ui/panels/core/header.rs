@@ -676,6 +676,9 @@ impl Panel for HeaderPanel {
     fn name(&self) -> &'static str {
         "header"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (60, 5)
     }
@@ -747,6 +750,9 @@ pub struct SlimHeaderPanel;
 impl Panel for SlimHeaderPanel {
     fn name(&self) -> &'static str {
         "header_slim"
+    }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
     }
     fn min_size(&self) -> (u16, u16) {
         (60, 4)

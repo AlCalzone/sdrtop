@@ -368,6 +368,7 @@ fn rtl_caps(tuner: c_int, gains_tenths: &[i32]) -> DeviceCapabilities {
         level_min_db: -120.0,
         level_max_db: 0.0,
         trace_stale_ms: crate::hardware::IQ_TRACE_STALE_MS,
+        acquisition: crate::hardware::AcquisitionKind::IqSamples,
         freq_min_hz,
         freq_max_hz,
         // RTL-SDR's usable upper band is 900_001..=3_200_000 Hz (the lower

@@ -9,7 +9,7 @@ mod system;
 
 pub use net::spawn_net_survey_task;
 pub use observer::spawn_observer_task;
-pub use rx::spawn_rx_task;
+pub use rx::{spawn_power_rx_task, spawn_rx_task};
 pub use sweep::spawn_sweep_task;
 pub use system::spawn_sys_resource_task;
 

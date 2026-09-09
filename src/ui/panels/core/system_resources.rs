@@ -18,6 +18,9 @@ impl Panel for SystemResourcesPanel {
     fn name(&self) -> &'static str {
         "system_resources"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (30, 10)
     }

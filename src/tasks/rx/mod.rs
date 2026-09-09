@@ -213,7 +213,9 @@ fn power_control_step(
             metrics.radio.rx_enabled = false;
             metrics.radio.hw_streaming = false;
             metrics.radio.rx_start_time = None;
-            metrics.push_log("WARNING: Power trace acquisition stopped unexpectedly");
+            metrics.push_log(
+                "WARNING: Power trace acquisition stopped unexpectedly \u{2014} press [Space] to restart",
+            );
             if let Err(error) = cleanup {
                 metrics.push_log(format!(
                     "Error cleaning up power trace acquisition: {error}"
@@ -396,11 +398,10 @@ mod power_control_tests {
         assert!(!metrics.radio.rx_enabled);
         assert!(!metrics.radio.hw_streaming);
         assert_eq!(device.stops.load(Ordering::Relaxed), 1);
-        assert!(metrics
-            .ui
-            .log
-            .iter()
-            .any(|entry| entry.text.contains("stopped unexpectedly")));
+        assert!(metrics.ui.log.iter().any(|entry| {
+            entry.text.contains("stopped unexpectedly")
+                && entry.text.contains("press [Space] to restart")
+        }));
         assert!(metrics
             .ui
             .log

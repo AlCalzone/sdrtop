@@ -387,6 +387,7 @@ mod tests {
             peak_hold: bins,
             noise_floor: -90.0,
             center_freq_hz: 131_500_000,
+            axis_start_hz: 100_000_000.0,
             sample_rate: 63_000_000.0,
             timestamp: Instant::now(),
             peak_to_nf_db: 70.0,

@@ -148,6 +148,7 @@ impl SdrMetrics {
             peak_hold: Arc::clone(&bins),
             noise_floor,
             center_freq_hz: self.radio.frequency,
+            axis_start_hz: self.radio.frequency as f64 - sample_rate / 2.0,
             sample_rate,
             timestamp: Instant::now(),
             peak_to_nf_db: snr_db,

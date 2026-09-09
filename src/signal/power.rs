@@ -104,11 +104,12 @@ impl SpectrumAccumulator {
         if trace.frequencies_hz.len() != trace.levels_dbm.len() {
             return Err(TraceRejection::LengthMismatch);
         }
-        let Some((center_freq_hz, sample_rate)) = trace_window(&trace.frequencies_hz) else {
+        let Some((axis_start_hz, sample_rate)) = trace_window(&trace.frequencies_hz) else {
             return Err(TraceRejection::NonUniformGrid);
         };
         let start_hz = trace.frequencies_hz[0];
         let stop_hz = *trace.frequencies_hz.last().unwrap_or(&start_hz);
+        let center_freq_hz = start_hz.saturating_add(stop_hz.saturating_sub(start_hz) / 2);
         let reset = self.start_hz != start_hz
             || self.stop_hz != stop_hz
             || self.rbw_hz != trace.rbw_hz
@@ -155,6 +156,7 @@ impl SpectrumAccumulator {
             peak_hold: peak,
             noise_floor,
             center_freq_hz,
+            axis_start_hz,
             sample_rate,
             timestamp: Instant::now(),
             peak_to_nf_db: prominence,
@@ -167,7 +169,7 @@ impl SpectrumAccumulator {
     }
 }
 
-pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(u64, f64)> {
+pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(f64, f64)> {
     let start = *frequencies_hz.first()?;
     let stop = *frequencies_hz.last()?;
     let intervals = frequencies_hz.len().checked_sub(1)?;
@@ -184,7 +186,7 @@ pub(crate) fn trace_window(frequencies_hz: &[u64]) -> Option<(u64, f64)> {
     }) {
         return None;
     }
-    Some((start.saturating_add(span / 2), span as f64))
+    Some((start as f64, span as f64))
 }
 
 #[cfg(test)]
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(frame.bins_dbfs.as_slice(), &[-90.0, -45.0, -80.0]);
         assert_eq!(frame.peak_hold.as_slice(), &[-90.0, -45.0, -80.0]);
         assert_eq!(frame.center_freq_hz, 101_000_000);
+        assert_eq!(frame.axis_start_hz, 100_000_000.0);
         assert_eq!(frame.sample_rate, 2_000_000.0);
         assert_eq!(frame.enbw_hz, 10_000.0);
         assert_eq!(metrics.waterfall.buffer.rows.len(), 1);
@@ -409,14 +412,35 @@ mod tests {
     fn trace_window_uses_the_measured_edges() {
         assert_eq!(
             trace_window(&[100_000, 200_000, 300_000]),
-            Some((200_000, 200_000.0))
+            Some((100_000.0, 200_000.0))
         );
         assert_eq!(trace_window(&[100_000]), None);
         assert_eq!(trace_window(&[100_000, 200_000, 350_000]), None);
         assert_eq!(trace_window(&[300_000, 200_000, 100_000]), None);
         assert_eq!(
             trace_window(&[100_000, 133_333, 166_667, 200_000]),
-            Some((150_000, 100_000.0))
+            Some((100_000.0, 100_000.0))
         );
+    }
+
+    #[test]
+    fn odd_span_trace_keeps_its_first_and_last_frequencies() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let mut accumulator = SpectrumAccumulator::default();
+        accumulator
+            .publish(
+                &state,
+                PowerTrace {
+                    frequencies_hz: vec![100_000, 100_001, 100_002, 100_003],
+                    levels_dbm: vec![-90.0, -80.0, -70.0, -60.0],
+                    rbw_hz: None,
+                },
+            )
+            .unwrap();
+
+        let metrics = state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = metrics.waterfall.last_fft.as_ref().unwrap();
+        assert_eq!(frame.frequency_of_bin(0), Some(100_000.0));
+        assert_eq!(frame.frequency_of_bin(3), Some(100_003.0));
     }
 }

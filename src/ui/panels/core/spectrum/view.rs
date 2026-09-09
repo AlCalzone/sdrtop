@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::state::BinAxis;
+use crate::state::{BinAxis, BinWindow, FftFrame};
 
 /// The window the panel is actually drawing: the bins in view and the frequency
 /// span they cover.
@@ -43,6 +43,7 @@ impl SpectrumView {
     /// `held` may have been captured at a different bin count than the live
     /// frame, so it is windowed against its own length. Slicing it blind is a
     /// panic waiting for the user to change sample rate while holding.
+    #[cfg(test)]
     pub fn new(
         bins: &Arc<Vec<f32>>,
         peaks: &Arc<Vec<f32>>,
@@ -52,8 +53,29 @@ impl SpectrumView {
         zoom: usize,
         bin_axis: BinAxis,
     ) -> Option<Self> {
+        let window = bin_axis.window(center_hz, sample_rate, bins.len(), zoom)?;
+        Self::from_window(bins, peaks, held, window, bin_axis)
+    }
+
+    pub fn from_frame(frame: &FftFrame, held: Option<Arc<Vec<f32>>>, zoom: usize) -> Option<Self> {
+        let window = frame.window(zoom)?;
+        Self::from_window(
+            &frame.bins_dbfs,
+            &frame.peak_hold,
+            held,
+            window,
+            frame.bin_axis,
+        )
+    }
+
+    fn from_window(
+        bins: &Arc<Vec<f32>>,
+        peaks: &Arc<Vec<f32>>,
+        held: Option<Arc<Vec<f32>>>,
+        window: BinWindow,
+        bin_axis: BinAxis,
+    ) -> Option<Self> {
         let full_n = bins.len();
-        let window = bin_axis.window(center_hz, sample_rate, full_n, zoom)?;
         let lo = window.first_bin;
         let hi = lo + window.bin_count;
 
@@ -187,6 +209,31 @@ mod tests {
         assert_eq!(v.freq_of_bin(15), 139_000_000.0);
         assert_eq!(v.left_hz, 124_000_000.0);
         assert_eq!(v.right_hz(), 139_000_000.0);
+    }
+
+    #[test]
+    fn measured_point_view_reads_the_last_odd_span_endpoint() {
+        let bins = ramp(4);
+        let frame = FftFrame {
+            bins_dbfs: Arc::clone(&bins),
+            peak_hold: Arc::clone(&bins),
+            noise_floor: -90.0,
+            center_freq_hz: 100_001,
+            axis_start_hz: 100_000.0,
+            sample_rate: 3.0,
+            timestamp: std::time::Instant::now(),
+            peak_to_nf_db: 0.0,
+            channel_power_dbfs: f32::NEG_INFINITY,
+            occupied_bw_hz: 0,
+            enbw_hz: 1.0,
+            bin_axis: BinAxis::MeasuredPoints,
+        };
+        let view = SpectrumView::from_frame(&frame, None, 1).unwrap();
+
+        assert_eq!(view.freq_of_bin(0), 100_000.0);
+        assert_eq!(view.freq_of_bin(3), 100_003.0);
+        assert_eq!(view.level_at(100_003), Some(3.0));
+        assert_eq!(view.right_hz(), 100_003.0);
     }
 
     #[test]

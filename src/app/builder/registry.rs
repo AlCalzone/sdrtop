@@ -99,31 +99,28 @@ impl App {
                 .presets
                 .retain(|_, p| p.section.as_deref() != Some(ui::menu::model::NET));
         }
-        let warnings = Self::filter_incompatible_layouts(&mut layout, &registry, acquisition)?;
-        let selected = if layout.presets.contains_key(active_preset) {
+        let mut warnings = Self::filter_incompatible_layouts(&mut layout, &registry, acquisition)?;
+        let selected = if layout
+            .presets
+            .get(active_preset)
+            .is_some_and(|preset| has_registered_panel(preset, &registry))
+        {
             active_preset.to_string()
         } else {
             ["spectrum_waterfall", "spectrum", "waterfall"]
                 .into_iter()
                 .find(|name| {
-                    layout.presets.get(*name).is_some_and(|preset| {
-                        preset
-                            .panels
-                            .iter()
-                            .any(|spec| registry.get(&spec.name).is_some())
-                    })
+                    layout
+                        .presets
+                        .get(*name)
+                        .is_some_and(|preset| has_registered_panel(preset, &registry))
                 })
                 .map(str::to_string)
                 .or_else(|| {
                     let mut names: Vec<String> = layout
                         .presets
                         .iter()
-                        .filter(|(_, preset)| {
-                            preset
-                                .panels
-                                .iter()
-                                .any(|spec| registry.get(&spec.name).is_some())
-                        })
+                        .filter(|(_, preset)| has_registered_panel(preset, &registry))
                         .map(|(name, _)| name.clone())
                         .collect();
                     names.sort();
@@ -131,6 +128,11 @@ impl App {
                 })
                 .ok_or_else(|| anyhow::anyhow!("No usable presets remain for this device"))?
         };
+        if selected != active_preset {
+            warnings.push(format!(
+                "Preset '{active_preset}' is unavailable; using '{selected}'"
+            ));
+        }
         layout.active_preset = selected;
 
         let mut engine =
@@ -168,16 +170,28 @@ impl App {
             }
             true
         });
-        if !config.presets.values().any(|preset| {
-            preset
-                .panels
-                .iter()
-                .any(|spec| registry.get(&spec.name).is_some())
-        }) {
-            anyhow::bail!("No usable presets remain for this device");
+        if !config
+            .presets
+            .values()
+            .any(|preset| has_registered_panel(preset, registry))
+        {
+            anyhow::bail!(
+                "No usable presets remain for this device: {}",
+                warnings.join("; ")
+            );
         }
         Ok(warnings)
     }
+}
+
+fn has_registered_panel(
+    preset: &crate::config::PresetConfig,
+    registry: &ui::PanelRegistry,
+) -> bool {
+    preset
+        .panels
+        .iter()
+        .any(|spec| registry.get(&spec.name).is_some())
 }
 
 /// The focus-key lookup, plus every key more than one panel claims.
@@ -588,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_panel_warns_without_removing_the_preset() {
+    fn an_unknown_only_preset_warns_and_uses_a_drawable_fallback() {
         let mut user = HashMap::new();
         user.insert(
             "future_panel".to_string(),
@@ -605,6 +619,42 @@ mod tests {
 
         let (engine, _) = App::build_ui("future_panel", &user, None, true);
         assert!(engine.has_preset("future_panel"));
+        assert_eq!(engine.active_preset(), "spectrum_waterfall");
+        assert!(engine
+            .startup_warnings()
+            .iter()
+            .any(|warning| warning.contains("unknown panel 'not_registered_yet'")));
+        assert!(engine.startup_warnings().iter().any(|warning| {
+            warning.contains("Preset 'future_panel' is unavailable")
+                && warning.contains("using 'spectrum_waterfall'")
+        }));
+    }
+
+    #[test]
+    fn a_mixed_known_and_unknown_preset_remains_selectable() {
+        let mut user = HashMap::new();
+        user.insert(
+            "future_panel".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "not_registered_yet".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "spectrum".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let (engine, _) = App::build_ui("future_panel", &user, None, true);
         assert_eq!(engine.active_preset(), "future_panel");
         assert!(engine
             .startup_warnings()
@@ -654,6 +704,8 @@ mod tests {
         assert!(error
             .to_string()
             .contains("No usable presets remain for this device"));
+        assert!(error.to_string().contains("iq_constellation"));
+        assert!(error.to_string().contains("not_registered_yet"));
     }
 
     /// A full-height waterfall must reach its own bottom border.

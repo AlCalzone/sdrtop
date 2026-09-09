@@ -330,13 +330,16 @@ fn columns_for_row(
     row_bins: usize,
     cols: usize,
 ) -> Option<Columns> {
-    let (axis, center_hz, span_hz) = wf
-        .last_fft
-        .as_ref()
-        .map_or((crate::state::BinAxis::FftBins, 0, 1.0), |frame| {
-            (frame.bin_axis, frame.center_freq_hz, frame.sample_rate)
-        });
-    let window = axis.window(center_hz, span_hz, row_bins, wf.hz_zoom as usize)?;
+    let (axis, window) = match wf.last_fft.as_ref() {
+        Some(frame) => (
+            frame.bin_axis,
+            frame.window_for_bins(row_bins, wf.hz_zoom as usize)?,
+        ),
+        None => {
+            let axis = crate::state::BinAxis::FftBins;
+            (axis, axis.window(0, 1.0, row_bins, wf.hz_zoom as usize)?)
+        }
+    };
     Some(Columns::new(window, cols, axis))
 }
 
@@ -402,6 +405,20 @@ mod tests {
         assert_eq!(buffer.get(0, 0).fg, buffer.get(0, 0).bg);
         assert_ne!(buffer.get(0, 0).fg, buffer.get(1, 0).fg);
         assert_ne!(buffer.get(0, 0).bg, buffer.get(1, 0).bg);
+    }
+
+    #[test]
+    fn measured_waterfall_window_keeps_an_odd_span_endpoint() {
+        let mut state = crate::state::SdrMetrics::fixture().with_carrier(0.0, 70.0);
+        let frame = state.waterfall.last_fft.as_mut().unwrap();
+        frame.bin_axis = crate::state::BinAxis::MeasuredPoints;
+        frame.axis_start_hz = 100_000.0;
+        frame.sample_rate = 3.0;
+        frame.bins_dbfs = Arc::new(vec![-90.0; 4]);
+
+        let columns = columns_for_row(&state.waterfall, 4, 4).unwrap();
+        assert_eq!(columns.window.left_hz, 100_000.0);
+        assert_eq!(columns.window.left_hz + columns.window.span_hz, 100_003.0);
     }
 
     #[test]

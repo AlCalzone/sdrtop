@@ -41,7 +41,17 @@ impl BinAxis {
         bin_count: usize,
         zoom: usize,
     ) -> Option<BinWindow> {
-        if bin_count == 0 || !span_hz.is_finite() || span_hz <= 0.0 {
+        self.window_from_start(center_hz as f64 - span_hz / 2.0, span_hz, bin_count, zoom)
+    }
+
+    pub fn window_from_start(
+        self,
+        start_hz: f64,
+        span_hz: f64,
+        bin_count: usize,
+        zoom: usize,
+    ) -> Option<BinWindow> {
+        if bin_count == 0 || !start_hz.is_finite() || !span_hz.is_finite() || span_hz <= 0.0 {
             return None;
         }
 
@@ -64,7 +74,7 @@ impl BinAxis {
         Some(BinWindow {
             first_bin: first,
             bin_count: visible,
-            left_hz: center_hz as f64 - span_hz / 2.0 + first as f64 * bin_hz,
+            left_hz: start_hz + first as f64 * bin_hz,
             span_hz: visible_intervals as f64 * bin_hz,
         })
     }
@@ -124,6 +134,7 @@ pub struct FftFrame {
     pub peak_hold: Arc<Vec<f32>>,
     pub noise_floor: f32,
     pub center_freq_hz: u64,
+    pub axis_start_hz: f64,
     pub sample_rate: f64,
     pub timestamp: Instant,
     pub peak_to_nf_db: f32,
@@ -135,12 +146,12 @@ pub struct FftFrame {
 
 impl FftFrame {
     pub fn window(&self, zoom: usize) -> Option<BinWindow> {
-        self.bin_axis.window(
-            self.center_freq_hz,
-            self.sample_rate,
-            self.bins_dbfs.len(),
-            zoom,
-        )
+        self.window_for_bins(self.bins_dbfs.len(), zoom)
+    }
+
+    pub fn window_for_bins(&self, bin_count: usize, zoom: usize) -> Option<BinWindow> {
+        self.bin_axis
+            .window_from_start(self.axis_start_hz, self.sample_rate, bin_count, zoom)
     }
 
     pub fn frequency_of_bin(&self, index: usize) -> Option<f64> {
@@ -337,6 +348,22 @@ mod tests {
         assert_eq!(zoomed.bin_count, 16);
         assert_eq!(zoomed.left_hz, 124_000_000.0);
         assert_eq!(zoomed.span_hz, 15_000_000.0);
+    }
+
+    #[test]
+    fn measured_points_keep_odd_span_endpoints() {
+        let axis = BinAxis::MeasuredPoints;
+        let window = axis.window_from_start(100_000.0, 3.0, 4, 1).unwrap();
+        assert_eq!(window.left_hz, 100_000.0);
+        assert_eq!(window.span_hz, 3.0);
+        assert_eq!(
+            axis.frequency_of_bin(window.left_hz, window.span_hz, window.bin_count, 3),
+            Some(100_003.0)
+        );
+        assert_eq!(
+            axis.nearest_bin(window.left_hz, window.span_hz, window.bin_count, 100_003.0,),
+            Some(3)
+        );
     }
 
     #[test]

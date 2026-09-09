@@ -617,6 +617,8 @@ mod tests {
             .publish(
                 &state,
                 PowerTrace {
+                    target: PowerTraceTarget::Spectrum,
+                    generation: 0,
                     frequencies_hz: vec![100_000, 100_001, 100_002, 100_003],
                     levels_dbm: vec![-90.0, -80.0, -70.0, -60.0],
                     rbw_hz: None,

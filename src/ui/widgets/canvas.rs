@@ -146,21 +146,23 @@ mod tests {
         assert_eq!(busy, t.palette_color(1.0));
         assert_eq!(empty, t.palette_color(0.0));
 
-        // **Absence sits below the scale, not above it.** Differing is not
-        // enough: the first version used an ink that is lighter than the
-        // palette's floor, so the part of the band nobody had measured was the
-        // brightest thing on the panel. Only visible on a radio, which is what
-        // this panel's acceptance criterion is for.
-        let luma = |c: ratatui::style::Color| match c {
-            ratatui::style::Color::Rgb(r, g, b) => {
-                0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64
-            }
-            _ => panic!("the theme is truecolor"),
-        };
-        assert!(
-            luma(unseen) <= luma(empty),
-            "unobserved ({unseen:?}) is brighter than an empty channel ({empty:?})"
-        );
+        // **Absence must not be a colour the scale can produce.** Differing from
+        // the two ends is not enough: an ink that lands anywhere on the ramp can
+        // be read as a duty cycle, which is the one thing it must never be
+        // mistaken for.
+        //
+        // The first version used `border_dim` and asserted only that the three
+        // differ. It passed, and on a radio the part of the band nobody had
+        // measured was the *brightest* thing on the panel - a light blue-grey
+        // above the whole ramp. Only visible by looking, which is why this panel
+        // has an acceptance criterion that is not a test.
+        for i in 0..=100 {
+            assert_ne!(
+                unseen,
+                t.palette_color(i as f32 / 100.0),
+                "the ink for absence is on the intensity ramp at {i} %"
+            );
+        }
 
         // And it is the same ink the occupancy profile uses for the same thing.
         assert_eq!(unseen, t.stale);

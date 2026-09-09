@@ -15,5 +15,6 @@ pub mod charts;
 pub mod limit;
 pub mod micro_common;
 pub mod reading;
+pub mod stem;
 pub mod table;
 pub mod timing_fmt;

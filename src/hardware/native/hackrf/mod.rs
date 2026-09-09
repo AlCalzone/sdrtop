@@ -294,6 +294,8 @@ pub fn list() -> Vec<DeviceListing> {
                     label: format!("HackRF One · {}", serial),
                     args: None,
                     serial: Some(serial.clone()),
+                    path: None,
+                    tiny_sa_input: None,
                 });
             }
         }
@@ -337,6 +339,7 @@ pub fn caps() -> DeviceCapabilities {
         level_max_db: 0.0,
         trace_stale_ms: crate::hardware::IQ_TRACE_STALE_MS,
         acquisition: crate::hardware::AcquisitionKind::IqSamples,
+        sample_rate_is_span: false,
         freq_min_hz: 1_000_000,
         freq_max_hz: 6_000_000_000,
         sample_rate_min_hz: 2_000_000.0,

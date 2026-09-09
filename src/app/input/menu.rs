@@ -146,7 +146,7 @@ fn move_down(ctx: &mut InputCtx<'_>, state: MenuState, step: isize) {
         MenuPane::Keys => {
             let last = {
                 let m = metrics(ctx.state);
-                keys::row_count(&m.caps.gain).saturating_sub(1)
+                keys::row_count_for(&m.caps).saturating_sub(1)
             };
             let next = if step >= 0 {
                 (state.scroll + 1).min(last)

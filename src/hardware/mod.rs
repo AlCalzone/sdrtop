@@ -3,12 +3,9 @@
 
 //! The hardware layer, and the map of it.
 //!
-//! Three backends, in two groups. [`native`] holds the radios sdrtop drives
-//! itself and has physically tested; [`soapy`] holds everything reachable
-//! through libSoapySDR, under the replacement rule described there. Neither
-//! group knows the other exists. [`discovery`] is the only module that sees
-//! both, because deciding what to offer when they find the same radio is a
-//! question neither can answer alone.
+//! [`native`] holds the radios sdrtop drives itself. [`soapy`] holds everything
+//! reachable through libSoapySDR. [`tinysa`] holds swept spectrum analyzers.
+//! [`discovery`] is the only module that sees all three groups.
 //!
 //! The rest is shared and backend-neutral: [`traits`] is the vocabulary,
 //! [`process`] the per-sample decode all three feed, [`gain`] the placement
@@ -26,6 +23,7 @@ pub mod native;
 pub mod process;
 pub mod soapy;
 pub mod sysfs;
+pub mod tinysa;
 mod traits;
 
 pub use discovery::{list_all_devices, open_device, DeviceKind, DeviceListing};

@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
     let devices = hardware::list_all_devices(want, soapy_filter.as_deref());
     if devices.is_empty() {
         eprintln!(
-            "No SDR device found. Connect a HackRF or RTL-SDR and try again.{}",
+            "No device found. Connect a HackRF, RTL-SDR, or tinySA and try again.{}",
             hardware::discovery::no_device_hint()
         );
         std::process::exit(1);

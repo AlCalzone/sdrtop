@@ -38,6 +38,8 @@
 use super::fir::{design_lowpass_kaiser, kaiser_beta, kaiser_taps};
 use num_complex::Complex;
 
+/// No consumer outside this file; see [`Resampler`].
+#[allow(dead_code)]
 fn gcd(a: usize, b: usize) -> usize {
     if b == 0 {
         a
@@ -47,7 +49,12 @@ fn gcd(a: usize, b: usize) -> usize {
 }
 
 /// A streaming polyphase resampler at a fixed rational ratio.
-#[allow(dead_code)] // wired in at N13
+///
+/// **No production consumer yet.** Design section 12.3: "the device's rate is a
+/// rational multiple of what a mode needs" is the case this exists for, and no
+/// arc has reached the point of asking a radio for a rate it cannot produce
+/// directly. `fir::design_lowpass_to_spec` is the same story, one layer down.
+#[allow(dead_code)]
 pub struct Resampler {
     l: usize,
     m: usize,
@@ -66,7 +73,7 @@ pub struct Resampler {
     delay_up: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 impl Resampler {
     /// A resampler by `l/m`, with the anti-image and anti-alias filter designed
     /// to `stopband_db` of rejection.

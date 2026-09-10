@@ -29,9 +29,9 @@ pub use lab::{LabState, NoiseReading, RfFreeze};
 pub use micro::MicroView;
 // `NetExit` is not re-exported, for the reason `SweepExit` is not: it exists
 // to be returned and destructured, and no call site has to name it.
-pub use net::{BandOccupancy, CellReading, NetDecodeHealth, NetMode, NetState};
+pub use net::{BandOccupancy, CellReading, NetDecodeHealth, NetMode, NetState, COLUMN_INTERVAL};
 pub use observer::ObserverState;
-pub use radio::RadioState;
+pub use radio::{FrequencyReference, Provenance, RadioState, REFERENCE_STALE_S};
 pub use signal::{
     acpr_offset_hz, classify, Modulation, SignalState, ADC_COMFORT_DBFS, CLASSIFY_MIN_SNR_DB,
     SAT_CLIP_PCT, SAT_CRIT_PCT, SAT_WARN_PCT,

@@ -337,6 +337,11 @@ const BUILTIN_PRESETS: &[(&str, &str)] = &[
     ("micro_gain", include_str!("config/presets/micro_gain.toml")),
     ("net", include_str!("config/presets/net.toml")),
     ("net_survey", include_str!("config/presets/net_survey.toml")),
+    ("net_census", include_str!("config/presets/net_census.toml")),
+    (
+        "net_coexist",
+        include_str!("config/presets/net_coexist.toml"),
+    ),
     (
         "micro_health",
         include_str!("config/presets/micro_health.toml"),
@@ -485,12 +490,51 @@ panels = [
 ]
 "#;
 
+    /// **A key nobody reads is a key nobody notices.**
+    ///
+    /// `PanelSpec` is not `deny_unknown_fields`, deliberately - a user preset
+    /// written against a newer version must still load rather than refusing the
+    /// whole file over one key. The cost is that a typo in a *built-in* is
+    /// silent: `net_survey` asked for `width = 46` when the field is
+    /// `width_pct` and is a percentage, so the right-hand column got no width
+    /// and the panel simply was not drawn. Everything else on the screen looked
+    /// right.
+    ///
+    /// Built-ins are ours, so they are held to the stricter rule here.
+    #[test]
+    fn no_builtin_preset_names_a_key_that_is_never_read() {
+        const PANEL_KEYS: &[&str] = &["name", "position", "height", "width_pct"];
+        const PRESET_KEYS: &[&str] = &["panels", "section", "slot", "title", "blurb"];
+
+        for (name, text) in BUILTIN_PRESETS {
+            let value: toml::Value =
+                toml::from_str(text).unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+            let table = value.as_table().expect("a preset is a table");
+            for key in table.keys() {
+                assert!(
+                    PRESET_KEYS.contains(&key.as_str()),
+                    "{name} sets '{key}', which nothing reads"
+                );
+            }
+            for panel in table["panels"].as_array().expect("panels is an array") {
+                let panel = panel.as_table().expect("a panel is a table");
+                for key in panel.keys() {
+                    assert!(
+                        PANEL_KEYS.contains(&key.as_str()),
+                        "{name} panel '{}' sets '{key}', which nothing reads",
+                        panel["name"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_builtin_preset_parses() {
         // This is what makes `parse_builtin`'s `expect` safe: the text is compiled
         // in, so it cannot differ between here and the shipped binary.
         let cfg = LayoutConfig::default_config();
-        assert_eq!(cfg.presets.len(), 18, "eighteen built-ins");
+        assert_eq!(cfg.presets.len(), 20, "twenty built-ins");
         assert_eq!(cfg.active_preset, DEFAULT_PRESET);
         for (name, preset) in &cfg.presets {
             assert!(!preset.panels.is_empty(), "{name} lists no panels");
@@ -514,6 +558,8 @@ panels = [
             "micro_sweep",
             "net",
             "net_survey",
+            "net_census",
+            "net_coexist",
         ] {
             assert!(cfg.presets.contains_key(want), "missing built-in '{want}'");
         }
@@ -553,7 +599,7 @@ panels = [
             "a new name should be added"
         );
         assert_eq!(cfg.presets["nightwatch"].panels.len(), 3);
-        assert_eq!(cfg.presets.len(), 19, "added, not replaced");
+        assert_eq!(cfg.presets.len(), 21, "added, not replaced");
         // And every built-in is still there.
         assert!(cfg.presets.contains_key("lab_signal"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -564,7 +610,7 @@ panels = [
         let dir = presets_dir_with("replace", &[("lab_iq", A_LAYOUT)]);
         let cfg = LayoutConfig::with_user_presets(&HashMap::new(), Some(&dir));
         assert_eq!(cfg.presets["lab_iq"].panels.len(), 3, "the file should win");
-        assert_eq!(cfg.presets.len(), 18, "replaced, not added");
+        assert_eq!(cfg.presets.len(), 20, "replaced, not added");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -623,8 +669,8 @@ panels = [
         assert!(!cfg.presets.contains_key("README"), "only .toml is read");
         assert_eq!(
             cfg.presets.len(),
-            19,
-            "eighteen built-ins plus the one good file"
+            21,
+            "twenty built-ins plus the one good file"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -635,14 +681,14 @@ panels = [
             LayoutConfig::with_user_presets(&HashMap::new(), None)
                 .presets
                 .len(),
-            18
+            20
         );
         let missing = std::env::temp_dir().join("sdrtop-presets-that-do-not-exist");
         assert_eq!(
             LayoutConfig::with_user_presets(&HashMap::new(), Some(&missing))
                 .presets
                 .len(),
-            18
+            20
         );
     }
 

@@ -65,7 +65,14 @@ fn step_from_turns(turns_per_sample: f64) -> u64 {
 }
 
 /// A phase-accumulator oscillator at a fixed sample rate.
-#[allow(dead_code)] // wired in at N4
+///
+/// **No production consumer yet.** Every DSP test in this crate that needs a
+/// synthetic tone or a known frequency offset builds one, but nothing in the
+/// running app has needed to *generate or mix out* a carrier: N16's reference
+/// measurement reads an offset with `dsp::correlate`/`dsp::estimate` and
+/// reports it, it does not correct for it. Mixing a measured offset out before
+/// decode is an arc's job, once one exists.
+#[allow(dead_code)]
 pub struct Nco {
     /// Current phase in accumulator units, `2^64` to the turn.
     phase: u64,
@@ -75,7 +82,7 @@ pub struct Nco {
     sample_rate_hz: f64,
 }
 
-#[allow(dead_code)] // wired in at N4
+#[allow(dead_code)]
 impl Nco {
     /// An oscillator at `freq_hz`, starting at zero phase.
     ///

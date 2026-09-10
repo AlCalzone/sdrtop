@@ -32,7 +32,7 @@ use ratatui::{
 };
 
 use crate::signal::net::{band, occupancy};
-use crate::state::{BandOccupancy, CellReading, SdrMetrics};
+use crate::state::{CellReading, SdrMetrics};
 use crate::ui::panel::{Panel, PanelChrome, Staleness};
 use crate::ui::widgets::reading::Reading;
 
@@ -135,7 +135,8 @@ fn ruler(width: usize) -> String {
     String::from_utf8(row).unwrap_or_default()
 }
 
-fn lines(occ: &BandOccupancy, theme: &crate::Theme, width: usize) -> Vec<Line<'static>> {
+fn lines(state: &SdrMetrics, theme: &crate::Theme, width: usize) -> Vec<Line<'static>> {
+    let occ = &state.net.band;
     let mut out = Vec::new();
     let dim = Style::default().fg(theme.label);
 
@@ -154,7 +155,32 @@ fn lines(occ: &BandOccupancy, theme: &crate::Theme, width: usize) -> Vec<Line<'s
     ]));
 
     if occ.cells.is_empty() {
-        out.push(Line::from(Span::styled("waiting for RX", dim)));
+        // **Two different silences.** No samples yet is a wait; a view too
+        // narrow to hold a whole megahertz is a refusal that will never end.
+        // Saying "waiting for RX" while the feed panel beside this one counts
+        // blocks arriving is the version a reader cannot act on.
+        match &state.net.survey_refused {
+            Some(why) => {
+                // Wrapped rather than truncated: the sentence is the whole
+                // content here, and half of it cut mid-word is the shape the
+                // feed-health notes already refuse.
+                for row in crate::ui::chrome::wrap(&format!("no band measurement: {why}"), width, 3)
+                {
+                    out.push(Line::from(Span::styled(
+                        row,
+                        Style::default().fg(theme.stale),
+                    )));
+                }
+                for row in crate::ui::chrome::wrap(
+                    "widen the sample rate, or press [M] to lock to one channel",
+                    width,
+                    2,
+                ) {
+                    out.push(Line::from(Span::styled(row, dim)));
+                }
+            }
+            None => out.push(Line::from(Span::styled("waiting for RX", dim))),
+        }
         return out;
     }
 
@@ -300,7 +326,7 @@ impl Panel for NetOccupancyPanel {
             return;
         }
         f.render_widget(
-            Paragraph::new(lines(&state.net.band, theme, inner.width as usize)),
+            Paragraph::new(lines(state, theme, inner.width as usize)),
             inner,
         );
     }
@@ -326,13 +352,18 @@ mod tests {
             cells[i].duty = duty;
             cells[i].peak_dbfs = peak;
         }
-        m.net.band = BandOccupancy {
+        m.net.band = crate::state::BandOccupancy {
             cells,
             noise_dbfs: Some(-78.4),
             trusted: true,
             tail: 2.07,
             spread: 40.2,
             window_s: 6.4e-6,
+            watch_start: None,
+            // A dwell has no past: the history is the band's, and `absorb`
+            // owns it.
+            history: Default::default(),
+            last_column: None,
         };
         m
     }
@@ -469,6 +500,26 @@ mod tests {
         assert!(out.contains("tail 3.90 (max 2.41)"), "{out}");
         assert!(!out.contains('█'), "{out}");
         assert!(!out.contains(UNSEEN), "{out}");
+    }
+
+    /// **Two silences, told apart.** A survey that cannot run is not a survey
+    /// that has not started, and the panel must not tell a reader to wait for
+    /// something that will never arrive.
+    ///
+    /// This was found on a radio at 2 Msps: the profile said "waiting for RX"
+    /// while the feed panel beside it counted two hundred blocks in, and the
+    /// only true sentence was in a log neither of that preset's panels carries.
+    #[test]
+    fn a_survey_that_cannot_run_says_so_rather_than_asking_for_patience() {
+        let mut m = SdrMetrics::fixture().streaming();
+        m.net.survey_refused =
+            Some("1.8 MHz of view is too narrow to hold a whole megahertz".to_string());
+        let out = draw(NetOccupancyPanel, 80, 12, &m).join("\n");
+        assert!(out.contains("1.8 MHz"), "{out}");
+        assert!(out.contains("too narrow"), "{out}");
+        assert!(!out.contains("waiting for RX"), "{out}");
+        // And what to do about it, since neither answer is obvious.
+        assert!(out.contains("[M]") || out.contains("sample rate"), "{out}");
     }
 
     #[test]

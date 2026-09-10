@@ -46,12 +46,38 @@ impl Plan {
     ///
     /// **Derived from the radio, not chosen.** The number of positions is the
     /// fewest whose spans cover the band, and they are spread evenly across it
-    /// so the overlap is shared rather than piled up at one end. Centres are
-    /// rounded to whole megahertz to line up with the cell grid, which the
-    /// overlap absorbs: rounding by at most half a megahertz cannot open a gap
-    /// in a plan whose steps are already shorter than its spans.
-    pub fn for_span(span_hz: f64) -> Self {
-        let width = (band::HIGH_HZ - band::LOW_HZ) as f64;
+    /// so the overlap is shared rather than piled up at one end. Rounding the
+    /// centres by at most half a megahertz cannot open a gap in a plan whose
+    /// steps are already shorter than its spans.
+    ///
+    /// **Centres land in the middle of a cell, not on the boundary between
+    /// two.** A hop is blind in its own DC, and a centre on a boundary spreads
+    /// that blindness across the two cells either side of it - so the one-cell
+    /// walk of [`Self::DODGE_HZ`] would leave the middle one dark on both
+    /// passes. Half a megahertz along, the shadow is one cell wide and the walk
+    /// clears it.
+    /// How far the positions walk on alternate passes.
+    ///
+    /// **One cell, and it exists because of the DC guard.** Every hop is blind
+    /// in the megahertz it is tuned to - the front end's own leakage sits there
+    /// and `occupancy::bin_cells` drops those bins rather than reporting the
+    /// artefact as a fully busy channel. The positions do not overlap at their
+    /// centres, so a fixed plan would leave one permanent blind stripe per
+    /// position: five megahertz of band the survey never mentions.
+    ///
+    /// Walking the whole plan one cell along on alternate passes costs nothing -
+    /// the same number of positions, the same dwell - and puts every blind cell
+    /// of one pass in the clear on the next.
+    pub const DODGE_HZ: u64 = occupancy::CELL_HZ;
+
+    pub fn for_span(span_hz: f64, pass: u64) -> Self {
+        // Spread over the band plus the half cell the mid-cell rounding below
+        // can move a position: without it the first centre rounds *up*, its span
+        // starts half a megahertz inside the band, and cell zero is never
+        // measured by any pass.
+        let half = occupancy::CELL_HZ as f64 / 2.0;
+        let low = band::LOW_HZ as f64 - half;
+        let width = band::HIGH_HZ as f64 + half - low;
         if !span_hz.is_finite() || span_hz <= 0.0 {
             return Self {
                 hops: Vec::new(),
@@ -61,16 +87,20 @@ impl Plan {
         // One position is enough for a receiver that can see the whole band, and
         // for one that cannot see a whole cell there is nothing to plan.
         let n = (width / span_hz).ceil().max(1.0) as usize;
-        let first = band::LOW_HZ as f64 + span_hz / 2.0;
+        let first = low + span_hz / 2.0;
         let step = if n > 1 {
             (width - span_hz) / (n - 1) as f64
         } else {
             0.0
         };
+        let dodge = (pass % 2) * Self::DODGE_HZ;
         let hops = (0..n)
             .map(|k| {
                 let hz = first + k as f64 * step;
-                (hz / 1e6).round() as u64 * 1_000_000
+                let cell = occupancy::CELL_HZ as f64;
+                let mid = ((hz - cell / 2.0) / cell).round() as u64 * occupancy::CELL_HZ
+                    + occupancy::CELL_HZ / 2;
+                mid + dodge
             })
             .collect();
         Self { hops, span_hz }
@@ -81,17 +111,30 @@ impl Plan {
         (SETTLE + DWELL) * self.hops.len() as u32
     }
 
-    /// Every cell any position of this plan observes.
+    /// Whether this plan measures any cell at all.
     ///
-    /// The plan is only a plan if this is the whole band; `the_plan_covers_the_whole_band`
-    /// is the assertion, and it is the one that matters, because a gap here is a
-    /// stretch of spectrum the survey would report as unobserved for ever
-    /// without anything saying why.
-    pub fn covered(&self) -> Vec<bool> {
+    /// A receiver whose usable span is narrower than a cell plus its own DC
+    /// guard has positions to visit and nothing to learn at any of them. Better
+    /// to say so once than to hop for ever publishing an empty band.
+    pub fn covers_anything(&self, rate_hz: f64, bins: usize) -> bool {
+        self.covered(rate_hz, bins).iter().any(|c| *c)
+    }
+
+    /// Every cell this pass actually measures: inside a span, and not in a
+    /// position's own DC shadow.
+    ///
+    /// `bins` is the transform size the scan will use, because the shadow's
+    /// width is a bin count. The plan is only a plan if two consecutive passes
+    /// between them cover the band; `the_plan_covers_the_whole_band` is the
+    /// assertion, and it is the one that matters, because a gap here is a
+    /// stretch of spectrum the survey reports as unobserved for ever without
+    /// anything saying why.
+    pub fn covered(&self, rate_hz: f64, bins: usize) -> Vec<bool> {
         let mut seen = vec![false; occupancy::CELLS];
         for hz in &self.hops {
+            let shadow = occupancy::dc_shadow(*hz as f64, rate_hz, bins);
             for c in occupancy::cells_observed(*hz as f64, self.span_hz) {
-                seen[c] = true;
+                seen[c] |= !shadow.contains(&c);
             }
         }
         seen
@@ -102,12 +145,17 @@ impl Plan {
 mod tests {
     use super::*;
 
-    /// The one that matters. A gap in the plan is a stretch of band the survey
-    /// would report as unobserved for ever, with nothing on screen saying why.
+    /// **The one that matters.** A gap here is a stretch of band the survey
+    /// reports as unobserved for ever, with nothing on screen saying why.
+    ///
+    /// Two consecutive passes, because one pass cannot cover the band: every
+    /// position is blind in the megahertz it is tuned to, and the positions do
+    /// not overlap at their centres. The plan walks one cell along on alternate
+    /// passes so each pass covers what the other could not.
     #[test]
     fn the_plan_covers_the_whole_band() {
         for span in [
-            2_000_000.0,
+            4_000_000.0,
             8_000_000.0,
             10_000_000.0,
             18_000_000.0,
@@ -115,58 +163,78 @@ mod tests {
             40_000_000.0,
             100_000_000.0,
         ] {
-            let plan = Plan::for_span(span);
-            let covered = plan.covered();
+            // The rate a radio with this usable span would be running at, and
+            // the transform the scan picks for it.
+            let rate = span * 20.0 / 18.0;
+            let bins = crate::signal::net::scan::bins_for(rate);
+            let mut covered = [false; occupancy::CELLS];
+            for pass in 0..2u64 {
+                for (c, seen) in Plan::for_span(span, pass)
+                    .covered(rate, bins)
+                    .iter()
+                    .enumerate()
+                {
+                    covered[c] |= *seen;
+                }
+            }
             let missed: Vec<usize> = (0..occupancy::CELLS).filter(|c| !covered[*c]).collect();
-            assert!(
-                missed.is_empty(),
-                "span {span}: {} hops missed cells {missed:?}",
-                plan.hops.len()
-            );
+            assert!(missed.is_empty(), "span {span}: missed cells {missed:?}");
         }
     }
 
-    /// The hop count is the fewest that can work, and the positions are spread
-    /// rather than piled up at one end.
+    /// **A two-megahertz receiver cannot survey this band, and the plan says so
+    /// rather than hopping for ever producing nothing.**
+    ///
+    /// The gate admits it: two megasamples is what the cheapest PHY needs, so a
+    /// radio that reaches the band and can run at that rate gets the section.
+    /// But a two-megahertz span holds one whole cell, and that cell is the one
+    /// the local oscillator sits in - excluded, because otherwise it reads as a
+    /// fully busy megahertz. One megahertz of view, none of it usable.
+    ///
+    /// Receiving a channel and surveying a band are different questions and the
+    /// gate only asks the first. This is where the second is answered.
     #[test]
-    fn the_plan_is_the_fewest_positions_that_cover_the_band() {
-        // 83.5 MHz of band, 18 MHz at a time, is five.
-        let plan = Plan::for_span(18_000_000.0);
-        assert_eq!(plan.hops.len(), 5);
-        assert_eq!(
-            plan.hops,
-            vec![
-                2_409_000_000,
-                2_425_000_000,
-                2_442_000_000,
-                2_458_000_000,
-                2_475_000_000
-            ]
+    fn a_receiver_too_narrow_to_see_past_its_own_oscillator_covers_nothing() {
+        let rate = 2_200_000.0;
+        let bins = crate::signal::net::scan::bins_for(rate);
+        let plan = Plan::for_span(2_000_000.0, 0);
+        assert!(!plan.hops.is_empty(), "it still has positions to visit");
+        assert!(
+            !plan.covers_anything(rate, bins),
+            "a 2 MHz span cannot see past its own DC"
         );
-        // Evenly spread: no two steps differ by more than the megahertz the
-        // rounding can move a centre.
-        let steps: Vec<u64> = plan.hops.windows(2).map(|w| w[1] - w[0]).collect();
-        let (lo, hi) = (steps.iter().min().unwrap(), steps.iter().max().unwrap());
-        assert!(hi - lo <= 1_000_000, "{steps:?}");
-
-        // A radio that sees the whole band does not hop at all.
-        assert_eq!(Plan::for_span(100_000_000.0).hops.len(), 1);
-        // And a nonsense span is no plan rather than a division by zero.
-        assert!(Plan::for_span(0.0).hops.is_empty());
-        assert!(Plan::for_span(f64::NAN).hops.is_empty());
+        // Twice that, and it works.
+        assert!(Plan::for_span(4_000_000.0, 0).covers_anything(4_400_000.0, bins));
     }
 
-    /// Every position is inside what the gate guarantees the radio can tune to.
+    /// And one pass on its own does *not* cover it, which is why there are two.
+    ///
+    /// Written as an assertion rather than left implied: if a future change made
+    /// one pass sufficient, the alternation would be dead weight nobody would
+    /// think to remove, and if it made two insufficient the test above would
+    /// fail without saying what changed.
     #[test]
-    fn every_position_is_one_the_gate_admits() {
-        for span in [8_000_000.0, 18_000_000.0, 20_000_000.0] {
-            for hz in Plan::for_span(span).hops {
-                assert!(
-                    (super::super::gate::LOWEST_CENTRE_HZ..=super::super::gate::HIGHEST_CENTRE_HZ)
-                        .contains(&hz),
-                    "span {span} would tune to {hz}"
-                );
-            }
+    fn a_single_pass_is_blind_where_it_is_tuned() {
+        let span = 18_000_000.0;
+        let rate = 20_000_000.0;
+        let bins = crate::signal::net::scan::bins_for(rate);
+        let plan = Plan::for_span(span, 0);
+        let covered = plan.covered(rate, bins);
+        let blind: Vec<usize> = (0..occupancy::CELLS).filter(|c| !covered[*c]).collect();
+        assert_eq!(
+            blind.len(),
+            plan.hops.len(),
+            "one blind cell per position: {blind:?}"
+        );
+        // And each blind cell is a position's own centre.
+        for hz in &plan.hops {
+            let cell = occupancy::cell_of(*hz as f64).unwrap();
+            assert!(blind.contains(&cell), "{hz} is not blind but should be");
+        }
+        // The next pass has them, and is blind one cell along.
+        let next = Plan::for_span(span, 1).covered(rate, bins);
+        for c in blind {
+            assert!(next[c], "cell {c} is blind on both passes");
         }
     }
 
@@ -174,7 +242,7 @@ mod tests {
     /// much of the band any one reading covers.
     #[test]
     fn a_pass_is_the_settle_and_the_dwell_at_every_position() {
-        let plan = Plan::for_span(18_000_000.0);
+        let plan = Plan::for_span(18_000_000.0, 0);
         assert_eq!(plan.cycle(), (SETTLE + DWELL) * 5);
         assert_eq!(plan.cycle(), Duration::from_millis(625));
         // Which is the coverage every cell in the section is reported at: one

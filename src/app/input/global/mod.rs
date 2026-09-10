@@ -21,6 +21,7 @@
 //! on-screen key reference against it. Add an arm here, add its row there, or the
 //! suite fails.
 
+mod export;
 mod gain;
 // `menu` reaches `try_set_preset` too: the menu and the number keys must load
 // a layout the same way, or the two could drift.
@@ -40,6 +41,13 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
         // ── The radio ───────────────────────────────────────────────────────
         KeyCode::Char(' ') => radio::toggle_rx(ctx),
         KeyCode::Char('r') => radio::reset_defaults(ctx),
+        KeyCode::Char('y') => radio::capture_reference(ctx),
+        // Section-scoped, and it declines rather than absorbing: see the `m` arm.
+        KeyCode::Char('o') => {
+            if !export::export_section(ctx) {
+                view::enter_focus(ctx, 'o');
+            }
+        }
         KeyCode::Char('f') => radio::begin_frequency_input(ctx),
         KeyCode::Char('s') => radio::begin_sample_rate_input(ctx),
         // Section-scoped, and it declines rather than absorbing: outside NET
@@ -423,7 +431,7 @@ mod tests {
         let mut h = Harness::new();
         let preset = h.engine.active_preset().to_string();
         let logs_before = metrics(&h.state).ui.log.len();
-        for c in ['x', 'y', 'z', '@'] {
+        for c in ['x', 'z', '@'] {
             assert_eq!(h.press(c), KeyAction::Continue);
         }
         assert_eq!(h.engine.active_preset(), preset);

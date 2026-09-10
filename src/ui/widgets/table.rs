@@ -1,0 +1,390 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 MusiThang <viktor.laszlo92@protonmail.com>
+
+//! The sortable table: columns, a sort key, and a selected row.
+//!
+//! Design section 9.1 calls this idiom D, and it is the one the app had no
+//! answer for. Both arcs need a population keyed by address - who is here, how
+//! much airtime each of them spends, how good their clock is - and a list of
+//! devices with no way to order it is a list nobody can read.
+//!
+//! **The widget draws; it does not sort.** Which column orders the rows, which
+//! way round, and which row the cursor is on are decisions with consequences
+//! outside this file - they survive a redraw, they are shown in the chrome, a
+//! key changes them - so they live in the state and arrive here already made.
+//! What is here is the part that is only about drawing: how the columns share a
+//! width, what happens when there is not enough of it, and where the viewport
+//! sits.
+//!
+//! **A column is dropped whole or drawn whole.** The same rule the feed-health
+//! notes follow, for the same reason: half a column of addresses is not a
+//! narrower table, it is a table that lies about what it is showing. Columns go
+//! from the right, because that is the order they were declared in and the
+//! declaration puts the identifying ones first.
+
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
+
+/// Which way a column's text sits in its width.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Align {
+    /// Names, addresses, anything read left to right.
+    Left,
+    /// Numbers, so the digits line up and a column can be scanned.
+    Right,
+}
+
+/// One column's shape. The contents arrive per row.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Column {
+    pub title: &'static str,
+    /// The narrowest this column is worth drawing at.
+    pub width: usize,
+    pub align: Align,
+}
+
+/// Which column orders the rows, and which way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Sort {
+    pub column: usize,
+    pub descending: bool,
+}
+
+impl Sort {
+    /// The marker drawn beside the sorted column's title.
+    pub(crate) fn marker(&self) -> &'static str {
+        if self.descending {
+            "\u{25be}"
+        } else {
+            "\u{25b4}"
+        }
+    }
+}
+
+/// Space between columns. One column of gap is enough to separate them and two
+/// would cost a column of content at the widths this deck runs at.
+const GAP: usize = 1;
+
+/// The columns that fit in `width`, in declaration order.
+///
+/// A column earns its place only if the whole of it fits, gap included. Nothing
+/// is truncated and nothing is squeezed: a table that shrank its address column
+/// would still be showing addresses, just not ones anybody could use.
+pub(crate) fn columns_that_fit(columns: &[Column], width: usize) -> usize {
+    let mut used = 0usize;
+    for (i, c) in columns.iter().enumerate() {
+        let need = if i == 0 { c.width } else { GAP + c.width };
+        if used + need > width {
+            return i;
+        }
+        used += need;
+    }
+    columns.len()
+}
+
+/// A cell laid into its column.
+fn cell(text: &str, column: &Column) -> String {
+    let n = text.chars().count();
+    if n > column.width {
+        // The panel declares a column wide enough for what it puts in it, so
+        // this is its bug rather than a case to design for. Truncating keeps the
+        // table readable while it is being got wrong.
+        return text.chars().take(column.width).collect();
+    }
+    let pad = " ".repeat(column.width - n);
+    match column.align {
+        Align::Left => format!("{text}{pad}"),
+        Align::Right => format!("{pad}{text}"),
+    }
+}
+
+/// Where the viewport starts so that `selected` is inside it.
+///
+/// Scrolls by the least that works, so a cursor moving down a long list does not
+/// jump the whole page under it.
+pub(crate) fn viewport_start(first: usize, selected: usize, rows: usize, height: usize) -> usize {
+    if height == 0 || rows == 0 {
+        return 0;
+    }
+    let last_start = rows.saturating_sub(height);
+    let mut start = first.min(last_start);
+    if selected < start {
+        start = selected;
+    } else if selected >= start + height {
+        start = selected + 1 - height;
+    }
+    start.min(last_start)
+}
+
+/// The header row: titles, with the sort marker on the column that orders them.
+pub(crate) fn header(
+    columns: &[Column],
+    fit: usize,
+    sort: Sort,
+    theme: &crate::Theme,
+) -> Line<'static> {
+    let mut spans = Vec::with_capacity(fit * 2);
+    for (i, column) in columns.iter().take(fit).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" ".repeat(GAP)));
+        }
+        // The marker on a column that is not drawn is not moved to one that is:
+        // a table that said it was ordered by a column nobody can see would be
+        // worse than one that said nothing.
+        let sorted = i == sort.column;
+        let title = if sorted {
+            format!("{}{}", column.title, sort.marker())
+        } else {
+            column.title.to_string()
+        };
+        let colour = if sorted { theme.value_hi } else { theme.label };
+        spans.push(Span::styled(
+            cell(&title, column),
+            Style::default().fg(colour),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// One row of cells, drawn into the columns that fit.
+pub(crate) fn row(
+    columns: &[Column],
+    fit: usize,
+    cells: &[String],
+    selected: bool,
+    theme: &crate::Theme,
+) -> Line<'static> {
+    // Reversed rather than a cursor glyph in a column of its own: the cursor
+    // must not move the columns, or every row would shift when one is picked.
+    let style = if selected {
+        Style::default()
+            .fg(theme.value_hi)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(theme.value)
+    };
+    let empty = String::new();
+    let mut spans = Vec::with_capacity(fit * 2);
+    for (i, column) in columns.iter().take(fit).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ".repeat(GAP), style));
+        }
+        let text = cells.get(i).unwrap_or(&empty);
+        spans.push(Span::styled(cell(text, column), style));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COLUMNS: &[Column] = &[
+        Column {
+            title: "ADDRESS",
+            width: 17,
+            align: Align::Left,
+        },
+        Column {
+            title: "SEEN",
+            width: 6,
+            align: Align::Right,
+        },
+        Column {
+            title: "PKTS",
+            width: 6,
+            align: Align::Right,
+        },
+        Column {
+            title: "RSSI",
+            width: 8,
+            align: Align::Right,
+        },
+    ];
+
+    fn cells(a: &str, seen: &str, pkts: &str, rssi: &str) -> Vec<String> {
+        vec![
+            a.to_string(),
+            seen.to_string(),
+            pkts.to_string(),
+            rssi.to_string(),
+        ]
+    }
+
+    fn text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    /// A column is dropped whole or drawn whole.
+    #[test]
+    fn a_column_that_does_not_fit_is_not_drawn_at_all() {
+        // 17 + 1 + 6 + 1 + 6 + 1 + 8 = 40 for the lot.
+        assert_eq!(columns_that_fit(COLUMNS, 40), 4);
+        assert_eq!(
+            columns_that_fit(COLUMNS, 39),
+            3,
+            "the last one does not fit"
+        );
+        assert_eq!(columns_that_fit(COLUMNS, 31), 3);
+        assert_eq!(columns_that_fit(COLUMNS, 30), 2);
+        assert_eq!(columns_that_fit(COLUMNS, 17), 1);
+        // Not even the first: better to draw nothing than a sliced address.
+        assert_eq!(columns_that_fit(COLUMNS, 16), 0);
+        assert_eq!(columns_that_fit(COLUMNS, 0), 0);
+        // Extra width does not add a fifth column out of nowhere.
+        assert_eq!(columns_that_fit(COLUMNS, 200), 4);
+    }
+
+    /// Numbers right, names left, and every row the same width so a column can
+    /// be read down.
+    #[test]
+    fn the_columns_line_up_at_every_width() {
+        for width in 17..60usize {
+            let fit = columns_that_fit(COLUMNS, width);
+            let a = row(
+                COLUMNS,
+                fit,
+                &cells("a4:83:e7:1c:09:be", "2 s", "1204", "-41.2"),
+                false,
+                &crate::Theme::sdr(),
+            );
+            let b = row(
+                COLUMNS,
+                fit,
+                &cells("f0:18:98:00:11:22", "41 s", "7", "-88.0"),
+                false,
+                &crate::Theme::sdr(),
+            );
+            let h = header(
+                COLUMNS,
+                fit,
+                Sort {
+                    column: 2,
+                    descending: true,
+                },
+                &crate::Theme::sdr(),
+            );
+            let (ta, tb, th) = (text(&a), text(&b), text(&h));
+            assert_eq!(ta.chars().count(), tb.chars().count(), "width {width}");
+            assert_eq!(ta.chars().count(), th.chars().count(), "width {width}");
+            assert!(ta.chars().count() <= width, "width {width}: {ta:?}");
+            if fit >= 3 {
+                // The two packet counts end in the same column, which is the
+                // whole point of a right-aligned number.
+                let end = |t: &str| t.find("1204").map(|i| i + 4);
+                assert!(end(&ta).is_some(), "{ta:?}");
+                assert_eq!(
+                    ta.find("1204").map(|i| i + 4),
+                    tb.find('7').map(|i| i + 1),
+                    "width {width}\\n{ta}\\n{tb}"
+                );
+            }
+        }
+    }
+
+    /// The sort marker is on the column that orders the table, and on no other.
+    #[test]
+    fn the_header_marks_the_column_that_orders_it() {
+        let theme = crate::Theme::sdr();
+        let down = text(&header(
+            COLUMNS,
+            4,
+            Sort {
+                column: 2,
+                descending: true,
+            },
+            &theme,
+        ));
+        assert!(down.contains("PKTS\u{25be}"), "{down}");
+        assert_eq!(down.matches('\u{25be}').count(), 1, "{down}");
+        assert!(!down.contains('\u{25b4}'), "{down}");
+
+        let up = text(&header(
+            COLUMNS,
+            4,
+            Sort {
+                column: 0,
+                descending: false,
+            },
+            &theme,
+        ));
+        assert!(up.contains("ADDRESS\u{25b4}"), "{up}");
+
+        // A sort on a column that is not drawn puts no marker anywhere, rather
+        // than one on the wrong column.
+        let hidden = text(&header(
+            COLUMNS,
+            2,
+            Sort {
+                column: 3,
+                descending: true,
+            },
+            &theme,
+        ));
+        assert!(!hidden.contains('\u{25be}'), "{hidden}");
+    }
+
+    /// The cursor is visible, and it is the row it is on.
+    #[test]
+    fn the_selected_row_is_the_one_that_is_marked() {
+        let theme = crate::Theme::sdr();
+        let plain = row(
+            COLUMNS,
+            4,
+            &cells("a4:83:e7:1c:09:be", "2 s", "12", "-41.2"),
+            false,
+            &theme,
+        );
+        let picked = row(
+            COLUMNS,
+            4,
+            &cells("a4:83:e7:1c:09:be", "2 s", "12", "-41.2"),
+            true,
+            &theme,
+        );
+        assert_eq!(
+            text(&plain).chars().count(),
+            text(&picked).chars().count(),
+            "the cursor must not move the columns"
+        );
+        assert!(
+            picked
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "nothing marks the selected row"
+        );
+        assert!(!plain
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+    }
+
+    /// The viewport follows the cursor, by the least that works.
+    #[test]
+    fn the_view_scrolls_only_as_far_as_it_has_to() {
+        // Ten rows in a window of four.
+        assert_eq!(viewport_start(0, 0, 10, 4), 0);
+        assert_eq!(viewport_start(0, 3, 10, 4), 0, "still on screen");
+        assert_eq!(viewport_start(0, 4, 10, 4), 1, "one row, not a page");
+        assert_eq!(viewport_start(0, 9, 10, 4), 6, "the end of the list");
+        // Back up, and it follows the other way.
+        assert_eq!(viewport_start(6, 6, 10, 4), 6);
+        assert_eq!(viewport_start(6, 5, 10, 4), 5);
+        // A window taller than the list never scrolls.
+        assert_eq!(viewport_start(0, 9, 10, 20), 0);
+        assert_eq!(
+            viewport_start(3, 0, 10, 20),
+            0,
+            "and it comes back to the top"
+        );
+        // Degenerate: no height, no rows.
+        assert_eq!(viewport_start(0, 0, 0, 4), 0);
+        assert_eq!(viewport_start(0, 5, 10, 0), 0);
+    }
+}

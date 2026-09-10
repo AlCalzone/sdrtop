@@ -311,6 +311,10 @@ pub fn title_spans(
             // rather than the amber that means something is wrong.
             Tag::Survey => ("SURVEY".to_string(), theme.value_hi),
             Tag::Lock => ("LOCK".to_string(), theme.value_hi),
+            Tag::Sorted(key, descending) => (
+                format!("{}{key}", if *descending { "\u{2193}" } else { "\u{2191}" }),
+                theme.label,
+            ),
         };
         spans.push(Span::styled(
             format!(" [{text}]"),

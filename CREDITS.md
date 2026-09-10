@@ -8,6 +8,12 @@ This project was developed with humans and AI working together.
   R828D / E4000), written against the `SdrDevice` abstraction and confirmed on
   real hardware in both normal RX and observer mode. It is the single change
   that took sdrtop from a one-device app to a two-device one.
+- **[@AlCalzone](https://github.com/AlCalzone)**: the tinySA / tinySA Ultra
+  backend, staged as a sequence of reviewable PRs - calibrated power-trace
+  acquisition, native band sweeps, and the device-options framework with
+  numeric entry that both the spectrum analyzer and tinySA controls now share.
+  Verified on a tinySA Ultra ZS405. Thank you for the care put into structuring
+  it this way.
 
 Found a bug, tested a clone nobody else owns, or sent a patch? Open an issue or
 a pull request and your name belongs here too.

@@ -62,6 +62,50 @@ impl FftWorker {
         }
     }
 
+    /// Establish the frequency reference from this block, if somebody asked.
+    ///
+    /// Lives here because this worker already has raw samples and the geometry
+    /// to read them with. The measurement itself is `signal::reference`, which
+    /// is pure and knows nothing about workers; what is here is the flag, the
+    /// two lock blocks and the sentence the user reads.
+    fn capture_reference(&self, chunk: &[u8]) {
+        let (asked, tuned_hz, rate) = {
+            let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let asked = std::mem::take(&mut m.radio.reference_request);
+            (asked, m.radio.frequency, m.radio.config_sample_rate)
+        };
+        if !asked {
+            return;
+        }
+        // Measured with no lock held: the correlation is thousands of complex
+        // multiplies and a mutex held across it is a dropped frame everywhere
+        // else on the deck.
+        let result = crate::signal::reference::capture(chunk, self.geometry, tuned_hz, rate);
+
+        let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok((ppm, standard)) => {
+                let reading = crate::ui::widgets::reading::Reading::new(ppm, "ppm", f64::INFINITY);
+                m.push_log(format!(
+                    "Frequency reference: {} against {}",
+                    reading.text(),
+                    standard.name
+                ));
+                m.radio.reference = Some(crate::state::FrequencyReference {
+                    ppm: ppm.value(),
+                    sigma_ppm: ppm.sigma(),
+                    // Traceable because the station is a national standard, not
+                    // because we checked its accuracy: see `Standard::tolerance_ppm`,
+                    // which is `None` for every row until somebody reads one.
+                    provenance: crate::state::Provenance::Traceable,
+                    source: standard.name.to_string(),
+                    at: Instant::now(),
+                });
+            }
+            Err(why) => m.push_log(format!("Frequency reference: {why}")),
+        }
+    }
+
     pub fn run(self) {
         let n = self.fft_size;
         let mut planner = FftPlanner::<f32>::new();
@@ -95,6 +139,11 @@ impl FftWorker {
         let mut current_alpha = self.ema_alpha;
 
         while let Ok(chunk) = self.sample_rx.recv() {
+            // Asked for once, taken from the block already in hand. It runs
+            // before the frame loop because it wants the whole block unwindowed
+            // rather than the transform's slices of it, and because a capture
+            // nobody asked for costs one bool read.
+            self.capture_reference(&chunk);
             buf.extend_from_slice(&chunk);
 
             // `n` **pairs**, and a pair is not two bytes on every radio: CS16

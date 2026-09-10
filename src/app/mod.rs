@@ -208,10 +208,25 @@ impl App {
         // active is how the rest of the layout already works. The gate itself stays,
         // so the extra per-block copy still costs nothing on every screen without it.
         let demod_preset = self.engine.is_panel_visible("fm_demod");
+        // Written into the **shared state**, not into the snapshot below.
+        //
+        // Everything after the clone is the UI thread talking to itself: the
+        // footer reads it back out of the frame it was just handed. These three
+        // have consumers on other threads, so they have to be here, on the
+        // shared side of the clone, and the section is the one that proves it -
+        // `hardware::process` gates the NET sample feed on it and
+        // `tasks::net` decides whether to survey by it. It used to be set on the
+        // snapshot with the footer's fields, which looked right on every screen
+        // and meant both of those read an empty string for ever.
         let mut m = {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             guard.sweep.active = sweep_active;
             guard.demod.enabled = demod_preset && guard.demod.user_on;
+            guard.ui.section = self
+                .engine
+                .scope()
+                .map(|s| s.id.clone())
+                .unwrap_or_default();
             guard.clone()
         };
         // Mirror the engine's active preset into the cloned snapshot so the
@@ -220,11 +235,8 @@ impl App {
         m.ui.preset_names = self.engine.preset_names();
         // The footer names the keys that work right now, and the digits are
         // scoped, so it reads the active section rather than keeping a table.
-        m.ui.section = self
-            .engine
-            .scope()
-            .map(|s| s.id.clone())
-            .unwrap_or_default();
+        // The section itself is set above, on the shared state, because it has
+        // readers off this thread.
         m.ui.scope = self
             .engine
             .scope()
@@ -818,6 +830,51 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!refreshed.get());
+    }
+
+    /// **What other threads read is written to the shared state, not to the
+    /// snapshot.**
+    ///
+    /// The frame the UI draws is a *clone* of `SdrMetrics`, and most of what is
+    /// stamped onto it afterwards is the UI thread talking to itself - the
+    /// footer reads back the preset name it was just handed. `ui.section` is not
+    /// like that: `hardware::process` gates the NET sample feed on it and
+    /// `tasks::net` decides whether to survey by it, and both read the shared
+    /// state.
+    ///
+    /// It was set on the snapshot, one line below the clone. Every screen looked
+    /// right, because every panel renders from the snapshot - and the two
+    /// consumers off this thread read an empty string for ever, so the NET
+    /// section rendered its header, its mode and its empty panel while no block
+    /// was ever forwarded and the radio never hopped. Nothing failed: every test
+    /// of the consumers sets `ui.section` by hand, which is exactly the shape of
+    /// test that verifies a reader and never its writer.
+    ///
+    /// Read as source text because nothing in the type system tells `guard.ui`
+    /// from `m.ui`: they are the same type, one lock apart.
+    #[test]
+    fn the_section_is_mirrored_into_the_shared_state_and_not_the_snapshot() {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split_once("let demod_preset = self.engine.is_panel_visible(\"fm_demod\");")
+            .expect("the frame composition has been rewritten")
+            .1
+            .split_once("self.engine.render(")
+            .map(|(before, _)| before)
+            .unwrap_or(src);
+        let (guard_side, snapshot_side) = body
+            .split_once("guard.clone()")
+            .expect("the snapshot is no longer a clone of the guard");
+        assert!(
+            guard_side.contains("guard.ui.section ="),
+            "ui.section must be written to the shared state: the NET feed gate \
+             and the survey task read it from there, not from the frame"
+        );
+        assert!(
+            !snapshot_side.contains("ui.section ="),
+            "ui.section is written to the snapshot after the clone, so every \
+             reader off the UI thread sees an empty string"
+        );
     }
 
     /// **Every scanner that parks the radio gives the tuner back on quit.**

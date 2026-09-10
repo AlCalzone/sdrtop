@@ -52,6 +52,11 @@ impl SdrMetrics {
                 current_throughput_bps: 0,
                 throughput_history: VecDeque::new(),
                 sample_rate_history: VecDeque::new(),
+                // No reference established: the state a radio is in when
+                // it is switched on, and the one every ppm reading has to be
+                // correct in.
+                reference: None,
+                reference_request: false,
             },
             signal: SignalState::default(),
             iq: IqState {

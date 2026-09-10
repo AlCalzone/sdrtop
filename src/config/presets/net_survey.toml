@@ -15,6 +15,6 @@ blurb   = "what is in this band"
 panels = [
     { name = "header",            position = "top", height = 5 },
     { name = "net_occupancy",     position = "body" },
-    { name = "net_decode_health", position = "right", width = 46 },
+    { name = "net_decode_health", position = "right", width_pct = 30 },
     { name = "footer",            position = "bottom" },
 ]

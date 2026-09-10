@@ -16,6 +16,7 @@
 //!   the panel this one is the other half of.
 
 mod noise;
+mod reference;
 mod staging;
 mod verdict;
 
@@ -165,6 +166,12 @@ impl Panel for RfChainPanel {
         } else {
             noise::sweep_reading(&mut lines, state, iw, theme);
         }
+        // Between the noise block and the verdict, because it answers the same
+        // kind of question those do - what is this receiver actually like - and
+        // because a user reading the verdict should have just read what the
+        // clock behind every frequency on the deck is doing.
+        lines.push(Line::raw(""));
+        reference::draw(&mut lines, state, iw, theme);
         verdict::draw(
             &mut lines,
             &verdict::Verdict {

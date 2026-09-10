@@ -1,0 +1,18 @@
+# NET Census — who is here? Design section 9.3: one screen, one question. The
+# population of the band, one row per transmitter, ordered by whichever column
+# you pick.
+#
+# Empty until an arc decodes an address. The panel says which of the two empties
+# it is: nothing is listening yet, rather than nobody transmitting.
+
+section = "net"
+slot    = 3
+title   = "Census"
+blurb   = "who is here"
+
+panels = [
+    { name = "header",     position = "top", height = 5 },
+    { name = "net_census", position = "body" },
+    { name = "log",        position = "bottom", height = 5 },
+    { name = "footer",     position = "bottom" },
+]

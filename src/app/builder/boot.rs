@@ -411,6 +411,7 @@ pub(super) fn initial_metrics(cfg: &AppConfig, boot: Boot) -> anyhow::Result<Sdr
         demod: crate::state::DemodState::default(),
         net: crate::state::NetState::default(),
         caps,
+        device_options: Arc::new(Vec::new()),
         acc: Accumulators::default(),
     })
 }
@@ -742,6 +743,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.waterfall.buffer.max_rows, 4_096);
+    }
+
+    #[test]
+    fn a_power_trace_backend_uses_its_level_axis_and_starts_paused() {
+        let cfg = AppConfig::default();
+        let mut caps = hardware::native::hackrf::caps();
+        caps.acquisition = hardware::AcquisitionKind::PowerTrace;
+        caps.level_unit = hardware::LevelUnit::Dbm;
+        caps.level_min_db = -110.0;
+        caps.level_max_db = -10.0;
+        let tuning = resolve_tuning(&cfg.radio, &caps);
+        let metrics = initial_metrics(
+            &cfg,
+            Boot::normal(
+                &cfg,
+                Arc::new(caps),
+                tuning,
+                &hardware::DeviceInfo::default(),
+            ),
+        )
+        .unwrap();
+        assert!(!metrics.radio.rx_enabled);
+        assert!(!metrics.radio.hw_streaming);
+        assert_eq!(metrics.spectrum.y_min, -110.0);
+        assert_eq!(metrics.spectrum.y_max, -10.0);
+        assert_eq!(metrics.waterfall.db_min, -110.0);
+        assert_eq!(metrics.waterfall.db_max, -10.0);
     }
 
     #[test]

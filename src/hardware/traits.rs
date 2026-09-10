@@ -12,9 +12,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::state::SdrMetrics;
 
+/// How a backend acquires spectrum data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquisitionKind {
+    /// Complex time-domain samples feed the FFT and diagnostic workers.
+    IqSamples,
+    /// The backend publishes calibrated power-spectrum traces.
+    PowerTrace,
+}
+
+/// Unit carried by spectral levels from a backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelUnit {
     Dbfs,
+    #[allow(dead_code)]
+    Dbm,
 }
 
 pub const IQ_TRACE_STALE_MS: u128 = 500;
@@ -23,7 +35,192 @@ impl LevelUnit {
     pub fn label(self) -> &'static str {
         match self {
             Self::Dbfs => "dBFS",
+            Self::Dbm => "dBm",
         }
+    }
+}
+
+/// Where a direct power trace should be published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerTraceTarget {
+    Spectrum,
+    Sweep,
+}
+
+/// One calibrated power-spectrum trace.
+#[derive(Debug)]
+pub struct PowerTrace {
+    pub target: PowerTraceTarget,
+    pub generation: u64,
+    pub frequencies_hz: Vec<u64>,
+    pub levels_dbm: Vec<f32>,
+    pub rbw_hz: Option<u32>,
+}
+
+/// A native band sweep requested from a direct-power backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectSweepConfig {
+    pub start_hz: u64,
+    pub stop_hz: u64,
+    pub generation: u64,
+}
+
+/// One configurable choice exposed by a device.
+///
+/// Every snapshot must use unique IDs. Each option must advertise at least one
+/// choice. `selected_choice` must be one of those choices. Choice strings are
+/// stable values passed back to [`SdrDevice::set_option`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceOption {
+    pub id: String,
+    pub label: String,
+    pub choices: Vec<String>,
+    pub selected_choice: String,
+    /// Editor bounds may contain gaps in the advertised canonical integer choices
+    pub integer_range: Option<std::ops::RangeInclusive<i32>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntegerChoiceError {
+    InvalidInteger,
+    OutOfRange { min: i32, max: i32 },
+    Unadvertised { closest: Option<i32> },
+    Unavailable,
+}
+
+impl std::fmt::Display for IntegerChoiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInteger => write!(f, "Enter a signed 32-bit integer"),
+            Self::OutOfRange { min, max } => write!(f, "Out of range: {min} to {max}"),
+            Self::Unadvertised {
+                closest: Some(value),
+            } => {
+                write!(f, "Not advertised. Closest choice: {value}")
+            }
+            Self::Unadvertised { closest: None } => write!(f, "No advertised integer in range"),
+            Self::Unavailable => write!(f, "Numeric entry is no longer available"),
+        }
+    }
+}
+
+impl DeviceOption {
+    pub fn integer_choice(&self, input: &str) -> Result<&str, IntegerChoiceError> {
+        let range = self
+            .integer_range
+            .as_ref()
+            .ok_or(IntegerChoiceError::Unavailable)?;
+        let digits = input.strip_prefix('-').unwrap_or(input);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(IntegerChoiceError::InvalidInteger);
+        }
+        let value = input
+            .parse::<i32>()
+            .map_err(|_| IntegerChoiceError::InvalidInteger)?;
+        if !range.contains(&value) {
+            return Err(IntegerChoiceError::OutOfRange {
+                min: *range.start(),
+                max: *range.end(),
+            });
+        }
+        let choice = value.to_string();
+        self.choices
+            .iter()
+            .find(|advertised| **advertised == choice)
+            .map(String::as_str)
+            .ok_or_else(|| IntegerChoiceError::Unadvertised {
+                closest: self
+                    .choices
+                    .iter()
+                    .filter_map(|choice| {
+                        let number = choice.parse::<i32>().ok()?;
+                        (range.contains(&number) && number.to_string() == *choice).then_some(number)
+                    })
+                    .min_by_key(|number| (i64::from(*number) - i64::from(value)).abs()),
+            })
+    }
+}
+
+#[cfg(test)]
+mod integer_choice_tests {
+    use super::*;
+
+    fn option() -> DeviceOption {
+        DeviceOption {
+            id: "level".into(),
+            label: "Level".into(),
+            choices: ["auto", "-100", "0", "10", "100"]
+                .map(String::from)
+                .to_vec(),
+            selected_choice: "auto".into(),
+            integer_range: Some(-100..=100),
+        }
+    }
+
+    #[test]
+    fn integer_validation_distinguishes_failure_reasons() {
+        let mut option = option();
+        for input in ["", "-", "+1", "1.0", "2147483648", "-2147483649"] {
+            assert_eq!(
+                option.integer_choice(input),
+                Err(IntegerChoiceError::InvalidInteger)
+            );
+        }
+        assert_eq!(
+            option.integer_choice("101"),
+            Err(IntegerChoiceError::OutOfRange {
+                min: -100,
+                max: 100
+            })
+        );
+        assert_eq!(
+            option.integer_choice("12"),
+            Err(IntegerChoiceError::Unadvertised { closest: Some(10) })
+        );
+        assert_eq!(option.integer_choice("-00100"), Ok("-100"));
+        assert_eq!(option.integer_choice("-0"), Ok("0"));
+        option.integer_range = None;
+        assert_eq!(
+            option.integer_choice("12"),
+            Err(IntegerChoiceError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn closest_choice_excludes_noncanonical_and_out_of_range_values() {
+        let mut option = option();
+        option.choices = ["auto", "012", "+12", "12.0", "11", "31"]
+            .map(String::from)
+            .to_vec();
+        option.integer_range = Some(12..=31);
+        assert_eq!(
+            option.integer_choice("12"),
+            Err(IntegerChoiceError::Unadvertised { closest: Some(31) })
+        );
+        option.choices.pop();
+        assert_eq!(
+            option.integer_choice("12"),
+            Err(IntegerChoiceError::Unadvertised { closest: None })
+        );
+    }
+
+    #[test]
+    fn closest_choice_distance_handles_i32_extremes() {
+        let mut option = option();
+        option.integer_range = Some(i32::MIN..=i32::MAX);
+        option.choices = vec![i32::MIN.to_string(), i32::MAX.to_string()];
+        assert_eq!(
+            option.integer_choice("1"),
+            Err(IntegerChoiceError::Unadvertised {
+                closest: Some(i32::MAX)
+            })
+        );
+        assert_eq!(
+            option.integer_choice("-1"),
+            Err(IntegerChoiceError::Unadvertised {
+                closest: Some(i32::MIN)
+            })
+        );
     }
 }
 
@@ -631,6 +828,9 @@ pub enum DeliveryModel {
 /// truth for every clamp, default, and UI capability check. Built once at open.
 #[derive(Clone, Debug)]
 pub struct DeviceCapabilities {
+    pub acquisition: AcquisitionKind,
+    /// `set_sample_rate` controls a swept span for this device.
+    pub sample_rate_is_span: bool,
     /// Spectral levels and display bounds use this unit
     pub level_unit: LevelUnit,
     /// The finite display floor must be below `level_max_db`
@@ -759,6 +959,9 @@ pub struct RxContext {
     pub net_tx: crossbeam_channel::Sender<StreamBlock>,
     /// What the NET feed did with the blocks handed to it, for the poll task.
     pub net_feed: FeedHealth,
+    /// Direct power-spectrum traces from backends that do not publish IQ.
+    #[allow(dead_code)]
+    pub power_tx: crossbeam_channel::Sender<PowerTrace>,
     pub geometry: SampleGeometry,
 }
 
@@ -914,6 +1117,18 @@ pub trait SdrDevice: Send + Sync {
     }
     fn set_tuner_agc(&self, _on: bool) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn set_direct_sweep(&self, _config: Option<DirectSweepConfig>) -> anyhow::Result<()> {
+        anyhow::bail!("this backend does not support direct power sweeps")
+    }
+
+    fn options(&self) -> Vec<DeviceOption> {
+        Vec::new()
+    }
+
+    fn set_option(&self, _id: &str, _choice: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this backend has no device options")
     }
 
     /// Set one stage by position, exactly.

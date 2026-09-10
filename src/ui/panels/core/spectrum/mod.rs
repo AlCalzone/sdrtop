@@ -51,6 +51,9 @@ impl Panel for SpectrumPanel {
     fn name(&self) -> &'static str {
         "spectrum"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (40, 10)
     }
@@ -159,15 +162,7 @@ fn contents(
     // set on the Command Rail vanished when you pressed `[2]` to look at the same
     // signal larger.
     let zoom = state.waterfall.hz_zoom as usize;
-    let Some(view) = SpectrumView::new(
-        &fft.bins_dbfs,
-        &fft.peak_hold,
-        state.spectrum.hold.clone(),
-        fft.center_freq_hz,
-        fft.sample_rate,
-        zoom,
-        fft.bin_axis,
-    ) else {
+    let Some(view) = SpectrumView::from_frame(fft, state.spectrum.hold.clone(), zoom) else {
         return;
     };
 
@@ -378,6 +373,7 @@ fn draw_instrument(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn bond_below_drops_bottom_border() {
@@ -419,6 +415,32 @@ mod tests {
         // The gutter always matches the canvas, or the dB labels drift off the trace.
         assert_eq!(full.gutter.height, full.canvas.height);
         assert_eq!(full.gutter.width, 6);
+    }
+
+    #[test]
+    fn direct_trace_coordinates_map_through_the_spectrum_view() {
+        let frequencies = [100_u64, 200, 300];
+        let (axis_start_hz, span_hz) = crate::signal::power::trace_window(&frequencies).unwrap();
+        let bins = Arc::new(vec![-90.0, -60.0, -80.0]);
+        let frame = crate::state::FftFrame {
+            bins_dbfs: Arc::clone(&bins),
+            peak_hold: Arc::clone(&bins),
+            noise_floor: -90.0,
+            center_freq_hz: 200,
+            axis_start_hz,
+            sample_rate: span_hz,
+            timestamp: std::time::Instant::now(),
+            peak_to_nf_db: 30.0,
+            channel_power_dbfs: f32::NEG_INFINITY,
+            occupied_bw_hz: 0,
+            enbw_hz: 100.0,
+            bin_axis: crate::state::BinAxis::MeasuredPoints,
+        };
+        let view = SpectrumView::from_frame(&frame, None, 1).unwrap();
+
+        for (index, frequency) in frequencies.into_iter().enumerate() {
+            assert_eq!(view.freq_of_bin(index), frequency as f64);
+        }
     }
 }
 

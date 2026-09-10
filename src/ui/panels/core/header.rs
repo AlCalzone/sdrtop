@@ -577,8 +577,12 @@ fn bottom_band_line(state: &SdrMetrics, theme: &crate::Theme, inner_width: u16) 
     let active = state.radio.hw_streaming && !state.observer.active;
     let gm = &state.caps.gain;
 
-    // Sample rate: right-padded to 4 chars
     let sr_str = format!("{:4.1}", state.radio.config_sample_rate / 1_000_000.0);
+    let (bandwidth_label, bandwidth_unit) = if state.caps.sample_rate_is_span {
+        ("SPAN ", " MHz")
+    } else {
+        ("SR ", " Msps")
+    };
 
     let freq_color = if state.observer.active {
         theme.label
@@ -617,11 +621,17 @@ fn bottom_band_line(state: &SdrMetrics, theme: &crate::Theme, inner_width: u16) 
         Span::raw(" "),
         Span::styled("MHz", Style::default().fg(theme.label)),
         Span::raw("    "),
-        Span::styled("SR ", Style::default().fg(theme.label)),
+        Span::styled(bandwidth_label, Style::default().fg(theme.label)),
         Span::styled(sr_str, Style::default().fg(val_color)),
-        Span::styled(" Msps", Style::default().fg(theme.label)),
+        Span::styled(bandwidth_unit, Style::default().fg(theme.label)),
     ]);
     let left_w: usize = left_spans.iter().map(|s| s.width()).sum();
+
+    if state.caps.sample_rate_is_span {
+        let gap = (inner_width as usize).saturating_sub(left_w);
+        left_spans.push(leader(gap, theme.border_dim));
+        return Line::from(left_spans);
+    }
 
     // right: primary "LNA/TUN "(4) + bar(8) + " "(1) + val(2) + " dB"(3) + "    "(4)  = 22
     //      + second stage "VGA "(4) + bar(8) + " "(1) + val(2) + " dB"(3) + "  "(2)   = 20  (blank on RTL)
@@ -675,6 +685,9 @@ fn bottom_band_line(state: &SdrMetrics, theme: &crate::Theme, inner_width: u16) 
 impl Panel for HeaderPanel {
     fn name(&self) -> &'static str {
         "header"
+    }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
     }
     fn min_size(&self) -> (u16, u16) {
         (60, 5)
@@ -747,6 +760,9 @@ pub struct SlimHeaderPanel;
 impl Panel for SlimHeaderPanel {
     fn name(&self) -> &'static str {
         "header_slim"
+    }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
     }
     fn min_size(&self) -> (u16, u16) {
         (60, 4)

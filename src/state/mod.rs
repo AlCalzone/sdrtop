@@ -41,8 +41,8 @@ pub use sweep::{SweepConfig, SweepFrame, SweepState, SWEEP_SETTLING_MS};
 pub use system::SystemState;
 pub use timing::{TimingCause, TimingQuality, TimingState, HACKRF_SAMPLES_PER_TRANSFER};
 pub use ui::{
-    active_recall_slot, recall_from_hz, recall_to_hz, InputMode, LogEntry, LogLevel, MenuPane,
-    MenuState, RailMode, UiState, RECALL_SLOTS,
+    active_recall_slot, recall_from_hz, recall_to_hz, DeviceOptionUpdate, InputMode, LogEntry,
+    LogLevel, MenuPane, MenuState, RailMode, UiState, RECALL_SLOTS,
 };
 pub use waterfall::{BinAxis, BinWindow, FftFrame, WaterfallState, WATERFALL_MIN_ROWS};
 
@@ -81,6 +81,7 @@ pub struct SdrMetrics {
     /// rendering (gain model, BB filter / Friis applicability, ranges). Shared
     /// (Arc) so the per-frame `SdrMetrics` clone stays cheap.
     pub caps: std::sync::Arc<crate::hardware::DeviceCapabilities>,
+    pub device_options: std::sync::Arc<Vec<crate::hardware::DeviceOption>>,
     pub(crate) acc: Accumulators,
 }
 

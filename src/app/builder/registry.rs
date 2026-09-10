@@ -17,17 +17,35 @@ use crate::ui;
 use crate::app::App;
 
 impl App {
-    /// `net_admitted` comes from `signal::net::gate`: on a radio that cannot
-    /// reach the 2.4 GHz band, or cannot run even the cheapest mode there, the
-    /// presets in that section are dropped here and the section is **absent**
-    /// from the menu rather than present and empty. Rule 2, and the same
-    /// decision the RF bench makes about its noise-figure card.
+    #[cfg(test)]
     pub(super) fn build_ui(
         active_preset: &str,
         user_presets: &HashMap<String, crate::config::PresetConfig>,
         presets_dir: Option<&std::path::Path>,
         net_admitted: bool,
     ) -> (ui::LayoutEngine, HashMap<char, &'static str>) {
+        Self::build_ui_for(
+            active_preset,
+            user_presets,
+            presets_dir,
+            net_admitted,
+            crate::hardware::AcquisitionKind::IqSamples,
+        )
+        .expect("built-in IQ layouts must include a usable preset")
+    }
+
+    /// `net_admitted` comes from `signal::net::gate`: on a radio that cannot
+    /// reach the 2.4 GHz band, or cannot run even the cheapest mode there, the
+    /// presets in that section are dropped here and the section is **absent**
+    /// from the menu rather than present and empty. Rule 2, and the same
+    /// decision the RF bench makes about its noise-figure card.
+    pub(super) fn build_ui_for(
+        active_preset: &str,
+        user_presets: &HashMap<String, crate::config::PresetConfig>,
+        presets_dir: Option<&std::path::Path>,
+        net_admitted: bool,
+        acquisition: crate::hardware::AcquisitionKind,
+    ) -> anyhow::Result<(ui::LayoutEngine, HashMap<char, &'static str>)> {
         let mut registry = ui::PanelRegistry::new();
         registry.register(ui::HeaderPanel);
         registry.register(ui::SlimHeaderPanel);
@@ -83,11 +101,104 @@ impl App {
                 .presets
                 .retain(|_, p| p.section.as_deref() != Some(ui::menu::model::NET));
         }
+        let mut warnings = Self::filter_incompatible_layouts(&mut layout, &registry, acquisition)?;
+        let selected = if layout
+            .presets
+            .get(active_preset)
+            .is_some_and(|preset| has_registered_panel(preset, &registry))
+        {
+            active_preset.to_string()
+        } else {
+            ["spectrum_waterfall", "spectrum", "waterfall"]
+                .into_iter()
+                .find(|name| {
+                    layout
+                        .presets
+                        .get(*name)
+                        .is_some_and(|preset| has_registered_panel(preset, &registry))
+                })
+                .map(str::to_string)
+                .or_else(|| {
+                    let mut names: Vec<String> = layout
+                        .presets
+                        .iter()
+                        .filter(|(_, preset)| has_registered_panel(preset, &registry))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    names.sort();
+                    names.into_iter().next()
+                })
+                .ok_or_else(|| anyhow::anyhow!("No usable presets remain for this device"))?
+        };
+        if selected != active_preset {
+            warnings.push(format!(
+                "Preset '{active_preset}' is unavailable; using '{selected}'"
+            ));
+        }
+        layout.active_preset = selected;
 
-        let mut engine = ui::LayoutEngine::new(layout, registry);
-        engine.set_preset(active_preset);
-        (engine, focus_keys)
+        let mut engine =
+            ui::LayoutEngine::new_with_saved_preset(layout, registry, active_preset.to_string());
+        engine.set_startup_warnings(warnings);
+        Ok((engine, focus_keys))
     }
+
+    fn filter_incompatible_layouts(
+        config: &mut LayoutConfig,
+        registry: &ui::PanelRegistry,
+        acquisition: crate::hardware::AcquisitionKind,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut warnings = Vec::new();
+        if acquisition == crate::hardware::AcquisitionKind::PowerTrace {
+            if let Some(preset) = config.presets.get_mut("lab_sweep") {
+                preset.panels.retain(|panel| panel.name != "signal_metrics");
+            }
+        }
+        config.presets.retain(|name, preset| {
+            if preset.panels.is_empty() {
+                warnings.push(format!("Preset '{name}' is unavailable because it has no panels"));
+                return false;
+            }
+            for spec in &preset.panels {
+                let Some(panel) = registry.get(&spec.name) else {
+                    warnings.push(format!(
+                        "Preset '{name}' references unknown panel '{}'",
+                        spec.name
+                    ));
+                    continue;
+                };
+                if !panel.supports_acquisition(acquisition) {
+                    warnings.push(format!(
+                        "Preset '{name}' is unavailable because panel '{}' does not support this device",
+                        spec.name
+                    ));
+                    return false;
+                }
+            }
+            true
+        });
+        if !config
+            .presets
+            .values()
+            .any(|preset| has_registered_panel(preset, registry))
+        {
+            anyhow::bail!(
+                "No usable presets remain for this device: {}",
+                warnings.join("; ")
+            );
+        }
+        Ok(warnings)
+    }
+}
+
+fn has_registered_panel(
+    preset: &crate::config::PresetConfig,
+    registry: &ui::PanelRegistry,
+) -> bool {
+    preset
+        .panels
+        .iter()
+        .any(|spec| registry.get(&spec.name).is_some())
 }
 
 /// The focus-key lookup, plus every key more than one panel claims.
@@ -365,6 +476,302 @@ mod tests {
         let (engine, _) = App::build_ui("my_layout", &user, None, true);
         assert_eq!(engine.active_preset(), "my_layout");
         assert!(engine.is_panel_visible("spectrum"));
+    }
+
+    #[test]
+    fn a_power_trace_device_keeps_only_compatible_trace_layouts() {
+        let mut user = HashMap::new();
+        user.insert(
+            "my_trace".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "header_slim".into(),
+                        position: crate::config::Position::Top,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "spectrum".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "footer".into(),
+                        position: crate::config::Position::Bottom,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        user.insert(
+            "my_iq".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "spectrum".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "iq_constellation".into(),
+                        position: crate::config::Position::Right,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        user.insert(
+            "my_status".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "system_resources".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "log".into(),
+                        position: crate::config::Position::Bottom,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        user.insert(
+            "my_sweep".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "header_slim".into(),
+                        position: crate::config::Position::Top,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "sweep_panel".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "system_resources".into(),
+                        position: crate::config::Position::Right,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "footer".into(),
+                        position: crate::config::Position::Bottom,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let (mut engine, _) = App::build_ui_for(
+            "my_trace",
+            &user,
+            None,
+            false,
+            crate::hardware::AcquisitionKind::PowerTrace,
+        )
+        .unwrap();
+        for available in [
+            "spectrum",
+            "waterfall",
+            "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
+            "my_trace",
+            "my_status",
+            "my_sweep",
+        ] {
+            assert!(engine.has_preset(available), "{available} was hidden");
+        }
+        for unavailable in [
+            "command_rail",
+            "lab_iq",
+            "lab_rf",
+            "lab_timing",
+            "lab_signal",
+            "my_iq",
+        ] {
+            assert!(!engine.has_preset(unavailable), "{unavailable} survived");
+        }
+        assert_eq!(engine.active_preset(), "my_trace");
+        engine.set_preset("my_sweep");
+        assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(engine.is_panel_visible("system_resources"));
+        engine.set_preset("lab_sweep");
+        assert!(engine.is_panel_visible("sweep_panel"));
+        assert!(!engine.is_panel_visible("signal_metrics"));
+    }
+
+    #[test]
+    fn an_iq_device_keeps_signal_metrics_in_the_lab_sweep_layout() {
+        let (engine, _) = App::build_ui_for(
+            "lab_sweep",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionKind::IqSamples,
+        )
+        .unwrap();
+        assert_eq!(engine.active_preset(), "lab_sweep");
+        assert!(engine.is_panel_visible("signal_metrics"));
+    }
+
+    #[test]
+    fn automatic_fallback_does_not_replace_the_saved_preference() {
+        let (engine, _) = App::build_ui_for(
+            "command_rail",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionKind::PowerTrace,
+        )
+        .unwrap();
+        assert_eq!(engine.active_preset(), "spectrum_waterfall");
+        assert_eq!(engine.saved_active_preset(), "command_rail");
+    }
+
+    #[test]
+    fn explicitly_selecting_the_fallback_updates_the_saved_preference() {
+        let (mut engine, _) = App::build_ui_for(
+            "command_rail",
+            &HashMap::new(),
+            None,
+            false,
+            crate::hardware::AcquisitionKind::PowerTrace,
+        )
+        .unwrap();
+        engine.set_preset("spectrum_waterfall");
+        assert_eq!(engine.saved_active_preset(), "spectrum_waterfall");
+    }
+
+    #[test]
+    fn an_unknown_only_preset_warns_and_uses_a_drawable_fallback() {
+        let mut user = HashMap::new();
+        user.insert(
+            "future_panel".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![crate::config::PanelSpec {
+                    name: "not_registered_yet".into(),
+                    position: crate::config::Position::Body,
+                    height: None,
+                    width_pct: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let (engine, _) = App::build_ui("future_panel", &user, None, true);
+        assert!(engine.has_preset("future_panel"));
+        assert_eq!(engine.active_preset(), "spectrum_waterfall");
+        assert!(engine
+            .startup_warnings()
+            .iter()
+            .any(|warning| warning.contains("unknown panel 'not_registered_yet'")));
+        assert!(engine.startup_warnings().iter().any(|warning| {
+            warning.contains("Preset 'future_panel' is unavailable")
+                && warning.contains("using 'spectrum_waterfall'")
+        }));
+    }
+
+    #[test]
+    fn a_mixed_known_and_unknown_preset_remains_selectable() {
+        let mut user = HashMap::new();
+        user.insert(
+            "future_panel".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![
+                    crate::config::PanelSpec {
+                        name: "not_registered_yet".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                    crate::config::PanelSpec {
+                        name: "spectrum".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let (engine, _) = App::build_ui("future_panel", &user, None, true);
+        assert_eq!(engine.active_preset(), "future_panel");
+        assert!(engine
+            .startup_warnings()
+            .iter()
+            .any(|warning| warning.contains("unknown panel 'not_registered_yet'")));
+    }
+
+    #[test]
+    fn incompatible_overrides_cannot_leave_a_power_device_without_a_layout() {
+        let mut user = HashMap::new();
+        for name in [
+            "spectrum",
+            "waterfall",
+            "spectrum_waterfall",
+            "lab_sweep",
+            "micro_sweep",
+        ] {
+            user.insert(
+                name.to_string(),
+                crate::config::PresetConfig {
+                    panels: vec![crate::config::PanelSpec {
+                        name: "iq_constellation".into(),
+                        position: crate::config::Position::Body,
+                        height: None,
+                        width_pct: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+        }
+        user.insert(
+            "future_panel".to_string(),
+            crate::config::PresetConfig {
+                panels: vec![crate::config::PanelSpec {
+                    name: "not_registered_yet".into(),
+                    position: crate::config::Position::Body,
+                    height: None,
+                    width_pct: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let error = App::build_ui_for(
+            "spectrum_waterfall",
+            &user,
+            None,
+            false,
+            crate::hardware::AcquisitionKind::PowerTrace,
+        )
+        .err()
+        .expect("all compatible layouts were overridden");
+        assert!(error
+            .to_string()
+            .contains("No usable presets remain for this device"));
+        assert!(error.to_string().contains("iq_constellation"));
+        assert!(error.to_string().contains("not_registered_yet"));
     }
 
     /// A full-height waterfall must reach its own bottom border.

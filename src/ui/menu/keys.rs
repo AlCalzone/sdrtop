@@ -21,7 +21,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::hardware::GainModel;
+use crate::hardware::{DeviceCapabilities, GainModel};
 use crate::ui::chrome;
 
 /// How a row reads on a single-knob device: RTL-SDR has one stepped tuner gain
@@ -167,7 +167,17 @@ pub const GLOBAL: &[(&str, &[Binding])] = &[
 ///
 /// Separate from drawing so the scroll arithmetic and the row count can be
 /// tested without a terminal.
+#[cfg(test)]
 fn lines(model: &GainModel, iw: usize, theme: &crate::Theme) -> Vec<Line<'static>> {
+    lines_for(model, false, iw, theme)
+}
+
+fn lines_for(
+    model: &GainModel,
+    sample_rate_is_span: bool,
+    iw: usize,
+    theme: &crate::Theme,
+) -> Vec<Line<'static>> {
     let single = model.is_single();
     let key_style = Style::default()
         .fg(theme.border_accent)
@@ -176,11 +186,19 @@ fn lines(model: &GainModel, iw: usize, theme: &crate::Theme) -> Vec<Line<'static
 
     let mut out = Vec::new();
     for (group, bindings) in GLOBAL {
+        if sample_rate_is_span && *group == "Gain" {
+            continue;
+        }
         // Which of this group's keys this device actually has. Collected first
         // so a group that filters down to nothing takes its heading with it: a
         // section title over empty space reads as a rendering bug, not as
         // "your radio has none of these".
-        let shown: Vec<&Binding> = bindings.iter().filter(|b| b.needs.met(model)).collect();
+        let shown: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.needs.met(model) && !(sample_rate_is_span && binding.ch == Some('m'))
+            })
+            .collect();
         if shown.is_empty() {
             continue;
         }
@@ -189,8 +207,9 @@ fn lines(model: &GainModel, iw: usize, theme: &crate::Theme) -> Vec<Line<'static
         }
         out.push(chrome::section(group, "", iw, theme));
         for binding in shown {
-            let what = match (single, &binding.single) {
-                (true, OnSingle::Reword(text)) => *text,
+            let what = match (sample_rate_is_span, binding.ch, single, &binding.single) {
+                (true, Some('s'), _, _) => "type a span",
+                (_, _, true, OnSingle::Reword(text)) => *text,
                 _ => binding.what,
             };
             out.push(Line::from(vec![
@@ -202,11 +221,22 @@ fn lines(model: &GainModel, iw: usize, theme: &crate::Theme) -> Vec<Line<'static
     out
 }
 
-pub fn render(f: &mut Frame, area: Rect, model: &GainModel, scroll: usize, theme: &crate::Theme) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    caps: &DeviceCapabilities,
+    scroll: usize,
+    theme: &crate::Theme,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let all = lines(model, area.width as usize, theme);
+    let all = lines_for(
+        &caps.gain,
+        caps.sample_rate_is_span,
+        area.width as usize,
+        theme,
+    );
     let visible = area.height as usize;
     let first = scroll.min(all.len().saturating_sub(visible));
     let shown: Vec<Line> = all.into_iter().skip(first).take(visible).collect();
@@ -215,8 +245,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &GainModel, scroll: usize, theme
 
 /// How many rows the reference needs, so the caller can tell whether scrolling
 /// is possible at all.
-pub fn row_count(model: &GainModel) -> usize {
-    lines(model, 40, &crate::Theme::sdr()).len()
+pub fn row_count_for(caps: &DeviceCapabilities) -> usize {
+    lines_for(
+        &caps.gain,
+        caps.sample_rate_is_span,
+        40,
+        &crate::Theme::sdr(),
+    )
+    .len()
 }
 
 #[cfg(test)]
@@ -330,5 +366,24 @@ mod tests {
         let hackrf = lines(&hackrf::gain_model(), 40, &theme).len();
         let rtl = lines(&rtlsdr::gain_model(&[0, 10, 20]), 40, &theme).len();
         assert_eq!(rtl, hackrf - 2, "the two VGA rows should be gone");
+    }
+
+    #[test]
+    fn power_trace_reference_keeps_only_supported_controls() {
+        let theme = crate::Theme::sdr();
+        let lines = lines_for(
+            &GainModel::new(Vec::new(), "RF", "RF").with_gauge_fallback(0),
+            true,
+            80,
+            &theme,
+        );
+        let text = lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("type a span"));
+        assert!(!text.contains("GAIN"));
+        assert!(!text.contains("survey the band"));
     }
 }

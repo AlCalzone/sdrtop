@@ -85,6 +85,9 @@ impl Panel for LogPanel {
     fn name(&self) -> &'static str {
         "log"
     }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
+    }
     fn min_size(&self) -> (u16, u16) {
         (20, 7)
     }

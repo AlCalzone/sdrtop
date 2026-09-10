@@ -241,6 +241,7 @@ fn refresh_spectrum(m: &mut SdrMetrics, snap: &Snapshot<'_>) {
         peak_hold: Arc::new(peak_vec),
         noise_floor: r.noise_floor,
         center_freq_hz: snap.center_freq_hz,
+        axis_start_hz: snap.center_freq_hz as f64 - snap.sample_rate / 2.0,
         sample_rate: snap.sample_rate,
         timestamp: Instant::now(),
         peak_to_nf_db: r.peak_to_nf_db,

@@ -113,6 +113,7 @@ impl SdrMetrics {
             demod: DemodState::default(),
             net: crate::state::NetState::default(),
             caps,
+            device_options: Arc::new(Vec::new()),
             acc: Accumulators::default(),
         }
     }
@@ -153,6 +154,7 @@ impl SdrMetrics {
             peak_hold: Arc::clone(&bins),
             noise_floor,
             center_freq_hz: self.radio.frequency,
+            axis_start_hz: self.radio.frequency as f64 - sample_rate / 2.0,
             sample_rate,
             timestamp: Instant::now(),
             peak_to_nf_db: snr_db,
@@ -171,7 +173,7 @@ impl SdrMetrics {
         self
     }
 
-    /// Age the newest FFT frame past the IQ trace limit
+    /// Age the newest FFT frame past the IQ trace limit.
     pub(crate) fn with_stale_fft(mut self) -> Self {
         if let Some(fr) = self.waterfall.last_fft.as_mut() {
             fr.timestamp = Instant::now()

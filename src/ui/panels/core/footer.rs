@@ -188,6 +188,30 @@ fn normal_items(
     items
 }
 
+fn normal_items_for(
+    active_preset: &str,
+    scope: &[(Option<u8>, String)],
+    micro_view: MicroView,
+    available_width: u16,
+    gm: &GainModel,
+    sample_rate_is_span: bool,
+) -> Vec<String> {
+    if sample_rate_is_span {
+        let narrow = available_width < NARROW_COLS;
+        return vec![
+            "[Q] Quit".into(),
+            "[Space] RX".into(),
+            "[F] Freq".into(),
+            "[S] Span".into(),
+            "[R] Reset".into(),
+            "[Esc] Menu".into(),
+            "[Tab] Hide".into(),
+            format!("[P] {}", preset_label(active_preset, narrow)),
+        ];
+    }
+    normal_items(active_preset, scope, micro_view, available_width, gm)
+}
+
 /// Break `items` into lines (groups) where no line exceeds `inner_w` display
 /// columns. Returns the items per line, preserving boundaries so the renderer
 /// can style each key/description independently.
@@ -304,7 +328,11 @@ fn count_lines<S: AsRef<str>>(items: &[S], sep: &str, inner_w: usize) -> usize {
 
 /// Public free function - called directly from the engine (bypasses dyn dispatch).
 pub fn compute_footer_height(available_width: u16, state: &SdrMetrics) -> u16 {
-    if !matches!(state.ui.input_mode, InputMode::Normal) || state.observer.active {
+    if !matches!(
+        state.ui.input_mode,
+        InputMode::Normal | InputMode::DeviceOptionInput { .. }
+    ) || state.observer.active
+    {
         return 3;
     }
     let inner_w = available_width.saturating_sub(2) as usize;
@@ -312,12 +340,13 @@ pub fn compute_footer_height(available_width: u16, state: &SdrMetrics) -> u16 {
         count_lines(&focus_items(state), FOCUS_SEP, inner_w)
     } else {
         count_lines(
-            &normal_items(
+            &normal_items_for(
                 &state.ui.active_preset,
                 &state.ui.scope,
                 state.ui.micro_view(),
                 available_width,
                 &state.caps.gain,
+                state.caps.sample_rate_is_span,
             ),
             NORMAL_SEP,
             inner_w,
@@ -331,6 +360,9 @@ pub struct FooterPanel;
 impl Panel for FooterPanel {
     fn name(&self) -> &'static str {
         "footer"
+    }
+    fn supports_acquisition(&self, _acquisition: crate::hardware::AcquisitionKind) -> bool {
+        true
     }
     fn min_size(&self) -> (u16, u16) {
         (40, 3)
@@ -385,7 +417,12 @@ impl Panel for FooterPanel {
                     m.ui.input_buf
                 )),
                 InputMode::SampleRateInput => prompt(format!(
-                    " Sample rate ({:.1}–{:.1} MHz): [{}▌]  [Enter] Confirm  [Esc] Cancel",
+                    " {} ({:.1}–{:.1} MHz): [{}▌]  [Enter] Confirm  [Esc] Cancel",
+                    if m.caps.sample_rate_is_span {
+                        "Span"
+                    } else {
+                        "Sample rate"
+                    },
                     m.caps.sample_rate_min_hz / 1e6,
                     m.caps.sample_rate_max_hz / 1e6,
                     m.ui.input_buf
@@ -409,7 +446,7 @@ impl Panel for FooterPanel {
                         freq_str, m.ui.input_buf
                     ))
                 }
-                InputMode::Normal => {
+                InputMode::Normal | InputMode::DeviceOptionInput { .. } => {
                     if let Some(panel_name) = &m.ui.focused_panel {
                         let items = focus_items(m);
                         let groups = wrap_items_grouped(&items, FOCUS_SEP, inner_w);
@@ -422,12 +459,13 @@ impl Panel for FooterPanel {
                         }
                         wrapped
                     } else {
-                        let items = normal_items(
+                        let items = normal_items_for(
                             &m.ui.active_preset,
                             &m.ui.scope,
                             m.ui.micro_view(),
                             frame::outer_of(inner).width,
                             &m.caps.gain,
+                            m.caps.sample_rate_is_span,
                         );
                         let groups = wrap_items_grouped(&items, NORMAL_SEP, inner_w);
                         styled_lines(groups, NORMAL_SEP, theme, max_lines)
@@ -465,8 +503,10 @@ fn tone_for(observer: bool, mode: &InputMode, panel_focused: bool) -> FrameTone 
     match mode {
         // Normal: lit while a panel is focused, because the keys along the
         // footer are that panel's, not the global set.
-        InputMode::Normal if panel_focused => FrameTone::Focused,
-        InputMode::Normal => FrameTone::Dim,
+        InputMode::Normal | InputMode::DeviceOptionInput { .. } if panel_focused => {
+            FrameTone::Focused
+        }
+        InputMode::Normal | InputMode::DeviceOptionInput { .. } => FrameTone::Dim,
         // Anything else is a half-typed value waiting on Enter.
         _ => FrameTone::Warn,
     }
@@ -523,6 +563,29 @@ mod tests {
             FrameTone::Focused
         );
         assert_eq!(tone_for(false, &InputMode::Normal, false), FrameTone::Dim);
+    }
+
+    #[test]
+    fn numeric_entry_keeps_the_normal_deck_footer() {
+        let mut m = SdrMetrics::fixture();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 5)).unwrap();
+        let normal_height = compute_footer_height(80, &m);
+        let mut draw = |m: &SdrMetrics| {
+            terminal
+                .draw(|f| FooterPanel.render(f, f.size(), m, &crate::Theme::sdr(), false))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let normal = draw(&m);
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "level".into(),
+            error: None,
+        };
+        m.ui.input_buf = "123456".into();
+        assert_eq!(draw(&m), normal);
+        assert_eq!(compute_footer_height(80, &m), normal_height);
+        assert_eq!(tone_for(false, &m.ui.input_mode, false), FrameTone::Dim);
     }
 
     #[test]
@@ -622,6 +685,27 @@ mod tests {
         let items = normal_items("main", &[], MicroView::Main, 120, &hackrf::gain_model());
         assert_eq!(items.last().map(String::as_str), Some("[P] main"));
         assert_eq!(items.len(), NORMAL_ITEMS.len() + 1);
+    }
+
+    #[test]
+    fn power_trace_footer_keeps_only_supported_radio_controls() {
+        let items = normal_items_for(
+            "spectrum_waterfall",
+            &[],
+            MicroView::Main,
+            120,
+            &hackrf::gain_model(),
+            true,
+        );
+        let text = items.join(" ");
+        assert!(text.contains("[Space] RX"));
+        assert!(text.contains("[F] Freq"));
+        assert!(text.contains("[S] Span"));
+        assert!(text.contains("[R] Reset"));
+        assert!(!text.contains("Gain"));
+        assert!(!text.contains("LNA"));
+        assert!(!text.contains("VGA"));
+        assert!(!text.contains("AMP"));
     }
 
     #[test]

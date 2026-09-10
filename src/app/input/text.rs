@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 MusiThang <viktor.laszlo92@protonmail.com>
 
-//! The text-entry modes: frequency, sample rate, the two sweep-range fields and
-//! a marker's label.
+//! The text-entry modes include device options, frequency, sample rate, sweep
+//! bounds, and marker labels.
 //!
 //! These are reached through [`InputMode`] rather than through panel focus, and
 //! they are the one place a key is **not** case-folded - a marker label is typed,
@@ -15,7 +15,71 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::hardware;
 use crate::state::{InputMode, RailMode, SdrMetrics, SpectrumMarker};
 
-use super::metrics;
+use super::{menu, metrics, KeyAction};
+
+pub(super) fn device_option(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, id: &str) -> KeyAction {
+    let mut m = metrics(state);
+    if m.ui.device_option_update.is_pending() {
+        return KeyAction::Continue;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            m.ui.input_mode = InputMode::Normal;
+            m.ui.input_buf.clear();
+            m.push_log("Device option input cancelled");
+        }
+        KeyCode::Backspace => {
+            m.ui.input_buf.pop();
+            clear_option_error(&mut m);
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() || (c == '-' && m.ui.input_buf.is_empty()) => {
+            m.ui.input_buf.push(c);
+            clear_option_error(&mut m);
+        }
+        KeyCode::Enter => {
+            let result = m
+                .device_options
+                .iter()
+                .find(|option| option.id == id)
+                .ok_or_else(|| "Option is no longer available".to_string())
+                .and_then(|option| {
+                    let choice = option
+                        .integer_choice(&m.ui.input_buf)
+                        .map_err(|error| error.to_string())?;
+                    Ok((
+                        crate::event::DeviceOptionRequest {
+                            id: option.id.clone(),
+                            label: option.label.clone(),
+                            choice: choice.to_string(),
+                        },
+                        choice == option.selected_choice,
+                    ))
+                });
+            match result {
+                Ok((request, unchanged)) => {
+                    m.ui.input_mode = InputMode::Normal;
+                    m.ui.input_buf.clear();
+                    if !unchanged {
+                        return menu::submit_option_request(&mut m, request);
+                    }
+                }
+                Err(message) => {
+                    if let InputMode::DeviceOptionInput { error, .. } = &mut m.ui.input_mode {
+                        *error = Some(message);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    KeyAction::Continue
+}
+
+fn clear_option_error(m: &mut SdrMetrics) {
+    if let InputMode::DeviceOptionInput { error, .. } = &mut m.ui.input_mode {
+        *error = None;
+    }
+}
 
 pub(super) fn frequency(
     key: KeyEvent,
@@ -90,7 +154,12 @@ pub(super) fn sample_rate(
             let mut m = metrics(state);
             m.ui.input_mode = InputMode::Normal;
             m.ui.input_buf.clear();
-            m.push_log("Sample rate input cancelled");
+            let name = if m.caps.sample_rate_is_span {
+                "Span"
+            } else {
+                "Sample rate"
+            };
+            m.push_log(format!("{name} input cancelled"));
         }
         KeyCode::Backspace => {
             metrics(state).ui.input_buf.pop();
@@ -118,6 +187,11 @@ pub(super) fn sample_rate(
                 // rx_callback thread that needs the same lock to return.
                 let result = rate_hz.map(|hz| device.set_sample_rate(hz));
                 let mut m = metrics(state);
+                let (name, lower_name) = if m.caps.sample_rate_is_span {
+                    ("Span", "span")
+                } else {
+                    ("Sample rate", "sample rate")
+                };
                 match (rate_hz, result) {
                     // The rate recorded is the one the device came back with,
                     // not the one that was typed: a driver is free to round onto
@@ -129,21 +203,21 @@ pub(super) fn sample_rate(
                         m.ui.input_mode = InputMode::Normal;
                         m.ui.input_buf.clear();
                         m.push_log(if set.rate_hz == hz {
-                            format!("Sample rate set to {:.3} MHz", hz / 1e6)
+                            format!("{name} set to {:.3} MHz", hz / 1e6)
                         } else {
                             format!(
-                                "Sample rate {:.3} MHz is not on this radio's grid; running at \
+                                "{name} {:.3} MHz is not on this device's grid; running at \
                                  {:.3} MHz",
                                 hz / 1e6,
                                 set.rate_hz / 1e6
                             )
                         });
                     }
-                    (Some(_), Some(Err(e))) => m.push_log(format!("Sample rate error: {}", e)),
+                    (Some(_), Some(Err(e))) => m.push_log(format!("{name} error: {e}")),
                     _ => {
                         let bad = m.ui.input_buf.clone();
                         m.push_log(format!(
-                            "Invalid sample rate: '{}' (valid: {:.1}–{:.1} MHz)",
+                            "Invalid {lower_name}: '{}' (valid: {:.1}–{:.1} MHz)",
                             bad,
                             lo_hz / 1e6,
                             hi_hz / 1e6
@@ -190,10 +264,14 @@ pub(super) fn sweep_range(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, is_star
                     let (start, stop) = (m.sweep.config.start_hz, m.sweep.config.stop_hz);
                     let ordered = if is_start { hz < stop } else { hz > start };
                     if ordered {
+                        let changed = if is_start { hz != start } else { hz != stop };
                         if is_start {
                             m.sweep.config.start_hz = hz;
                         } else {
                             m.sweep.config.stop_hz = hz;
+                        }
+                        if changed {
+                            m.sweep.generation = m.sweep.generation.wrapping_add(1);
                         }
                         m.sweep.cycle_count = 0;
                         m.sweep.positions_done = 0;

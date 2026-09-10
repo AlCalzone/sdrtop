@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 
 use crate::config::{AppConfig, DisplayConfig, RadioConfig};
-use crate::event::{AppEvent, EventStream};
+use crate::event::{AppEvent, DeviceOptionCompletion, DeviceOptionRequest, EventStream};
 use crate::hardware::{self, RxContext, SdrDevice};
 use crate::state::SdrMetrics;
 use crate::ui;
@@ -85,25 +86,46 @@ impl App {
         loop {
             let needs_redraw = match self.events.recv() {
                 AppEvent::Key(key) => {
-                    match input::handle_key(
-                        key,
-                        &self.state,
-                        self.device.as_ref(),
-                        &mut self.engine,
-                        &mut self.show_footer,
-                        &self.focus_keys,
-                    ) {
-                        input::KeyAction::Quit => {
-                            self.restore_noise_sweep();
-                            self.restore_sweep_tuning();
-                            self.save_config();
-                            return Ok(());
+                    if self.device_option_pending() && Self::is_option_quit_key(key) {
+                        if self.request_pending_option_quit() {
+                            return Err(self.forced_option_quit_error());
                         }
-                        input::KeyAction::Continue => {}
+                        true
+                    } else {
+                        match input::handle_key(
+                            key,
+                            &self.state,
+                            self.device.as_ref(),
+                            &mut self.engine,
+                            &mut self.show_footer,
+                            &self.focus_keys,
+                        ) {
+                            input::KeyAction::Quit => {
+                                if self.device_option_pending() {
+                                    if self.request_pending_option_quit() {
+                                        return Err(self.forced_option_quit_error());
+                                    }
+                                } else {
+                                    self.finish_session();
+                                    return Ok(());
+                                }
+                            }
+                            input::KeyAction::Continue => {}
+                            input::KeyAction::ApplyDeviceOption(request) => {
+                                self.start_device_option(request);
+                            }
+                        }
+                        last_draw.elapsed() >= FRAME_DURATION
                     }
-                    last_draw.elapsed() >= FRAME_DURATION
                 }
                 AppEvent::Tick => true,
+                AppEvent::DeviceOptionComplete(completion) => {
+                    if input::complete_device_option(&self.state, completion) {
+                        self.finish_session();
+                        return Ok(());
+                    }
+                    true
+                }
             };
 
             if needs_redraw {
@@ -113,12 +135,71 @@ impl App {
         }
     }
 
+    fn start_device_option(&self, request: DeviceOptionRequest) {
+        let Some(device) = self.device.as_ref().cloned() else {
+            input::complete_device_option(
+                &self.state,
+                DeviceOptionCompletion {
+                    result: Err("device is unavailable".to_string()),
+                },
+            );
+            return;
+        };
+        let tx = self.events.sender();
+        let worker_request = request.clone();
+        Self::spawn_device_option_task(tx, move || {
+            Self::execute_device_option(
+                &worker_request,
+                |id, choice| device.set_option(id, choice),
+                || device.options(),
+            )
+        });
+    }
+
+    fn device_option_pending(&self) -> bool {
+        let m = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        m.ui.device_option_update.is_pending()
+    }
+
+    fn is_option_quit_key(key: KeyEvent) -> bool {
+        matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+            || matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+    }
+
+    fn request_pending_option_quit(&self) -> bool {
+        let mut m = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let forced = m.ui.device_option_update.request_quit();
+        if !forced {
+            m.push_log(
+                "Waiting for device option update; Q/Ctrl-C again forces quit without saving"
+                    .to_string(),
+            );
+        }
+        forced
+    }
+
+    fn forced_option_quit_error(&self) -> io::Error {
+        // A backend destructor can block. Leak one owner on this process-exit
+        // path so App teardown and worker completion cannot run that destructor.
+        if let Some(device) = self.device.as_ref().cloned() {
+            std::mem::forget(device);
+        }
+        io::Error::other(
+            "Forced quit while a device option update is still running; device state is uncertain and settings were not saved",
+        )
+    }
+
+    fn finish_session(&self) {
+        self.restore_noise_sweep();
+        self.restore_sweep_tuning();
+        self.save_config();
+    }
+
     fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
-        // Sweep mode is owned by the `lab_sweep` preset: keep the real state's
-        // `sweep.active` in sync with the active preset so the sweep_task starts
-        // and stops with it, then take the render snapshot.
         let active_preset = self.engine.active_preset().to_string();
-        let sweep_active = active_preset == "lab_sweep" || active_preset == "micro_sweep";
+        let sweep_active = self.engine.is_panel_visible("sweep_panel")
+            || self.engine.is_panel_visible("micro_sweep_panel");
         // The demod is gated on its panel being on screen, not on the preset being
         // called `lab_signal`: presets are data, and a user preset that lists
         // `fm_demod` used to get a panel that never received a block - it sat at
@@ -166,7 +247,11 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let hide_footer = !self.show_footer && m.ui.input_mode == crate::state::InputMode::Normal;
+        let hide_footer = !self.show_footer
+            && matches!(
+                m.ui.input_mode,
+                crate::state::InputMode::Normal | crate::state::InputMode::DeviceOptionInput { .. }
+            );
         self.engine.set_panel_hidden("footer", hide_footer);
         // Copied out before the closure borrows `self` for the engine.
         let deck_shown = self.deck_shown;
@@ -204,12 +289,30 @@ impl App {
                 f.render_widget(ratatui::widgets::Clear, area);
                 ui::menu::render(f, area, &m, self.engine.menu(), &menu_state, &frame_theme);
             }
+            if m.ui.device_option_update.quit_requested() {
+                let full = f.size();
+                let area = ratatui::layout::Rect::new(
+                    full.x,
+                    full.y + full.height.saturating_sub(1),
+                    full.width,
+                    1,
+                );
+                f.render_widget(ratatui::widgets::Clear, area);
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new(
+                        " Waiting for device; Q/Ctrl-C again forces quit without saving",
+                    )
+                    .style(ratatui::style::Style::default().fg(frame_theme.status_warn)),
+                    area,
+                );
+            }
         })?;
         // The deck is behind the menu from the moment it has been drawn once
         // without one in front of it.
         if m.ui.menu.is_none() {
             self.deck_shown = true;
         }
+
         Ok(())
     }
 
@@ -243,6 +346,27 @@ impl App {
         if let Some(g) = m.radio.gains.get_mut(idx) {
             *g = db;
         }
+    }
+
+    fn spawn_device_option_task(
+        tx: std::sync::mpsc::Sender<AppEvent>,
+        apply: impl FnOnce() -> anyhow::Result<Vec<hardware::DeviceOption>> + Send + 'static,
+    ) {
+        std::thread::spawn(move || {
+            let completion = DeviceOptionCompletion {
+                result: apply().map_err(|error| format!("{error:#}")),
+            };
+            let _ = tx.send(AppEvent::DeviceOptionComplete(completion));
+        });
+    }
+
+    fn execute_device_option(
+        request: &DeviceOptionRequest,
+        set: impl FnOnce(&str, &str) -> anyhow::Result<()>,
+        refresh: impl FnOnce() -> Vec<hardware::DeviceOption>,
+    ) -> anyhow::Result<Vec<hardware::DeviceOption>> {
+        set(&request.id, &request.choice)?;
+        Ok(refresh())
     }
 
     /// Put the tuner back before the app goes away.
@@ -323,7 +447,7 @@ impl App {
                 recall_hz: recall,
             },
             display: DisplayConfig {
-                active_preset: self.engine.active_preset().to_string(),
+                active_preset: self.engine.saved_active_preset().to_string(),
                 waterfall_max_rows: wf_rows,
                 waterfall_palette: wf_palette,
                 spectrum_style: spec_style,
@@ -349,35 +473,363 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    /// Quitting must give the tuner back before the config is written.
-    ///
-    /// `save_config` persists `radio.frequency`, and while a sweep is running
-    /// that field holds the position the scan has reached, not anything the user
-    /// tuned. The ordering of the two calls is the whole of the fix, and nothing
-    /// in the type system holds it: both are `&self` methods returning `()`, so
-    /// swapping them or dropping one still compiles and quietly puts the bug
-    /// back. Read as source text for the same reason the dispatch table is.
+    use super::*;
+    use crate::hardware::{DeviceCapabilities, DeviceInfo, RateSet};
+    use crate::state::DeviceOptionUpdate;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    struct QuitDevice {
+        caps: DeviceCapabilities,
+        tuned_hz: AtomicU64,
+        tune_calls: AtomicUsize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl QuitDevice {
+        fn new(caps: DeviceCapabilities) -> Self {
+            Self {
+                caps,
+                tuned_hz: AtomicU64::new(0),
+                tune_calls: AtomicUsize::new(0),
+                drops: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Drop for QuitDevice {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl SdrDevice for QuitDevice {
+        fn capabilities(&self) -> &DeviceCapabilities {
+            &self.caps
+        }
+
+        fn info(&self) -> DeviceInfo {
+            DeviceInfo::default()
+        }
+
+        fn start_rx(&self, _ctx: Arc<RxContext>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop_rx(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_streaming(&self) -> bool {
+            false
+        }
+
+        fn set_frequency(&self, hz: u64) -> anyhow::Result<()> {
+            self.tuned_hz.store(hz, Ordering::Relaxed);
+            self.tune_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn set_sample_rate(&self, hz: f64) -> anyhow::Result<RateSet> {
+            Ok(RateSet::new(hz, Some(hz), 0))
+        }
+
+        fn set_lna_gain(&self, _db: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn pending_request() -> DeviceOptionRequest {
+        DeviceOptionRequest {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choice: "Wide".into(),
+        }
+    }
+
+    fn quit_test_app() -> (
+        App,
+        mpsc::Sender<AppEvent>,
+        Arc<QuitDevice>,
+        std::path::PathBuf,
+    ) {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        {
+            let mut m = state.lock().unwrap();
+            m.radio.frequency = 200_000_000;
+            m.sweep.pre_sweep_hz = Some(100_000_000);
+            m.ui.device_option_update = DeviceOptionUpdate::Pending {
+                request: pending_request(),
+                quit_requested: false,
+            };
+        }
+        let device = Arc::new(QuitDevice::new(state.lock().unwrap().caps.as_ref().clone()));
+        let path = std::env::temp_dir().join(format!(
+            "sdrtop-option-quit-{}-{}.toml",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App::assemble(
+            AppConfig::default(),
+            Some(path.clone()),
+            state,
+            Some(device.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        app.events = EventStream::from_channel(tx.clone(), rx);
+        (app, tx, device, path)
+    }
+
     #[test]
-    fn quitting_gives_the_tuner_back_before_saving_the_config() {
-        let arm = include_str!("mod.rs")
-            .split_once("KeyAction::Quit => {")
-            .expect("the quit arm has been renamed")
-            .1
-            .split_once("return Ok(());")
-            .expect("the quit arm no longer returns")
-            .0;
-        let restore = arm.find("self.restore_sweep_tuning()").expect(
-            "quitting no longer ends the sweep, so save_config writes out \
-             whichever position the scan was parked on as the tuned frequency",
+    fn first_quit_waits_for_success_then_restores_before_saving() {
+        let (mut app, tx, device, path) = quit_test_app();
+        tx.send(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))))
+            .unwrap();
+        tx.send(AppEvent::DeviceOptionComplete(DeviceOptionCompletion {
+            result: Ok(vec![hardware::DeviceOption {
+                id: "bandwidth".into(),
+                label: "Bandwidth".into(),
+                choices: vec!["Narrow".into(), "Wide".into()],
+                selected_choice: "Wide".into(),
+                integer_range: None,
+            }]),
+        }))
+        .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        app.run(&mut terminal).unwrap();
+
+        assert_eq!(device.tune_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(device.tuned_hz.load(Ordering::Relaxed), 100_000_000);
+        assert_eq!(
+            AppConfig::load_or_default(&path).radio.frequency_hz,
+            100_000_000
         );
-        let save = arm
-            .find("self.save_config()")
-            .expect("the quit arm no longer saves the config");
+        let m = app.state.lock().unwrap();
+        assert_eq!(m.device_options[0].selected_choice, "Wide");
+        assert!(matches!(
+            m.ui.device_option_update,
+            DeviceOptionUpdate::Idle
+        ));
+        assert!(m
+            .ui
+            .log
+            .back()
+            .is_some_and(|entry| entry.text.contains("Bandwidth set to Wide")));
+        drop(m);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn numeric_menu_entry_preserves_the_deck_footer_setting() {
+        use crate::state::{InputMode, MenuPane, MenuState};
+        let (mut app, _, _, _) = quit_test_app();
+        app.engine.set_preset("command_rail");
+        {
+            let mut m = app.state.lock().unwrap();
+            m.ui.device_option_update = DeviceOptionUpdate::Idle;
+            m.ui.menu = Some(MenuState {
+                pane: MenuPane::Options,
+                ..Default::default()
+            });
+        }
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        for show_footer in [false, true] {
+            app.show_footer = show_footer;
+            for mode in [
+                InputMode::Normal,
+                InputMode::DeviceOptionInput {
+                    id: "level".into(),
+                    error: None,
+                },
+                InputMode::FrequencyInput,
+                InputMode::SampleRateInput,
+                InputMode::SweepStartInput,
+                InputMode::SweepStopInput,
+                InputMode::MarkerNameInput,
+            ] {
+                let expected = show_footer
+                    || !matches!(
+                        mode,
+                        InputMode::Normal | InputMode::DeviceOptionInput { .. }
+                    );
+                app.state.lock().unwrap().ui.input_mode = mode;
+                app.draw(&mut terminal).unwrap();
+                assert_eq!(app.engine.is_panel_visible("footer"), expected);
+                assert_eq!(app.show_footer, show_footer);
+            }
+        }
+    }
+
+    #[test]
+    fn first_quit_also_waits_for_failure_before_orderly_finish() {
+        let (mut app, tx, device, path) = quit_test_app();
+        tx.send(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))))
+            .unwrap();
+        tx.send(AppEvent::DeviceOptionComplete(DeviceOptionCompletion {
+            result: Err("device rejected choice".into()),
+        }))
+        .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        app.run(&mut terminal).unwrap();
+
+        assert_eq!(device.tune_calls.load(Ordering::Relaxed), 1);
+        assert!(path.exists());
+        let m = app.state.lock().unwrap();
+        assert!(matches!(
+            &m.ui.device_option_update,
+            DeviceOptionUpdate::Failed { id } if id == "bandwidth"
+        ));
+        assert!(m.ui.log.back().is_some_and(|entry| entry
+            .text
+            .contains("Bandwidth error: device rejected choice")));
+        drop(m);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn second_quit_or_control_c_escapes_without_restore_or_save() {
+        let escapes = [
+            KeyEvent::from(KeyCode::Char('q')),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ];
+        for escape in escapes {
+            let (mut app, tx, device, path) = quit_test_app();
+            tx.send(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))))
+                .unwrap();
+            tx.send(AppEvent::Key(escape)).unwrap();
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+            let error = app.run(&mut terminal).unwrap_err();
+
+            assert!(error.to_string().contains("device state is uncertain"));
+            assert!(error.to_string().contains("settings were not saved"));
+            assert_eq!(device.tune_calls.load(Ordering::Relaxed), 0);
+            assert!(!path.exists());
+            assert!(
+                app.state
+                    .lock()
+                    .unwrap()
+                    .ui
+                    .device_option_update
+                    .is_pending(),
+                "forced exit must not pretend the worker was cancelled"
+            );
+            let drops = Arc::clone(&device.drops);
+            drop(app);
+            drop(device);
+            assert_eq!(
+                drops.load(Ordering::Relaxed),
+                0,
+                "the retained device owner must suppress backend Drop"
+            );
+        }
+    }
+
+    #[test]
+    fn slow_device_option_work_runs_off_the_event_thread() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let request = DeviceOptionRequest {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choice: "Wide".into(),
+        };
+        state.lock().unwrap().ui.device_option_update = DeviceOptionUpdate::Pending {
+            request: request.clone(),
+            quit_requested: false,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_request = request.clone();
+
+        App::spawn_device_option_task(event_tx, move || {
+            App::execute_device_option(
+                &worker_request,
+                |_, _| {
+                    assert!(
+                        worker_state.try_lock().is_ok(),
+                        "state was locked during set_option"
+                    );
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+                || {
+                    assert!(
+                        worker_state.try_lock().is_ok(),
+                        "state was locked during options"
+                    );
+                    vec![
+                        hardware::DeviceOption {
+                            id: "bandwidth".into(),
+                            label: "Bandwidth".into(),
+                            choices: vec!["Narrow".into(), "Wide".into()],
+                            selected_choice: "Wide".into(),
+                            integer_range: None,
+                        },
+                        hardware::DeviceOption {
+                            id: "attenuation".into(),
+                            label: "Attenuation".into(),
+                            choices: vec!["0 dB".into(), "10 dB".into()],
+                            selected_choice: "0 dB".into(),
+                            integer_range: None,
+                        },
+                    ]
+                },
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("option worker did not start");
         assert!(
-            restore < save,
-            "restore_sweep_tuning must run before save_config, or the config \
-             still records the scan position"
+            state.try_lock().is_ok(),
+            "event thread cannot read state while the backend waits"
         );
+        release_tx.send(()).unwrap();
+        let AppEvent::DeviceOptionComplete(completion) = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("option worker did not complete")
+        else {
+            panic!("worker sent the wrong event");
+        };
+        input::complete_device_option(&state, completion);
+
+        let m = state.lock().unwrap();
+        assert_eq!(m.device_options.len(), 2);
+        assert_eq!(m.device_options[0].selected_choice, "Wide");
+        assert_eq!(m.device_options[1].selected_choice, "0 dB");
+    }
+
+    #[test]
+    fn failed_device_option_set_does_not_refresh() {
+        let request = DeviceOptionRequest {
+            id: "bandwidth".into(),
+            label: "Bandwidth".into(),
+            choice: "Wide".into(),
+        };
+        let refreshed = Cell::new(false);
+
+        let result = App::execute_device_option(
+            &request,
+            |_, _| anyhow::bail!("device rejected choice"),
+            || {
+                refreshed.set(true);
+                Vec::new()
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!refreshed.get());
     }
 
     /// **What other threads read is written to the shared state, not to the

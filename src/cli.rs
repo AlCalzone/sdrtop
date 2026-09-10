@@ -44,8 +44,11 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Pick the backend, optionally with SoapySDR device args (soapy=driver=airspy)
-    #[arg(long, value_name = "hackrf|rtlsdr|soapy[=args]")]
+    /// Pick the backend, optionally with a tinySA path/input or SoapySDR device args
+    #[arg(
+        long,
+        value_name = "hackrf|rtlsdr|tinysa[=PATH[?input=low|high]]|soapy[=args]"
+    )]
     pub device: Option<String>,
 
     /// Center frequency in Hz, e.g. 433920000 (overrides config)

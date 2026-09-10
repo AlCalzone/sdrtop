@@ -129,9 +129,48 @@ pub struct LogEntry {
     pub text: Arc<str>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum DeviceOptionUpdate {
+    #[default]
+    Idle,
+    Pending {
+        request: crate::event::DeviceOptionRequest,
+        quit_requested: bool,
+    },
+    Failed {
+        id: String,
+    },
+}
+
+impl DeviceOptionUpdate {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                quit_requested: true,
+                ..
+            }
+        )
+    }
+
+    pub fn request_quit(&mut self) -> bool {
+        let Self::Pending { quit_requested, .. } = self else {
+            return false;
+        };
+        let already_requested = *quit_requested;
+        *quit_requested = true;
+        already_requested
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub enum InputMode {
     Normal,
+    DeviceOptionInput { id: String, error: Option<String> },
     FrequencyInput,
     SampleRateInput,
     MarkerNameInput,
@@ -195,6 +234,7 @@ pub struct UiState {
     /// Where the cursor is while the menu is open, `None` when it is closed.
     /// See [`MenuState`].
     pub menu: Option<MenuState>,
+    pub device_option_update: DeviceOptionUpdate,
 }
 
 /// Which pane the menu's right column is showing.
@@ -206,9 +246,7 @@ pub enum MenuPane {
     /// The key reference. Replaces the `?` overlay, which had drifted out of
     /// step with the dispatch because nothing checked it.
     Keys,
-    /// Settings. Empty so far, and it says so on screen. The variant exists
-    /// ahead of its first row so that adding one is a row rather than a
-    /// reshuffle of the enum, the column and the dispatch together.
+    /// Settings exposed by the active device.
     Options,
 }
 
@@ -228,11 +266,7 @@ pub struct MenuState {
     pub section: usize,
     pub entry: usize,
     pub pane: MenuPane,
-    /// First visible row of the [`MenuPane::Keys`] list.
-    ///
-    /// Its own field rather than reusing `entry`: the reference is taller than a
-    /// 24 row terminal, so it has to scroll, and one field meaning two things
-    /// depending on the pane is how a cursor ends up somewhere nobody expected.
+    /// Scroll position in Keys or selected row in Options.
     pub scroll: usize,
 }
 
@@ -334,6 +368,7 @@ impl Default for UiState {
             recall_cursor: 0,
             log_overlay: false,
             menu: None,
+            device_option_update: DeviceOptionUpdate::default(),
         }
     }
 }

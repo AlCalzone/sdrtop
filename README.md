@@ -53,7 +53,7 @@ It's a hobby project built in my spare time, and honestly, I made it for *you* �
 > [!IMPORTANT]
 > **Project status: early development.** The TUI is feature-complete and the arc now is polish, sharper radio math and bug fixing, not more features.
 >
-> Two radios are **verified on hardware**: HackRF One and RTL-SDR. Anything with a **SoapySDR** driver also works, and that backend is **beta**: it was written from the API rather than from owning the radios, so treat it as "should work, nobody has confirmed it yet". [The docs say exactly which parts are confirmed](user_docs/hardware.md#soapysdr-the-honest-version). If you own one of those, an issue either way is worth a lot to me.
+> HackRF One, RTL-SDR and a tinySA Ultra ZS405 are **verified on hardware**. Anything with a **SoapySDR** driver also works, and that backend is **beta**: it was written from the API rather than from owning the radios, so treat it as "should work, nobody has confirmed it yet". [The docs say exactly which parts are confirmed](user_docs/hardware.md#soapysdr-the-honest-version). If you own one of those, an issue either way is worth a lot to me.
 >
 > Known issues: plenty 😄 If something looks broken, it's either a bug or an undocumented feature. Flip a coin, then open an issue.
 
@@ -270,6 +270,7 @@ The whole story, in order: [What's new](user_docs/whats-new.md).
 |---|---|---|
 | HackRF One | ✅ Full support | All diagnostics, gain stages, ADC metrics |
 | RTL-SDR (R820T, E4000, R828D) | ✅ Full support | Single tuner gain + AGC; no VGA, no BB filter, no Friis NF |
+| tinySA / Ultra / Ultra+ | ✅ Spectrum support | ZS405 verified; calibrated dBm spectrum, waterfall and native band sweeps |
 | **Anything with a SoapySDR driver** | 🧪 **Beta** | Airspy, SDRplay, Pluto, Lime, bladeRF, USRP, SoapyRemote. Unconfirmed on anything but a HackRF |
 | PortaPack H4M (Mayhem) | ✅ Full support | HackRF mode: all HackRF diagnostics apply |
 | HackRF Pro | 🔲 Planned | Needs hardware |

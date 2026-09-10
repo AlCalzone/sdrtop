@@ -10,7 +10,7 @@
 //!    keyboard belongs to [`text`] and nothing else sees it.
 //! 2. **The menu.** While it is open it is modal and owns the keyboard, so a
 //!    focus handler cannot act on a deck that is currently behind it. It is not
-//!    an `InputMode` because those five variants are all text being typed.
+//!    an `InputMode` because input modes represent text being typed.
 //! 3. **Panel focus.** [`handle_normal`] asks the layout engine which panel holds
 //!    focus and hands the key to that panel's own handler - [`core`], [`bench`],
 //!    [`signal`], [`sweep`] or [`rail`].
@@ -36,16 +36,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::event::{DeviceOptionCompletion, DeviceOptionRequest};
 use crate::hardware;
 use crate::state::{InputMode, SdrMetrics};
 use crate::ui;
 
 /// What the main loop should do next. `PartialEq`/`Debug` so a test can say
 /// which one it expected.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KeyAction {
     Continue,
     Quit,
+    ApplyDeviceOption(DeviceOptionRequest),
 }
 
 /// Everything a key handler is allowed to touch.
@@ -107,10 +109,12 @@ pub fn handle_key(
                 handle_normal(key, &mut ctx)
             }
         }
+
         InputMode::FrequencyInput => {
             text::frequency(key, state, device);
             KeyAction::Continue
         }
+        InputMode::DeviceOptionInput { id, .. } => text::device_option(key, state, &id),
         InputMode::SampleRateInput => {
             text::sample_rate(key, state, device);
             KeyAction::Continue
@@ -128,6 +132,13 @@ pub fn handle_key(
             KeyAction::Continue
         }
     }
+}
+
+pub(super) fn complete_device_option(
+    state: &Arc<Mutex<SdrMetrics>>,
+    completion: DeviceOptionCompletion,
+) -> bool {
+    menu::complete_device_option(state, completion)
 }
 
 /// Fold an uppercase letter key onto its lowercase twin, leaving every other key

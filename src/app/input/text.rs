@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 MusiThang <viktor.laszlo92@protonmail.com>
 
-//! The text-entry modes: frequency, sample rate, the two sweep-range fields and
-//! a marker's label.
+//! The text-entry modes include device options, frequency, sample rate, sweep
+//! bounds, and marker labels.
 //!
 //! These are reached through [`InputMode`] rather than through panel focus, and
 //! they are the one place a key is **not** case-folded - a marker label is typed,
@@ -15,7 +15,80 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::hardware;
 use crate::state::{InputMode, RailMode, SdrMetrics, SpectrumMarker};
 
-use super::metrics;
+use super::{menu, metrics, KeyAction};
+
+pub(super) fn device_option(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, id: &str) -> KeyAction {
+    let mut m = metrics(state);
+    if m.ui.device_option_update.is_pending() {
+        return KeyAction::Continue;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            m.ui.input_mode = InputMode::Normal;
+            m.ui.input_buf.clear();
+            m.push_log("Device option input cancelled");
+        }
+        KeyCode::Backspace => {
+            m.ui.input_buf.pop();
+            clear_option_error(&mut m);
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() || (c == '-' && m.ui.input_buf.is_empty()) => {
+            m.ui.input_buf.push(c);
+            clear_option_error(&mut m);
+        }
+        KeyCode::Enter => {
+            let result = m
+                .device_options
+                .iter()
+                .find(|option| option.id == id)
+                .ok_or_else(|| "Option is no longer available".to_string())
+                .and_then(|option| {
+                    let choice =
+                        option.integer_choice(&m.ui.input_buf).ok_or_else(|| {
+                            match &option.integer_range {
+                                Some(range) => format!(
+                                    "Enter an advertised integer from {} to {}",
+                                    range.start(),
+                                    range.end()
+                                ),
+                                None => "Numeric entry is no longer available".to_string(),
+                            }
+                        })?;
+                    Ok((
+                        crate::event::DeviceOptionRequest {
+                            id: option.id.clone(),
+                            label: option.label.clone(),
+                            choice: choice.to_string(),
+                        },
+                        choice == option.selected_choice,
+                    ))
+                });
+            match result {
+                Ok((request, unchanged)) => {
+                    m.ui.input_mode = InputMode::Normal;
+                    m.ui.input_buf.clear();
+                    if !unchanged {
+                        return menu::submit_option_request(&mut m, request);
+                    }
+                }
+                Err(message) => {
+                    m.push_log(format!("Device option input error: {message}"));
+                    if let InputMode::DeviceOptionInput { error, .. } = &mut m.ui.input_mode {
+                        *error = Some(message);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    KeyAction::Continue
+}
+
+fn clear_option_error(m: &mut SdrMetrics) {
+    if let InputMode::DeviceOptionInput { error, .. } = &mut m.ui.input_mode {
+        *error = None;
+    }
+}
 
 pub(super) fn frequency(
     key: KeyEvent,

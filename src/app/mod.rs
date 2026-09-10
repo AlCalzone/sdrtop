@@ -581,6 +581,7 @@ mod tests {
                 label: "Bandwidth".into(),
                 choices: vec!["Narrow".into(), "Wide".into()],
                 selected_choice: "Wide".into(),
+                integer_range: None,
             }]),
         }))
         .unwrap();
@@ -716,12 +717,14 @@ mod tests {
                             label: "Bandwidth".into(),
                             choices: vec!["Narrow".into(), "Wide".into()],
                             selected_choice: "Wide".into(),
+                            integer_range: None,
                         },
                         hardware::DeviceOption {
                             id: "attenuation".into(),
                             label: "Attenuation".into(),
                             choices: vec!["0 dB".into(), "10 dB".into()],
                             selected_choice: "0 dB".into(),
+                            integer_range: None,
                         },
                     ]
                 },

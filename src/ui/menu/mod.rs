@@ -34,7 +34,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::state::{MenuPane, MenuState, SdrMetrics};
+use crate::state::{InputMode, MenuPane, MenuState, SdrMetrics};
 use crate::ui::chrome;
 
 use model::Menu;
@@ -84,7 +84,7 @@ pub fn render(
         .split(inner);
 
     header(f, rows[0], m, theme);
-    footer(f, rows[2], state.pane, !m.device_options.is_empty(), theme);
+    footer(f, rows[2], state, m, theme);
 
     // The cursor is cloned into the frame snapshot and arrives here without the
     // engine, so it is clamped rather than trusted. An out of range index would
@@ -183,27 +183,42 @@ fn header(f: &mut Frame, area: Rect, m: &SdrMetrics, theme: &crate::Theme) {
 }
 
 /// The keys, in the order the design's "Moving around" table lists them.
-fn footer(f: &mut Frame, area: Rect, pane: MenuPane, has_options: bool, theme: &crate::Theme) {
+fn footer(f: &mut Frame, area: Rect, state: &MenuState, m: &SdrMetrics, theme: &crate::Theme) {
     let key = Style::default().fg(theme.border_accent);
     let what = Style::default().fg(theme.label);
     let mut spans = Vec::new();
-    let bindings: &[(&str, &str)] = if pane == MenuPane::Options && has_options {
-        &[
-            ("Tab", "section"),
-            ("\u{2191}\u{2193}", "option"),
-            ("\u{2190}\u{2192}", "value"),
-            ("Enter", "next"),
-            ("Esc", "close"),
-        ]
-    } else {
-        &[
-            ("Tab", "section"),
-            ("\u{2191}\u{2193}", "move"),
-            ("1-9", "open"),
-            ("Enter", "open"),
-            ("Esc", "close"),
-        ]
-    };
+    let numeric = m
+        .device_options
+        .get(state.scroll)
+        .is_some_and(|option| option.integer_range.is_some());
+    let bindings: &[(&str, &str)] =
+        if matches!(m.ui.input_mode, InputMode::DeviceOptionInput { .. }) {
+            &[("Enter", "apply"), ("Esc", "cancel")]
+        } else if state.pane == MenuPane::Options && numeric {
+            &[
+                ("Enter", "number"),
+                ("\u{2190}\u{2192}", "all choices"),
+                ("Esc", "close"),
+                ("Tab", "section"),
+                ("\u{2191}\u{2193}", "option"),
+            ]
+        } else if state.pane == MenuPane::Options && !m.device_options.is_empty() {
+            &[
+                ("Tab", "section"),
+                ("\u{2191}\u{2193}", "option"),
+                ("\u{2190}\u{2192}", "value"),
+                ("Enter", "next"),
+                ("Esc", "close"),
+            ]
+        } else {
+            &[
+                ("Tab", "section"),
+                ("\u{2191}\u{2193}", "move"),
+                ("1-9", "open"),
+                ("Enter", "open"),
+                ("Esc", "close"),
+            ]
+        };
     for (k, w) in bindings {
         spans.push(Span::styled(format!(" {k} "), key));
         spans.push(Span::styled(*w, what));
@@ -419,11 +434,51 @@ mod tests {
                 label: format!("Option {index}"),
                 choices: vec!["Off".into(), "On".into()],
                 selected_choice: "On".into(),
+                integer_range: None,
             });
         }
 
         let all = draw_with_metrics(40, 10, &state, &metrics).join("\n");
         assert!(all.contains("Option 5"), "{all}");
+    }
+
+    #[test]
+    fn numeric_options_show_entry_hints_and_keep_the_accepted_value_in_the_editor() {
+        let state = MenuState {
+            pane: MenuPane::Options,
+            ..MenuState::default()
+        };
+        let mut m = SdrMetrics::fixture();
+        m.device_options = Arc::new(vec![crate::hardware::DeviceOption {
+            id: "gain".into(),
+            label: "Gain".into(),
+            choices: vec!["0".into(), "-12".into()],
+            selected_choice: "0".into(),
+            integer_range: Some(-100..=100),
+        }]);
+        for (w, h) in [(40, 10), (90, 24)] {
+            let all = draw_with_metrics(w, h, &state, &m).join("\n");
+            assert!(all.contains("Enter number"), "{all}");
+            assert!(all.contains("all choices"), "{all}");
+        }
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "gain".into(),
+            error: None,
+        };
+        m.ui.input_buf = "-12".into();
+        for (w, h) in [(40, 10), (90, 24)] {
+            let all = draw_with_metrics(w, h, &state, &m).join("\n");
+            for text in [
+                "Gain: 0",
+                "Value: -12_",
+                "Integer -100 to 100",
+                "Enter apply",
+                "Esc cancel",
+            ] {
+                assert!(all.contains(text), "'{text}' missing:\n{all}");
+            }
+            assert!(!all.contains("Enter number"), "{all}");
+        }
     }
 
     /// Small enough that nothing sensible fits. The requirement is only that it

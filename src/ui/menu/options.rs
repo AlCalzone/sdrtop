@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    state::{DeviceOptionUpdate, SdrMetrics},
+    state::{DeviceOptionUpdate, InputMode, SdrMetrics},
     ui::chrome,
 };
 
@@ -64,6 +64,9 @@ fn lines(
     height: usize,
     theme: &crate::Theme,
 ) -> Vec<Line<'static>> {
+    if let InputMode::DeviceOptionInput { id, error } = &m.ui.input_mode {
+        return editor_lines(m, id, error.as_deref(), iw, theme);
+    }
     if m.device_options.is_empty() {
         return empty_lines(iw, theme);
     }
@@ -86,6 +89,51 @@ fn lines(
             iw,
             theme,
         ));
+    }
+    out
+}
+
+fn editor_lines(
+    m: &SdrMetrics,
+    id: &str,
+    error: Option<&str>,
+    iw: usize,
+    theme: &crate::Theme,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if let Some(option) = m.device_options.iter().find(|option| option.id == id) {
+        out.push(Line::from(Span::styled(
+            fit_text(&format!("{}: {}", option.label, option.selected_choice), iw),
+            Style::default().fg(theme.label),
+        )));
+        out.push(Line::from(Span::styled(
+            fit_text(&format!("Value: {}_", m.ui.input_buf), iw),
+            Style::default().fg(theme.value_hi),
+        )));
+        if let Some(range) = &option.integer_range {
+            for row in chrome::wrap(
+                &format!("Integer {} to {}", range.start(), range.end()),
+                iw,
+                3,
+            ) {
+                out.push(Line::from(Span::styled(
+                    row,
+                    Style::default().fg(theme.label),
+                )));
+            }
+        }
+    }
+    let error = error.or_else(|| {
+        (!m.device_options.iter().any(|option| option.id == id))
+            .then_some("Option is no longer available. Esc cancels.")
+    });
+    if let Some(error) = error {
+        for row in chrome::wrap(error, iw, 4) {
+            out.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(theme.status_warn),
+            )));
+        }
     }
     out
 }
@@ -243,6 +291,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Wide".into(),
+            integer_range: None,
         });
         let text = lines(&m, 0, 60, 20, &crate::Theme::sdr())
             .iter()
@@ -262,6 +311,7 @@ mod tests {
                 label: format!("Option {index}"),
                 choices: vec!["Off".into(), "On".into()],
                 selected_choice: "Off".into(),
+                integer_range: None,
             });
         }
 
@@ -282,6 +332,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Wide".into(),
+            integer_range: None,
         });
 
         let text = lines(&m, 0, 60, 1, &crate::Theme::sdr())
@@ -301,6 +352,7 @@ mod tests {
             label: "A device-provided label that is much too long".into(),
             choices: vec!["A device-provided choice that is much too long".into()],
             selected_choice: "A device-provided choice that is much too long".into(),
+            integer_range: None,
         });
 
         for width in [1, 4, 7, 8, 12, 20, 28] {
@@ -322,6 +374,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Narrow".into(),
+            integer_range: None,
         });
         m.ui.device_option_update = DeviceOptionUpdate::Pending {
             request: crate::event::DeviceOptionRequest {
@@ -348,6 +401,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: vec!["Narrow".into(), "Wide".into()],
             selected_choice: "Narrow".into(),
+            integer_range: None,
         });
         m.ui.device_option_update = DeviceOptionUpdate::Failed {
             id: "bandwidth".into(),
@@ -360,5 +414,49 @@ mod tests {
             .join("\n");
         assert!(text.contains("Narrow (failed)"), "{text}");
         assert!(!text.contains("Wide"), "{text}");
+    }
+
+    #[test]
+    fn numeric_editor_shows_validation_errors_and_fits_narrow_panes() {
+        let mut m = SdrMetrics::fixture();
+        m.device_options = Arc::new(vec![crate::hardware::DeviceOption {
+            id: "gain".into(),
+            label: "Gain".into(),
+            choices: vec!["0".into(), "12".into()],
+            selected_choice: "0".into(),
+            integer_range: Some(-100..=100),
+        }]);
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "gain".into(),
+            error: Some("Enter an advertised integer from -100 to 100".into()),
+        };
+        m.ui.input_buf = "101".into();
+        for width in [0, 1, 4, 7, 12, 28, 60] {
+            for line in lines(&m, 0, width, 20, &crate::Theme::sdr()) {
+                assert!(line.width() <= width, "{line:?}");
+            }
+        }
+        let text = lines(&m, 0, 60, 20, &crate::Theme::sdr())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Gain: 0"), "{text}");
+        assert!(text.contains("Value: 101_"), "{text}");
+        assert!(text.contains("Enter an advertised integer"), "{text}");
+
+        m.device_options = Arc::new(Vec::new());
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "gain".into(),
+            error: None,
+        };
+        let text = lines(&m, 0, 60, 20, &crate::Theme::sdr())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<String>();
+        assert!(
+            text.contains("Option is no longer available. Esc cancels."),
+            "{text}"
+        );
     }
 }

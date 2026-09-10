@@ -76,6 +76,26 @@ pub struct DeviceOption {
     pub label: String,
     pub choices: Vec<String>,
     pub selected_choice: String,
+    /// Numeric entry submits an advertised decimal integer choice within this range
+    pub integer_range: Option<std::ops::RangeInclusive<i32>>,
+}
+
+impl DeviceOption {
+    pub fn integer_choice(&self, input: &str) -> Option<&str> {
+        let digits = input.strip_prefix('-').unwrap_or(input);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let value = input.parse::<i32>().ok()?;
+        if !self.integer_range.as_ref()?.contains(&value) {
+            return None;
+        }
+        let choice = value.to_string();
+        self.choices
+            .iter()
+            .find(|advertised| **advertised == choice)
+            .map(String::as_str)
+    }
 }
 
 /// How raw USB bytes encode each I/Q component.

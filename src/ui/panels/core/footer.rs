@@ -408,6 +408,10 @@ impl Panel for FooterPanel {
             )
         } else {
             match m.ui.input_mode {
+                InputMode::DeviceOptionInput { .. } => prompt(format!(
+                    " Value: [{}]  [Enter] Apply  [Esc] Cancel",
+                    m.ui.input_buf
+                )),
                 InputMode::FrequencyInput => prompt(format!(
                     " Frequency (MHz): [{}▌]  [Enter] Confirm  [Esc] Cancel",
                     m.ui.input_buf

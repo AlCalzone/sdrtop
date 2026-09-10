@@ -71,6 +71,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: choices.iter().map(|choice| (*choice).into()).collect(),
             selected_choice: selected.into(),
+            integer_range: None,
         }
     }
 

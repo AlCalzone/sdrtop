@@ -37,6 +37,15 @@ The menu opens with the cursor already on the layout you are using, so `Enter`
 puts you straight back. That is also how the first screen of a session works:
 sdrtop remembers the layout you quit from, and the menu opens on it.
 
+In **Options**, `Up` / `Down` selects a device setting.
+`Left` / `Right` cycles all advertised choices, including `auto` when available.
+`Enter` cycles discrete settings or opens number entry when the footer shows `Enter number`.
+Type an integer within the displayed range.
+`Backspace` removes a character.
+`Enter` applies an advertised value.
+`Esc` cancels entry without changing the device.
+The accepted value stays visible until the device finishes applying the change.
+
 **Numbers belong to a section.** `2` is the RF bench inside Lab and the spectrum
 inside Command Rail, and each section starts again at `1`. This is what keeps the
 keyboard small: four families of layout, nine keys, instead of one long row of

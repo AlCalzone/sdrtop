@@ -4,7 +4,7 @@
 //! The menu's own keys, live only while the menu is open.
 //!
 //! Layer 2 of the dispatch: above panel focus, below text entry. The menu is
-//! modal but it is **not** an `InputMode`: those five variants are all text being
+//! modal but it is **not** an `InputMode`: the input variants are all text being
 //! typed, and this is not text.
 //!
 //! Modal here means modal. Nothing falls through to [`super::global`] except the
@@ -14,7 +14,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::event::{DeviceOptionCompletion, DeviceOptionRequest};
-use crate::state::{DeviceOptionUpdate, MenuPane, MenuState, SdrMetrics};
+use crate::state::{DeviceOptionUpdate, InputMode, MenuPane, MenuState, SdrMetrics};
 use crate::ui::menu::{keys, sections};
 
 use super::{global, metrics, InputCtx, KeyAction};
@@ -80,6 +80,23 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
             }
         }
         KeyCode::Enter if state.pane == MenuPane::Options => {
+            let mut m = metrics(ctx.state);
+            if m.ui.device_option_update.is_pending() {
+                return KeyAction::Continue;
+            }
+            if let Some(option) = m
+                .device_options
+                .get(state.scroll)
+                .filter(|option| option.integer_range.is_some())
+            {
+                m.ui.input_mode = InputMode::DeviceOptionInput {
+                    id: option.id.clone(),
+                    error: None,
+                };
+                m.ui.input_buf.clear();
+                return KeyAction::Continue;
+            }
+            drop(m);
             return request_option_change(ctx, state, 1);
         }
         _ => {}
@@ -230,6 +247,13 @@ fn request_option_change(ctx: &mut InputCtx<'_>, menu: MenuState, step: isize) -
         label: requested.1,
         choice: requested.2,
     };
+    submit_option_request(&mut m, request)
+}
+
+pub(super) fn submit_option_request(m: &mut SdrMetrics, request: DeviceOptionRequest) -> KeyAction {
+    if m.ui.device_option_update.is_pending() {
+        return KeyAction::Continue;
+    }
     m.ui.device_option_update = DeviceOptionUpdate::Pending {
         request: request.clone(),
         quit_requested: false,
@@ -340,14 +364,20 @@ mod tests {
         }
 
         fn key(&mut self, code: KeyCode) -> KeyAction {
-            let mut ctx = InputCtx {
-                state: &self.state,
-                device: None,
-                engine: &mut self.engine,
-                show_footer: &mut self.show_footer,
-                focus_keys: &self.focus_keys,
-            };
-            handle(KeyEvent::from(code), &mut ctx)
+            super::super::handle_key(
+                KeyEvent::from(code),
+                &self.state,
+                None,
+                &mut self.engine,
+                &mut self.show_footer,
+                &self.focus_keys,
+            )
+        }
+
+        fn type_number(&mut self, value: &str) {
+            for c in value.chars() {
+                assert_eq!(self.key(KeyCode::Char(c)), KeyAction::Continue);
+            }
         }
 
         fn menu(&self) -> MenuState {
@@ -374,6 +404,325 @@ mod tests {
             label: label.into(),
             choices: choices.iter().map(|choice| (*choice).into()).collect(),
             selected_choice: selected.into(),
+            integer_range: None,
+        }
+    }
+
+    fn integer_option(selected: &str) -> DeviceOption {
+        DeviceOption {
+            id: "gain".into(),
+            label: "Gain".into(),
+            choices: (-100..=100).map(|value| value.to_string()).collect(),
+            selected_choice: selected.into(),
+            integer_range: Some(-100..=100),
+        }
+    }
+
+    #[test]
+    fn numeric_entry_begins_without_writing_and_cancel_keeps_the_value() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0")]);
+        assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        h.type_number("-12");
+        h.key(KeyCode::Backspace);
+        {
+            let m = metrics(&h.state);
+            assert_eq!(m.ui.input_buf, "-1");
+            assert!(matches!(
+                &m.ui.input_mode,
+                InputMode::DeviceOptionInput { id, error: None } if id == "gain"
+            ));
+            assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+            assert_eq!(m.device_options[0].selected_choice, "0");
+        }
+        assert_eq!(h.key(KeyCode::Esc), KeyAction::Continue);
+        let m = metrics(&h.state);
+        assert!(matches!(m.ui.input_mode, InputMode::Normal));
+        assert!(m.ui.input_buf.is_empty());
+        assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+        assert_eq!(m.device_options[0].selected_choice, "0");
+        assert_eq!(m.ui.menu.unwrap().pane, MenuPane::Options);
+    }
+
+    #[test]
+    fn numeric_submission_emits_one_request_and_waits_for_authoritative_refresh() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0"), option("mode", "Mode", "Narrow")]);
+        h.key(KeyCode::Enter);
+        h.type_number("-12");
+        let request = DeviceOptionRequest {
+            id: "gain".into(),
+            label: "Gain".into(),
+            choice: "-12".into(),
+        };
+        assert_eq!(
+            h.key(KeyCode::Enter),
+            KeyAction::ApplyDeviceOption(request.clone())
+        );
+        for code in [KeyCode::Enter, KeyCode::Left, KeyCode::Right] {
+            assert_eq!(h.key(code), KeyAction::Continue);
+        }
+        {
+            let m = metrics(&h.state);
+            assert_eq!(m.device_options[0].selected_choice, "0");
+            assert!(matches!(m.ui.input_mode, InputMode::Normal));
+            assert!(m.ui.input_buf.is_empty());
+            assert_eq!(
+                m.ui.device_option_update,
+                DeviceOptionUpdate::Pending {
+                    request,
+                    quit_requested: false,
+                }
+            );
+        }
+        h.key(KeyCode::Down);
+        assert!(!complete_device_option(
+            &h.state,
+            DeviceOptionCompletion {
+                result: Ok(vec![option("mode", "Mode", "Wide"), integer_option("-10")]),
+            }
+        ));
+        assert_eq!(h.menu().scroll, 0);
+        let m = metrics(&h.state);
+        assert_eq!(m.device_options[1].selected_choice, "-10");
+        assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+        assert!(m.ui.log.back().unwrap().text.contains("Gain set to -10"));
+    }
+
+    #[test]
+    fn numeric_input_rejects_invalid_out_of_range_and_unadvertised_values() {
+        for value in [
+            "",
+            "-",
+            "101",
+            "-101",
+            "2147483648",
+            "1.5",
+            "+1",
+            " 1",
+            "1 ",
+            "1e1",
+            "auto",
+            "12",
+        ] {
+            let mut h = Harness::new();
+            let mut option = integer_option("0");
+            option.choices.retain(|choice| choice != "12");
+            h.show_options(vec![option]);
+            h.key(KeyCode::Enter);
+            metrics(&h.state).ui.input_buf = value.into();
+            assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue, "{value}");
+            let m = metrics(&h.state);
+            assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+            assert_eq!(m.device_options[0].selected_choice, "0");
+            assert_eq!(m.ui.input_buf, value);
+            assert!(
+                matches!(
+                    &m.ui.input_mode,
+                    InputMode::DeviceOptionInput { error: Some(message), .. }
+                        if message.contains("advertised integer from -100 to 100")
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_an_invalid_number_clears_the_error_and_allows_resubmission() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0")]);
+        h.key(KeyCode::Enter);
+        h.type_number("-");
+        h.key(KeyCode::Enter);
+        h.key(KeyCode::Backspace);
+        assert!(matches!(
+            metrics(&h.state).ui.input_mode,
+            InputMode::DeviceOptionInput { error: None, .. }
+        ));
+        h.type_number("-100");
+        assert!(
+            matches!(h.key(KeyCode::Enter), KeyAction::ApplyDeviceOption(request)
+            if request.choice == "-100")
+        );
+    }
+
+    #[test]
+    fn numeric_entry_keeps_auto_available_through_choice_arrows() {
+        let mut h = Harness::new();
+        let mut option = DeviceOption {
+            id: "level".into(),
+            label: "Level".into(),
+            choices: std::iter::once("auto".to_string())
+                .chain((0..=31).map(|value| value.to_string()))
+                .collect(),
+            selected_choice: "auto".into(),
+            integer_range: Some(0..=31),
+        };
+        h.show_options(vec![option.clone()]);
+        h.key(KeyCode::Enter);
+        assert!(metrics(&h.state).ui.input_buf.is_empty());
+        h.type_number("-1");
+        assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        h.key(KeyCode::Esc);
+        h.key(KeyCode::Enter);
+        h.type_number("31");
+        assert!(
+            matches!(h.key(KeyCode::Enter), KeyAction::ApplyDeviceOption(request)
+            if request.choice == "31")
+        );
+        option.selected_choice = "31".into();
+        complete_device_option(
+            &h.state,
+            DeviceOptionCompletion {
+                result: Ok(vec![option]),
+            },
+        );
+        assert!(
+            matches!(h.key(KeyCode::Right), KeyAction::ApplyDeviceOption(request)
+            if request.choice == "auto")
+        );
+    }
+
+    #[test]
+    fn unchanged_numeric_values_skip_writes_after_normalization() {
+        for input in ["0", "-0", "000"] {
+            let mut h = Harness::new();
+            h.show_options(vec![integer_option("0")]);
+            h.key(KeyCode::Enter);
+            h.type_number(input);
+            assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+            let m = metrics(&h.state);
+            assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+            assert!(matches!(m.ui.input_mode, InputMode::Normal));
+        }
+    }
+
+    #[test]
+    fn numeric_submission_uses_the_canonical_advertised_string() {
+        for (input, expected) in [("100", "100"), ("-0012", "-12")] {
+            let mut h = Harness::new();
+            h.show_options(vec![integer_option("0")]);
+            h.key(KeyCode::Enter);
+            h.type_number(input);
+            assert!(matches!(
+                h.key(KeyCode::Enter),
+                KeyAction::ApplyDeviceOption(request) if request.choice == expected
+            ));
+        }
+        let mut h = Harness::new();
+        let mut option = integer_option("0");
+        option.choices.retain(|choice| choice != "12");
+        option.choices.push("012".into());
+        h.show_options(vec![option]);
+        h.key(KeyCode::Enter);
+        h.type_number("12");
+        assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        assert_eq!(
+            metrics(&h.state).ui.device_option_update,
+            DeviceOptionUpdate::Idle
+        );
+    }
+
+    #[test]
+    fn numeric_entry_cannot_start_during_another_option_update() {
+        let mut h = Harness::new();
+        h.show_options(vec![option("mode", "Mode", "Narrow"), integer_option("0")]);
+        let KeyAction::ApplyDeviceOption(request) = h.key(KeyCode::Enter) else {
+            panic!("discrete change did not create a request");
+        };
+        h.key(KeyCode::Down);
+        assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        let m = metrics(&h.state);
+        assert!(matches!(m.ui.input_mode, InputMode::Normal));
+        assert_eq!(
+            m.ui.device_option_update,
+            DeviceOptionUpdate::Pending {
+                request,
+                quit_requested: false,
+            }
+        );
+    }
+
+    #[test]
+    fn integer_choices_require_explicit_numeric_metadata() {
+        let mut h = Harness::new();
+        let mut option = integer_option("0");
+        option.integer_range = None;
+        h.show_options(vec![option]);
+        assert!(
+            matches!(h.key(KeyCode::Enter), KeyAction::ApplyDeviceOption(request)
+            if request.choice == "1")
+        );
+        assert!(matches!(metrics(&h.state).ui.input_mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn numeric_editor_resolves_its_option_by_id_and_rechecks_current_metadata() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0"), option("mode", "Mode", "Narrow")]);
+        h.key(KeyCode::Enter);
+        h.type_number("12");
+        Arc::make_mut(&mut metrics(&h.state).device_options).swap(0, 1);
+        assert!(
+            matches!(h.key(KeyCode::Enter), KeyAction::ApplyDeviceOption(request)
+            if request.id == "gain" && request.choice == "12")
+        );
+
+        for removed in [false, true] {
+            let mut h = Harness::new();
+            h.show_options(vec![integer_option("0")]);
+            h.key(KeyCode::Enter);
+            h.type_number("12");
+            if removed {
+                metrics(&h.state).device_options = Arc::new(Vec::new());
+            } else {
+                Arc::make_mut(&mut metrics(&h.state).device_options)[0].integer_range = None;
+            }
+            assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+            assert!(matches!(
+                metrics(&h.state).ui.input_mode,
+                InputMode::DeviceOptionInput { error: Some(_), .. }
+            ));
+            assert_eq!(
+                metrics(&h.state).ui.device_option_update,
+                DeviceOptionUpdate::Idle
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_completion_preserves_quit_request_on_success_and_failure() {
+        for failed in [false, true] {
+            let mut h = Harness::new();
+            h.show_options(vec![integer_option("0")]);
+            h.key(KeyCode::Enter);
+            h.type_number("1");
+            assert!(matches!(
+                h.key(KeyCode::Enter),
+                KeyAction::ApplyDeviceOption(_)
+            ));
+            assert_eq!(h.key(KeyCode::Char('q')), KeyAction::Quit);
+            assert!(!metrics(&h.state).ui.device_option_update.request_quit());
+            let result = if failed {
+                Err("device rejected choice".into())
+            } else {
+                Ok(vec![integer_option("1")])
+            };
+            assert!(complete_device_option(
+                &h.state,
+                DeviceOptionCompletion { result }
+            ));
+            let m = metrics(&h.state);
+            if failed {
+                assert_eq!(m.device_options[0].selected_choice, "0");
+                assert_eq!(
+                    m.ui.device_option_update,
+                    DeviceOptionUpdate::Failed { id: "gain".into() }
+                );
+            } else {
+                assert_eq!(m.device_options[0].selected_choice, "1");
+                assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+            }
         }
     }
 

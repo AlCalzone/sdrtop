@@ -182,7 +182,7 @@ fn header(f: &mut Frame, area: Rect, m: &SdrMetrics, theme: &crate::Theme) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// The keys, in the order the design's "Moving around" table lists them.
+/// Show the keys for the active menu pane or editor
 fn footer(f: &mut Frame, area: Rect, state: &MenuState, m: &SdrMetrics, theme: &crate::Theme) {
     let key = Style::default().fg(theme.border_accent);
     let what = Style::default().fg(theme.label);
@@ -470,7 +470,7 @@ mod tests {
             let all = draw_with_metrics(w, h, &state, &m).join("\n");
             for text in [
                 "Gain: 0",
-                "Value: -12_",
+                "Value: -12\u{258c}",
                 "Integer -100 to 100",
                 "Enter apply",
                 "Esc cancel",
@@ -478,6 +478,19 @@ mod tests {
                 assert!(all.contains(text), "'{text}' missing:\n{all}");
             }
             assert!(!all.contains("Enter number"), "{all}");
+        }
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "gain".into(),
+            error: Some("Out of range: -100 to 100".into()),
+        };
+        for (w, h) in [(40, 6), (40, 7), (40, 8), (90, 5), (90, 6), (90, 7)] {
+            let all = draw_with_metrics(w, h, &state, &m).join("\n");
+            for text in ["Value: -12\u{258c}", "Enter apply", "Esc cancel"] {
+                assert!(all.contains(text), "'{text}' missing:\n{all}");
+            }
+            if (w == 40 && h >= 7) || (w == 90 && h >= 6) {
+                assert!(all.contains("Out of range:"), "{all}");
+            }
         }
     }
 

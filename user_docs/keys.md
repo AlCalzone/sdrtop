@@ -41,6 +41,8 @@ In **Options**, `Up` / `Down` selects a device setting.
 `Left` / `Right` cycles all advertised choices, including `auto` when available.
 `Enter` cycles discrete settings or opens number entry when the footer shows `Enter number`.
 Type an integer within the displayed range.
+Some devices advertise only specific integers within that range.
+An unavailable value shows the closest advertised integer without applying it.
 `Backspace` removes a character.
 `Enter` applies an advertised value.
 `Esc` cancels entry without changing the device.

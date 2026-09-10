@@ -43,17 +43,9 @@ pub(super) fn device_option(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, id: &
                 .find(|option| option.id == id)
                 .ok_or_else(|| "Option is no longer available".to_string())
                 .and_then(|option| {
-                    let choice =
-                        option.integer_choice(&m.ui.input_buf).ok_or_else(|| {
-                            match &option.integer_range {
-                                Some(range) => format!(
-                                    "Enter an advertised integer from {} to {}",
-                                    range.start(),
-                                    range.end()
-                                ),
-                                None => "Numeric entry is no longer available".to_string(),
-                            }
-                        })?;
+                    let choice = option
+                        .integer_choice(&m.ui.input_buf)
+                        .map_err(|error| error.to_string())?;
                     Ok((
                         crate::event::DeviceOptionRequest {
                             id: option.id.clone(),
@@ -72,7 +64,6 @@ pub(super) fn device_option(key: KeyEvent, state: &Arc<Mutex<SdrMetrics>>, id: &
                     }
                 }
                 Err(message) => {
-                    m.push_log(format!("Device option input error: {message}"));
                     if let InputMode::DeviceOptionInput { error, .. } = &mut m.ui.input_mode {
                         *error = Some(message);
                     }

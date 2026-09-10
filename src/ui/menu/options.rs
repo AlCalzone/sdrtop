@@ -65,7 +65,7 @@ fn lines(
     theme: &crate::Theme,
 ) -> Vec<Line<'static>> {
     if let InputMode::DeviceOptionInput { id, error } = &m.ui.input_mode {
-        return editor_lines(m, id, error.as_deref(), iw, theme);
+        return editor_lines(m, id, error.as_deref(), iw, height, theme);
     }
     if m.device_options.is_empty() {
         return empty_lines(iw, theme);
@@ -98,41 +98,51 @@ fn editor_lines(
     id: &str,
     error: Option<&str>,
     iw: usize,
+    height: usize,
     theme: &crate::Theme,
 ) -> Vec<Line<'static>> {
+    if iw == 0 || height == 0 {
+        return Vec::new();
+    }
+    let option = m.device_options.iter().find(|option| option.id == id);
     let mut out = Vec::new();
-    if let Some(option) = m.device_options.iter().find(|option| option.id == id) {
-        out.push(Line::from(Span::styled(
-            fit_text(&format!("{}: {}", option.label, option.selected_choice), iw),
-            Style::default().fg(theme.label),
-        )));
-        out.push(Line::from(Span::styled(
-            fit_text(&format!("Value: {}_", m.ui.input_buf), iw),
-            Style::default().fg(theme.value_hi),
-        )));
+    let input = format!("Value: {}\u{258c}", m.ui.input_buf);
+    let tail: String = input.chars().rev().take(iw).collect();
+    out.push(Line::from(Span::styled(
+        tail.chars().rev().collect::<String>(),
+        Style::default().fg(theme.value_hi),
+    )));
+    let error = error.or_else(|| {
+        option
+            .is_none()
+            .then_some("Option is no longer available. Esc cancels.")
+    });
+    if let Some(error) = error {
+        for row in chrome::wrap(error, iw, height.saturating_sub(out.len())) {
+            out.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(theme.status_warn),
+            )));
+        }
+    }
+    if let Some(option) = option {
+        if out.len() < height {
+            out.push(Line::from(Span::styled(
+                fit_text(&format!("{}: {}", option.label, option.selected_choice), iw),
+                Style::default().fg(theme.label),
+            )));
+        }
         if let Some(range) = &option.integer_range {
             for row in chrome::wrap(
                 &format!("Integer {} to {}", range.start(), range.end()),
                 iw,
-                3,
+                height.saturating_sub(out.len()),
             ) {
                 out.push(Line::from(Span::styled(
                     row,
                     Style::default().fg(theme.label),
                 )));
             }
-        }
-    }
-    let error = error.or_else(|| {
-        (!m.device_options.iter().any(|option| option.id == id))
-            .then_some("Option is no longer available. Esc cancels.")
-    });
-    if let Some(error) = error {
-        for row in chrome::wrap(error, iw, 4) {
-            out.push(Line::from(Span::styled(
-                row,
-                Style::default().fg(theme.status_warn),
-            )));
         }
     }
     out
@@ -442,7 +452,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Gain: 0"), "{text}");
-        assert!(text.contains("Value: 101_"), "{text}");
+        assert!(text.contains("Value: 101\u{258c}"), "{text}");
         assert!(text.contains("Enter an advertised integer"), "{text}");
 
         m.device_options = Arc::new(Vec::new());
@@ -458,5 +468,73 @@ mod tests {
             text.contains("Option is no longer available. Esc cancels."),
             "{text}"
         );
+    }
+
+    #[test]
+    fn short_numeric_panes_prioritize_input_tail_then_error() {
+        let mut m = SdrMetrics::fixture();
+        m.device_options = Arc::new(vec![crate::hardware::DeviceOption {
+            id: "gain".into(),
+            label: "Gain".into(),
+            choices: vec!["0".into()],
+            selected_choice: "0".into(),
+            integer_range: Some(-100..=100),
+        }]);
+        m.ui.input_buf = "12345678901234567890".into();
+        for error in [None, Some("Out of range: -100 to 100".to_string())] {
+            m.ui.input_mode = InputMode::DeviceOptionInput {
+                id: "gain".into(),
+                error: error.clone(),
+            };
+            for width in [1_u16, 4, 12, 40] {
+                for height in [1_u16, 2, 3] {
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                            .unwrap();
+                    terminal
+                        .draw(|f| render(f, f.size(), &m, 0, &crate::Theme::sdr()))
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let rows: Vec<String> = (0..height)
+                        .map(|y| {
+                            (0..width)
+                                .map(|x| buffer.get(x, y).symbol())
+                                .collect::<String>()
+                                .trim_end()
+                                .to_string()
+                        })
+                        .collect();
+                    assert!(rows[0].ends_with('\u{258c}'), "{rows:?}");
+                    if width >= 4 {
+                        assert!(rows[0].ends_with("890\u{258c}"), "{rows:?}");
+                    }
+                    if height >= 2 {
+                        let expected = if error.is_some() {
+                            "Out of range:"
+                        } else {
+                            "Gain: 0"
+                        };
+                        assert_eq!(
+                            rows[1],
+                            fit_text(
+                                if width == 40 && error.is_some() {
+                                    "Out of range: -100 to 100"
+                                } else {
+                                    expected
+                                },
+                                width as usize
+                            )
+                            .trim_end(),
+                            "{rows:?}"
+                        );
+                    }
+                    assert_eq!(m.ui.input_buf, "12345678901234567890");
+                    assert!(
+                        lines(&m, 0, width as usize, height as usize, &crate::Theme::sdr()).len()
+                            <= height as usize
+                    );
+                }
+            }
+        }
     }
 }

@@ -96,6 +96,7 @@ pub(super) fn handle(key: KeyEvent, ctx: &mut InputCtx<'_>) -> KeyAction {
                 m.ui.input_buf.clear();
                 return KeyAction::Continue;
             }
+            // Release the metrics lock before the cycling handler acquires it
             drop(m);
             return request_option_change(ctx, state, 1);
         }
@@ -516,15 +517,67 @@ mod tests {
             assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
             assert_eq!(m.device_options[0].selected_choice, "0");
             assert_eq!(m.ui.input_buf, value);
+            let expected = match value {
+                "101" | "-101" => "Out of range: -100 to 100",
+                "12" => "Not advertised. Closest choice: 11",
+                _ => "Enter a signed 32-bit integer",
+            };
             assert!(
                 matches!(
                     &m.ui.input_mode,
                     InputMode::DeviceOptionInput { error: Some(message), .. }
-                        if message.contains("advertised integer from -100 to 100")
+                        if message == expected
                 ),
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn numeric_keystrokes_ignore_an_embedded_minus() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0")]);
+        h.key(KeyCode::Enter);
+        h.type_number("1-2");
+        assert_eq!(metrics(&h.state).ui.input_buf, "12");
+    }
+
+    #[test]
+    fn overflowing_numeric_input_is_preserved_and_never_submitted() {
+        let mut h = Harness::new();
+        h.show_options(vec![integer_option("0")]);
+        h.key(KeyCode::Enter);
+        let input = "9".repeat(100);
+        h.type_number(&input);
+        assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        let m = metrics(&h.state);
+        assert_eq!(m.ui.input_buf, input);
+        assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+        assert!(matches!(&m.ui.input_mode,
+            InputMode::DeviceOptionInput { error: Some(error), .. }
+            if error == "Enter a signed 32-bit integer"));
+    }
+
+    #[test]
+    fn repeated_invalid_submissions_stay_inline_without_writes_or_logs() {
+        let mut h = Harness::new();
+        let mut option = integer_option("0");
+        option.choices = ["0", "10"].map(String::from).to_vec();
+        h.show_options(vec![option]);
+        h.key(KeyCode::Enter);
+        h.type_number("9");
+        let log_count = metrics(&h.state).ui.log.len();
+        for _ in 0..3 {
+            assert_eq!(h.key(KeyCode::Enter), KeyAction::Continue);
+        }
+        let m = metrics(&h.state);
+        assert_eq!(m.ui.log.len(), log_count);
+        assert_eq!(m.ui.input_buf, "9");
+        assert_eq!(m.device_options[0].selected_choice, "0");
+        assert_eq!(m.ui.device_option_update, DeviceOptionUpdate::Idle);
+        assert!(matches!(&m.ui.input_mode,
+            InputMode::DeviceOptionInput { error: Some(error), .. }
+            if error == "Not advertised. Closest choice: 10"));
     }
 
     #[test]

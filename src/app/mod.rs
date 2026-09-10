@@ -235,7 +235,11 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let hide_footer = !self.show_footer && m.ui.input_mode == crate::state::InputMode::Normal;
+        let hide_footer = !self.show_footer
+            && matches!(
+                m.ui.input_mode,
+                crate::state::InputMode::Normal | crate::state::InputMode::DeviceOptionInput { .. }
+            );
         self.engine.set_panel_hidden("footer", hide_footer);
         // Copied out before the closure borrows `self` for the engine.
         let deck_shown = self.deck_shown;
@@ -608,6 +612,47 @@ mod tests {
             .is_some_and(|entry| entry.text.contains("Bandwidth set to Wide")));
         drop(m);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn numeric_menu_entry_preserves_the_deck_footer_setting() {
+        use crate::state::{InputMode, MenuPane, MenuState};
+        let (mut app, _, _, _) = quit_test_app();
+        app.engine.set_preset("command_rail");
+        {
+            let mut m = app.state.lock().unwrap();
+            m.ui.device_option_update = DeviceOptionUpdate::Idle;
+            m.ui.menu = Some(MenuState {
+                pane: MenuPane::Options,
+                ..Default::default()
+            });
+        }
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        for show_footer in [false, true] {
+            app.show_footer = show_footer;
+            for mode in [
+                InputMode::Normal,
+                InputMode::DeviceOptionInput {
+                    id: "level".into(),
+                    error: None,
+                },
+                InputMode::FrequencyInput,
+                InputMode::SampleRateInput,
+                InputMode::SweepStartInput,
+                InputMode::SweepStopInput,
+                InputMode::MarkerNameInput,
+            ] {
+                let expected = show_footer
+                    || !matches!(
+                        mode,
+                        InputMode::Normal | InputMode::DeviceOptionInput { .. }
+                    );
+                app.state.lock().unwrap().ui.input_mode = mode;
+                app.draw(&mut terminal).unwrap();
+                assert_eq!(app.engine.is_panel_visible("footer"), expected);
+                assert_eq!(app.show_footer, show_footer);
+            }
+        }
     }
 
     #[test]

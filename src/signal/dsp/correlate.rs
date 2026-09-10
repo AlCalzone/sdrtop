@@ -46,7 +46,6 @@ const REFRESH: usize = 1 << 16;
 
 /// One reading from [`DelayedAutocorrelator`].
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // wired in at N13
 pub struct Coherence {
     /// The correlation itself. Its magnitude says how alike the two windows are;
     /// its argument is the phase the repeat accumulated, which is a frequency
@@ -56,7 +55,6 @@ pub struct Coherence {
     pub energy: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
 impl Coherence {
     /// Schmidl and Cox's timing metric, `|P|^2 / R^2`, in `[0, 1]`.
     ///
@@ -76,7 +74,6 @@ impl Coherence {
 }
 
 /// Correlation of a signal with itself, `lag` samples ago, over a sliding window.
-#[allow(dead_code)] // wired in at N13
 pub struct DelayedAutocorrelator {
     lag: usize,
     window: usize,
@@ -87,7 +84,6 @@ pub struct DelayedAutocorrelator {
     energy: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
 impl DelayedAutocorrelator {
     /// `window` terms at a lag of `lag` samples. For an OFDM short training
     /// field both are the length of one repeat.
@@ -104,6 +100,13 @@ impl DelayedAutocorrelator {
         }
     }
 
+    /// **No consumer yet.** `signal::reference::capture` builds a fresh
+    /// correlator per call rather than reusing one across captures, so nothing
+    /// has needed this. It is here for whichever detector runs continuously
+    /// over a live stream and needs to clear its state between windows -
+    /// design section 10's `net::detect` split, or an OFDM burst detector's
+    /// own preamble search.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.hist
             .iter_mut()
@@ -173,8 +176,13 @@ impl DelayedAutocorrelator {
 }
 
 /// One reading from [`MatchedFilter`].
+///
+/// No consumer yet. Design section 10's F4 (symbol timing from the L-LTF
+/// cross-correlation) is the plan's own answer for where this lands - a known
+/// preamble sequence correlated against the live stream is exactly what a
+/// matched filter is for.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 pub struct Match {
     /// The correlation with the reference sequence.
     pub value: Complex<f64>,
@@ -183,7 +191,7 @@ pub struct Match {
     reference_energy: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 impl Match {
     /// `|y|^2 / (E_reference * E_window)`, in `[0, 1]` by Cauchy-Schwarz.
     ///
@@ -201,7 +209,9 @@ impl Match {
 }
 
 /// Correlation of a signal with a sequence known in advance.
-#[allow(dead_code)] // wired in at N13
+///
+/// No consumer yet; see [`Match`].
+#[allow(dead_code)]
 pub struct MatchedFilter {
     /// The reference, conjugated and reversed, so applying it is a forward walk
     /// back through the history.
@@ -213,7 +223,7 @@ pub struct MatchedFilter {
     energy: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 impl MatchedFilter {
     pub fn new(reference: &[Complex<f32>]) -> Self {
         let wide: Vec<Complex<f64>> = reference
@@ -240,6 +250,13 @@ impl MatchedFilter {
         self.taps.is_empty()
     }
 
+    /// **No consumer yet.** `signal::reference::capture` builds a fresh
+    /// correlator per call rather than reusing one across captures, so nothing
+    /// has needed this. It is here for whichever detector runs continuously
+    /// over a live stream and needs to clear its state between windows -
+    /// design section 10's `net::detect` split, or an OFDM burst detector's
+    /// own preamble search.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.hist
             .iter_mut()
@@ -305,7 +322,10 @@ impl MatchedFilter {
 /// false-alarm rate it is required to have, which is a specification, rather
 /// than from a level that happened to work on one recording.
 /// `noise_alone_obeys_the_false_alarm_law` measures it rather than trusting it.
-#[allow(dead_code)] // wired in at N13
+/// No consumer yet: F2 (Wi-Fi burst detection over `dsp::correlate`) and B3
+/// (Bluetooth preamble correlation) both name a measured false-alarm rate as
+/// their exit criterion.
+#[allow(dead_code)]
 pub fn false_alarm_rate(taps: usize, threshold: f64) -> f64 {
     if taps < 2 {
         return 1.0;
@@ -315,7 +335,6 @@ pub fn false_alarm_rate(taps: usize, threshold: f64) -> f64 {
 
 /// The coherence threshold whose false-alarm probability is `rate`. The inverse
 /// of [`false_alarm_rate`], and the direction a caller actually thinks in.
-#[allow(dead_code)] // wired in at N13
 pub fn threshold_for_false_alarm(taps: usize, rate: f64) -> f64 {
     if taps < 2 {
         return 1.0;

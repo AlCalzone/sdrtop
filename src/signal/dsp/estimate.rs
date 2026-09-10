@@ -53,7 +53,6 @@ use std::f64::consts::TAU;
 /// **Its range is `+/- 1/(2 * lag)` and outside that it wraps silently**, giving
 /// a wrong answer that looks exactly like a right one. See [`moose_range`]; the
 /// caller is responsible for arranging that the offset it is looking for fits.
-#[allow(dead_code)] // wired in at N13
 pub fn moose_offset(p: Complex<f64>, lag: usize) -> f64 {
     p.arg() / (TAU * lag.max(1) as f64)
 }
@@ -62,7 +61,13 @@ pub fn moose_offset(p: Complex<f64>, lag: usize) -> f64 {
 /// per sample. The phase of one correlation cannot distinguish an angle from the
 /// same angle plus a full turn, so a longer lag buys precision and pays for it
 /// with range, one for one.
-#[allow(dead_code)] // wired in at N13
+// **No consumer yet, and the one candidate reimplemented it instead.**
+// `signal::reference::carrier_offset_hz` (N16) derives its own lag from a
+// caller-supplied search range rather than composing this function's inverse,
+// because it needed the range-to-lag direction and this is lag-to-range. A
+// timing detector working the other way round - given a lag, what range does
+// it buy - is the Wi-Fi arc's F2/F4 burst and symbol-timing work.
+#[allow(dead_code)]
 pub fn moose_range(lag: usize) -> f64 {
     0.5 / lag.max(1) as f64
 }
@@ -89,7 +94,6 @@ pub fn moose_range(lag: usize) -> f64 {
 /// infinite variance is exactly how an uncertainty says so. An infinite SNR is
 /// allowed through and gives a variance of zero, because noiseless data is a
 /// fixture rather than a radio and a fixture should read exactly.
-#[allow(dead_code)] // wired in at N13
 pub fn moose_variance(snr: f64, pairs: usize, lag: usize) -> f64 {
     if snr.is_nan() || snr <= 0.0 || pairs == 0 || lag == 0 {
         return f64::INFINITY;
@@ -123,7 +127,6 @@ pub fn moose_variance(snr: f64, pairs: usize, lag: usize) -> f64 {
 /// order of that remainder. Resolving it would take some forty thousand trials
 /// rather than four, and the test that tried to state it was reading its own
 /// noise until the standard error was computed alongside it.
-#[allow(dead_code)] // wired in at N13
 pub fn coherence_squared(metric: f64, pairs: usize) -> f64 {
     if pairs < 2 {
         return metric.clamp(0.0, 1.0);
@@ -146,7 +149,6 @@ pub fn coherence_squared(metric: f64, pairs: usize) -> f64 {
 /// `None` at a coherence of one, where the expression divides by zero. That is
 /// noiseless data, which happens in a test fixture and not on a radio, and
 /// inventing a very large number for it would be inventing a measurement.
-#[allow(dead_code)] // wired in at N13
 pub fn snr_from_metric(metric: f64, pairs: usize) -> Option<f64> {
     let rho = coherence_squared(metric, pairs).sqrt();
     if rho >= 1.0 {
@@ -161,8 +163,11 @@ pub fn snr_from_metric(metric: f64, pairs: usize) -> Option<f64> {
 
 /// Where a repeat was found: the run of positions whose metric is within a
 /// stated fraction of the peak.
+///
+/// No consumer yet. Design section 10's F4 (symbol timing from the L-LTF
+/// cross-correlation) is the plan's own answer for where this lands.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 pub struct Plateau {
     /// First index in the run.
     pub start: usize,
@@ -173,7 +178,7 @@ pub struct Plateau {
     pub peak_metric: f64,
 }
 
-#[allow(dead_code)] // wired in at N13
+#[allow(dead_code)]
 impl Plateau {
     pub fn len(&self) -> usize {
         self.end + 1 - self.start
@@ -204,7 +209,8 @@ impl Plateau {
 ///
 /// `None` for an empty input. `fraction` is the 0.9 of the paper unless the
 /// caller has a reason.
-#[allow(dead_code)] // wired in at N13
+/// No consumer yet; see [`Plateau`].
+#[allow(dead_code)]
 pub fn schmidl_cox_plateau(metric: &[f64], fraction: f64) -> Option<Plateau> {
     let (peak, &peak_metric) = metric
         .iter()

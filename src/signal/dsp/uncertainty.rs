@@ -47,7 +47,6 @@ impl Uncertain {
     /// infinite one: that is what it means to have measured something and have
     /// no idea how well, and it propagates honestly through everything below
     /// instead of poisoning it with a NaN.
-    #[allow(dead_code)] // built from a live variance at N14; only tests construct one yet
     pub fn from_variance(value: f64, variance: f64) -> Self {
         let sigma = if variance.is_nan() {
             f64::INFINITY
@@ -57,14 +56,17 @@ impl Uncertain {
         Self { value, sigma }
     }
 
-    #[allow(dead_code)] // built from a live variance at N14; only tests construct one yet
     pub fn from_sigma(value: f64, sigma: f64) -> Self {
         Self::from_variance(value, sigma * sigma)
     }
 
     /// A number that carries no uncertainty of its own: a specification limit, a
     /// channel centre, a count.
-    #[allow(dead_code)] // built from a live variance at N14; only tests construct one yet
+    ///
+    /// No production consumer yet. `Reading::new` accepts one, and both current
+    /// callers (the occupancy profile and the frequency reference card) always
+    /// have a real variance to hand, so neither has needed this.
+    #[allow(dead_code)]
     pub fn exact(value: f64) -> Self {
         Self { value, sigma: 0.0 }
     }
@@ -109,8 +111,11 @@ impl Uncertain {
     /// simply the wrong question to ask about it.
     // N11 wired in the other three; this one had no honest use in a limit row,
     // where a margin as a fraction of an exact limit is not a quantity anybody
-    // wants. Its consumer is the occupancy work.
-    #[allow(dead_code)] // wired in at N14
+    // wants. **The claim below, that occupancy would need it, was written
+    // before occupancy was built and did not hold up**: N14/N15 measure duty
+    // cycle, which has no natural "relative to what" question either. Still no
+    // consumer.
+    #[allow(dead_code)]
     pub fn relative(&self) -> Option<f64> {
         if self.value == 0.0 {
             None
@@ -193,7 +198,11 @@ impl Uncertain {
 ///
 /// Infinite below two samples, where there is no frequency to estimate, and at
 /// or below zero SNR, where there is nothing to estimate it from.
-#[allow(dead_code)] // wired in at N13
+/// No consumer yet. Design section 5.4 wants this beside a frequency
+/// measurement - "the Cramer-Rao bound is the floor, and it is displayed" - and
+/// N16's reference card does not yet show it: the card states the estimator's
+/// own uncertainty but not how close that sits to the physical limit.
+#[allow(dead_code)]
 pub fn crlb_frequency(snr: f64, samples: usize) -> f64 {
     if snr.is_nan() || snr <= 0.0 || samples < 2 {
         return f64::INFINITY;
@@ -211,7 +220,8 @@ pub fn crlb_frequency(snr: f64, samples: usize) -> f64 {
 ///
 /// Above one is impossible for an unbiased estimator, so a caller seeing it has
 /// found a bug rather than a good day.
-#[allow(dead_code)] // wired in at N13
+/// No consumer yet; see [`crlb_frequency`].
+#[allow(dead_code)]
 pub fn efficiency(variance: f64, bound: f64) -> f64 {
     if variance <= 0.0 || !variance.is_finite() || !bound.is_finite() {
         return 0.0;

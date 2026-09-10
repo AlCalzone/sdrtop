@@ -69,8 +69,7 @@ pub fn wifi_channel(freq_hz: u64) -> Option<u8> {
     None
 }
 
-/// The centre frequency of a Wi-Fi channel, for tuning to one.
-#[allow(dead_code)] // tuning to a named channel arrives at N15
+/// The centre frequency of a Wi-Fi channel.
 pub fn wifi_centre_hz(channel: u8) -> Option<u64> {
     match channel {
         1..=LAST_SPACED => Some(CHANNEL_1_HZ + SPACING_HZ * (channel as u64 - 1)),

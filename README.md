@@ -21,6 +21,7 @@
   <a href="https://greatscottgadgets.com/hackrf/one/"><img src="https://img.shields.io/badge/HackRF%20One-brightgreen" alt="HackRF One"></a>
   <a href="https://www.rtl-sdr.com/"><img src="https://img.shields.io/badge/RTL--SDR-green" alt="RTL-SDR"></a>
   <a href="https://github.com/portapack-mayhem/mayhem-firmware"><img src="https://img.shields.io/badge/PortaPack%20H4M-blueviolet" alt="PortaPack H4M"></a>
+  <a href="user_docs/hardware.md#tinysa"><img src="https://img.shields.io/badge/tinySA%20Ultra-blue" alt="tinySA Ultra"></a>
 </p>
 
 <p align="center">

@@ -49,8 +49,6 @@ pub struct App {
     /// to write back.
     pub(super) theme_config: crate::config::ThemeConfig,
     pub(super) tinysa_config: crate::config::TinySaSettings,
-    pub(super) tinysa_basic_input: Option<crate::hardware::tinysa::BasicInput>,
-    pub(super) device_kind: hardware::DeviceKind,
 }
 
 impl App {
@@ -59,11 +57,8 @@ impl App {
         config_path: Option<PathBuf>,
         listing: &hardware::DeviceListing,
     ) -> anyhow::Result<Self> {
-        let tinysa_basic_input = (listing.kind == hardware::DeviceKind::TinySa).then(|| {
-            hardware::tinysa::resolve_basic_input(listing.tiny_sa_input, cfg.tinysa.basic_input)
-        });
-        let mut app = match hardware::open_device(listing, &cfg.tinysa) {
-            Ok(device) => Self::new_normal(cfg, config_path, device, listing.kind),
+        match hardware::open_device(listing, &cfg.tinysa) {
+            Ok(device) => Self::new_normal(cfg, config_path, device),
             Err(open_err) => {
                 // Device is present but couldn't be opened (e.g. busy) - fall back
                 // to read-only observer mode via the matching backend's sysfs
@@ -75,11 +70,9 @@ impl App {
                 let Some(sysinfo) = (profile.scan)() else {
                     return Err(open_err);
                 };
-                Self::new_observer(cfg, config_path, sysinfo, profile, listing.kind)
+                Self::new_observer(cfg, config_path, sysinfo, profile)
             }
-        }?;
-        app.tinysa_basic_input = tinysa_basic_input;
-        Ok(app)
+        }
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -426,15 +419,6 @@ impl App {
         let Some(path) = &self.config_path else {
             return Ok(());
         };
-        let tinysa = if self.device_kind == hardware::DeviceKind::TinySa {
-            crate::hardware::tinysa::persisted_settings(
-                &self.tinysa_config,
-                &device.options(),
-                self.tinysa_basic_input,
-            )?
-        } else {
-            self.tinysa_config.clone()
-        };
         let (freq, rate, gains, amp, wf_rows, wf_palette, spec_style, markers, sweep_cfg, recall) = {
             let m = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -450,7 +434,7 @@ impl App {
                 crate::state::recall_to_hz(&m.ui.recall),
             )
         };
-        let cfg = AppConfig {
+        let mut cfg = AppConfig {
             radio: RadioConfig {
                 frequency_hz: freq,
                 sample_rate: rate,
@@ -482,9 +466,10 @@ impl App {
                 stop_hz: sweep_cfg.stop_hz,
                 dwell_ms: sweep_cfg.dwell_ms,
             },
-            tinysa,
+            tinysa: self.tinysa_config.clone(),
             presets: self.user_presets.clone(),
         };
+        device.update_config(&mut cfg)?;
         cfg.save(path)
     }
 }
@@ -589,14 +574,15 @@ mod tests {
             NEXT_PATH.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_file(&path);
+        let mut config = AppConfig::default();
+        config.tinysa.lna = true;
         let mut app = App::assemble(
-            AppConfig::default(),
+            config,
             Some(path.clone()),
             state,
             Some(device.clone()),
             None,
             None,
-            hardware::DeviceKind::HackRf,
         )
         .unwrap();
         let (tx, rx) = mpsc::channel();
@@ -629,6 +615,7 @@ mod tests {
             AppConfig::load_or_default(&path).radio.frequency_hz,
             100_000_000
         );
+        assert!(AppConfig::load_or_default(&path).tinysa.lna);
         let m = app.state.lock().unwrap();
         assert_eq!(m.device_options[0].selected_choice, "Wide");
         assert!(matches!(

@@ -38,7 +38,6 @@ impl App {
         cfg: AppConfig,
         config_path: Option<PathBuf>,
         device: Arc<dyn hardware::SdrDevice>,
-        device_kind: hardware::DeviceKind,
     ) -> anyhow::Result<Self> {
         let info = device.info();
         let caps = Arc::new(device.capabilities().clone());
@@ -179,7 +178,6 @@ impl App {
             Some(Arc::clone(&device)),
             Some(Arc::clone(&rx_ctx)),
             None,
-            device_kind,
         )?;
 
         match caps.acquisition {
@@ -222,7 +220,6 @@ impl App {
         config_path: Option<PathBuf>,
         sysinfo: hardware::sysfs::HackRfSysInfo,
         profile: hardware::discovery::ObserverProfile,
-        device_kind: hardware::DeviceKind,
     ) -> anyhow::Result<Self> {
         let state = Arc::new(Mutex::new(initial_metrics(
             &cfg,
@@ -246,7 +243,6 @@ impl App {
             None,
             None,
             Some("observer"),
-            device_kind,
         )?;
         tasks::spawn_observer_task(Arc::clone(&state), sysinfo.bus, sysinfo.dev, profile);
         tasks::spawn_sys_resource_task(Arc::clone(&state));
@@ -267,7 +263,6 @@ impl App {
         device: Option<Arc<dyn hardware::SdrDevice>>,
         rx_ctx: Option<Arc<hardware::RxContext>>,
         preset_override: Option<&str>,
-        device_kind: hardware::DeviceKind,
     ) -> anyhow::Result<Self> {
         let themes_dir = config_path
             .as_deref()
@@ -345,8 +340,6 @@ impl App {
             focus_keys,
             theme_config: cfg.theme.clone(),
             tinysa_config: cfg.tinysa.clone(),
-            tinysa_basic_input: None,
-            device_kind,
             user_presets: cfg.presets,
         })
     }

@@ -185,10 +185,6 @@ pub struct TinySaSettings {
     #[serde(default)]
     pub lna: bool,
     #[serde(default = "default_auto")]
-    pub lna2: String,
-    #[serde(default = "default_auto")]
-    pub agc: String,
-    #[serde(default = "default_auto")]
     pub spur: String,
     #[serde(default)]
     pub ext_gain_db: i32,
@@ -203,8 +199,6 @@ impl Default for TinySaSettings {
             attenuation: default_auto(),
             high_attenuation: false,
             lna: false,
-            lna2: default_auto(),
-            agc: default_auto(),
             spur: default_auto(),
             ext_gain_db: 0,
         }
@@ -829,8 +823,6 @@ panels = [
             attenuation = "12"
             high_attenuation = true
             lna = true
-            lna2 = "3"
-            agc = "7"
             spur = "off"
             ext_gain_db = -8
         "#;
@@ -855,8 +847,6 @@ panels = [
         assert_eq!(config.tinysa.attenuation, "auto");
         assert!(!config.tinysa.high_attenuation);
         assert!(!config.tinysa.lna);
-        assert_eq!(config.tinysa.lna2, "auto");
-        assert_eq!(config.tinysa.agc, "auto");
         assert_eq!(config.tinysa.spur, "auto");
         assert_eq!(config.tinysa.ext_gain_db, 0);
     }

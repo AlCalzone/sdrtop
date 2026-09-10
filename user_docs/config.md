@@ -157,10 +157,8 @@ Basic analyzers convert `spur = "auto"` to `"on"`. They also convert Ultra-only
 RBW values `0.2`, `1` and `850` to `"auto"`. The Ultra-only LNA value stays in
 the file when a Basic analyzer is used.
 
-Legacy `lna2` and `agc` fields remain readable and survive config saves. Basic
-sessions ignore them. Ultra sessions accept only `"auto"`. A manual value stops
-the open with an error because Ultra firmware overwrites LNA2 and AGC before
-every scan. Other invalid values are reported when a tinySA opens.
+Invalid values are reported with the `[tinysa]` key and its allowed choices when
+a tinySA opens.
 
 ---
 

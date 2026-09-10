@@ -81,11 +81,6 @@ does not affect an Ultra open and remains saved for the next Basic session. An
 explicit `?input=low` or `?input=high` is ignored on Ultra. The startup log says
 that it was ignored.
 
-Legacy `lna2` and `agc` config fields remain readable and survive saves. They are
-not shown or applied. Basic sessions ignore manual values. Ultra requires
-`"auto"` because its firmware overwrites both controls before every scan. A
-manual Ultra value produces an error during open.
-
 > **RTL clones vary.** Different tuners, different gain tables, different quirks,
 > and no single person owns them all. If yours behaves oddly, please
 > [open an issue](../../../issues) with the tuner type (`rtl_test -t` prints it)

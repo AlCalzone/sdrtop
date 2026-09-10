@@ -170,6 +170,7 @@ impl DeviceOptionUpdate {
 #[derive(Clone, PartialEq)]
 pub enum InputMode {
     Normal,
+    DeviceOptionInput { id: String, error: Option<String> },
     FrequencyInput,
     SampleRateInput,
     MarkerNameInput,

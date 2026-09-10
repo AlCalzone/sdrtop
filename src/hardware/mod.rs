@@ -55,6 +55,14 @@ pub(crate) fn debug_assert_device_options(options: &[DeviceOption]) {
                 ids.insert(option.id.as_str()),
                 "device option IDs must be unique within a snapshot"
             );
+            debug_assert!(
+                option.integer_range.is_none()
+                    || option.choices.iter().any(|choice| {
+                        option.integer_choice(choice).ok() == Some(choice.as_str())
+                    }),
+                "numeric device option '{}' must advertise a canonical integer within its bounds",
+                option.id
+            );
         }
     }
     #[cfg(not(debug_assertions))]
@@ -71,6 +79,7 @@ mod tests {
             label: "Bandwidth".into(),
             choices: choices.iter().map(|choice| (*choice).into()).collect(),
             selected_choice: selected.into(),
+            integer_range: None,
         }
     }
 
@@ -93,5 +102,36 @@ mod tests {
             option("bandwidth", &["Narrow"], "Narrow"),
             option("bandwidth", &["Wide"], "Wide"),
         ]);
+    }
+
+    #[test]
+    fn numeric_contract_accepts_sparse_choices_and_auto() {
+        let mut numeric = option("level", &["auto", "0", "10"], "auto");
+        numeric.integer_range = Some(0..=31);
+        debug_assert_device_options(&[numeric]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must advertise a canonical integer within its bounds")]
+    fn numeric_contract_rejects_choices_outside_bounds() {
+        let mut numeric = option("level", &["auto", "32"], "auto");
+        numeric.integer_range = Some(0..=31);
+        debug_assert_device_options(&[numeric]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must advertise a canonical integer within its bounds")]
+    fn numeric_contract_rejects_noncanonical_integers() {
+        let mut numeric = option("level", &["auto", "+1", "01", "-0", "1.0"], "auto");
+        numeric.integer_range = Some(0..=31);
+        debug_assert_device_options(&[numeric]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must advertise a canonical integer within its bounds")]
+    fn numeric_contract_rejects_reversed_bounds() {
+        let mut numeric = option("level", &["0"], "0");
+        numeric.integer_range = Some(std::ops::RangeInclusive::new(31, 0));
+        debug_assert_device_options(&[numeric]);
     }
 }

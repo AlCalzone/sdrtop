@@ -10,7 +10,7 @@
 //!    keyboard belongs to [`text`] and nothing else sees it.
 //! 2. **The menu.** While it is open it is modal and owns the keyboard, so a
 //!    focus handler cannot act on a deck that is currently behind it. It is not
-//!    an `InputMode` because those five variants are all text being typed.
+//!    an `InputMode` because input modes represent text being typed.
 //! 3. **Panel focus.** [`handle_normal`] asks the layout engine which panel holds
 //!    focus and hands the key to that panel's own handler - [`core`], [`bench`],
 //!    [`signal`], [`sweep`] or [`rail`].
@@ -113,6 +113,7 @@ pub fn handle_key(
             text::frequency(key, state, device);
             KeyAction::Continue
         }
+        InputMode::DeviceOptionInput { id, .. } => text::device_option(key, state, &id),
         InputMode::SampleRateInput => {
             text::sample_rate(key, state, device);
             KeyAction::Continue

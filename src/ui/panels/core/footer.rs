@@ -328,7 +328,11 @@ fn count_lines<S: AsRef<str>>(items: &[S], sep: &str, inner_w: usize) -> usize {
 
 /// Public free function - called directly from the engine (bypasses dyn dispatch).
 pub fn compute_footer_height(available_width: u16, state: &SdrMetrics) -> u16 {
-    if !matches!(state.ui.input_mode, InputMode::Normal) || state.observer.active {
+    if !matches!(
+        state.ui.input_mode,
+        InputMode::Normal | InputMode::DeviceOptionInput { .. }
+    ) || state.observer.active
+    {
         return 3;
     }
     let inner_w = available_width.saturating_sub(2) as usize;
@@ -442,7 +446,7 @@ impl Panel for FooterPanel {
                         freq_str, m.ui.input_buf
                     ))
                 }
-                InputMode::Normal => {
+                InputMode::Normal | InputMode::DeviceOptionInput { .. } => {
                     if let Some(panel_name) = &m.ui.focused_panel {
                         let items = focus_items(m);
                         let groups = wrap_items_grouped(&items, FOCUS_SEP, inner_w);
@@ -499,8 +503,10 @@ fn tone_for(observer: bool, mode: &InputMode, panel_focused: bool) -> FrameTone 
     match mode {
         // Normal: lit while a panel is focused, because the keys along the
         // footer are that panel's, not the global set.
-        InputMode::Normal if panel_focused => FrameTone::Focused,
-        InputMode::Normal => FrameTone::Dim,
+        InputMode::Normal | InputMode::DeviceOptionInput { .. } if panel_focused => {
+            FrameTone::Focused
+        }
+        InputMode::Normal | InputMode::DeviceOptionInput { .. } => FrameTone::Dim,
         // Anything else is a half-typed value waiting on Enter.
         _ => FrameTone::Warn,
     }
@@ -557,6 +563,29 @@ mod tests {
             FrameTone::Focused
         );
         assert_eq!(tone_for(false, &InputMode::Normal, false), FrameTone::Dim);
+    }
+
+    #[test]
+    fn numeric_entry_keeps_the_normal_deck_footer() {
+        let mut m = SdrMetrics::fixture();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 5)).unwrap();
+        let normal_height = compute_footer_height(80, &m);
+        let mut draw = |m: &SdrMetrics| {
+            terminal
+                .draw(|f| FooterPanel.render(f, f.size(), m, &crate::Theme::sdr(), false))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let normal = draw(&m);
+        m.ui.input_mode = InputMode::DeviceOptionInput {
+            id: "level".into(),
+            error: None,
+        };
+        m.ui.input_buf = "123456".into();
+        assert_eq!(draw(&m), normal);
+        assert_eq!(compute_footer_height(80, &m), normal_height);
+        assert_eq!(tone_for(false, &m.ui.input_mode, false), FrameTone::Dim);
     }
 
     #[test]

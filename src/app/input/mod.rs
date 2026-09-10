@@ -35,16 +35,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::event::{DeviceOptionCompletion, DeviceOptionRequest};
 use crate::hardware;
 use crate::state::{InputMode, SdrMetrics};
 use crate::ui;
 
 /// What the main loop should do next. `PartialEq`/`Debug` so a test can say
 /// which one it expected.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KeyAction {
     Continue,
     Quit,
+    ApplyDeviceOption(DeviceOptionRequest),
 }
 
 /// Everything a key handler is allowed to touch.
@@ -106,6 +108,7 @@ pub fn handle_key(
                 handle_normal(key, &mut ctx)
             }
         }
+
         InputMode::FrequencyInput => {
             text::frequency(key, state, device);
             KeyAction::Continue
@@ -127,6 +130,13 @@ pub fn handle_key(
             KeyAction::Continue
         }
     }
+}
+
+pub(super) fn complete_device_option(
+    state: &Arc<Mutex<SdrMetrics>>,
+    completion: DeviceOptionCompletion,
+) -> bool {
+    menu::complete_device_option(state, completion)
 }
 
 /// Fold an uppercase letter key onto its lowercase twin, leaving every other key

@@ -15,7 +15,7 @@
 //! - [`sections`]: the left column.
 //! - [`entries`]: the right column, a section's layouts.
 //! - [`keys`]: the right column, the key reference.
-//! - [`options`]: the right column, settings. Empty for now, and honest about it.
+//! - [`options`]: the right column, device settings.
 //!
 //! [`render`] is the orchestrator. It resolves the frame, carves the rows and
 //! columns, and calls each part once. **The parts do not call each other.**
@@ -84,7 +84,7 @@ pub fn render(
         .split(inner);
 
     header(f, rows[0], m, theme);
-    footer(f, rows[2], theme);
+    footer(f, rows[2], state.pane, !m.device_options.is_empty(), theme);
 
     // The cursor is cloned into the frame snapshot and arrives here without the
     // engine, so it is clamped rather than trusted. An out of range index would
@@ -159,7 +159,7 @@ fn right_pane(
     match state.pane {
         MenuPane::Views => entries::render(f, body, &menu.sections[section], cursor, theme),
         MenuPane::Keys => keys::render(f, body, &m.caps, state.scroll, theme),
-        MenuPane::Options => options::render(f, body, theme),
+        MenuPane::Options => options::render(f, body, m, state.scroll, theme),
     }
 }
 
@@ -183,19 +183,30 @@ fn header(f: &mut Frame, area: Rect, m: &SdrMetrics, theme: &crate::Theme) {
 }
 
 /// The keys, in the order the design's "Moving around" table lists them.
-fn footer(f: &mut Frame, area: Rect, theme: &crate::Theme) {
+fn footer(f: &mut Frame, area: Rect, pane: MenuPane, has_options: bool, theme: &crate::Theme) {
     let key = Style::default().fg(theme.border_accent);
     let what = Style::default().fg(theme.label);
     let mut spans = Vec::new();
-    for (k, w) in [
-        ("Tab", "section"),
-        ("\u{2191}\u{2193}", "move"),
-        ("1-9", "open"),
-        ("Enter", "open"),
-        ("Esc", "close"),
-    ] {
+    let bindings: &[(&str, &str)] = if pane == MenuPane::Options && has_options {
+        &[
+            ("Tab", "section"),
+            ("\u{2191}\u{2193}", "option"),
+            ("\u{2190}\u{2192}", "value"),
+            ("Enter", "next"),
+            ("Esc", "close"),
+        ]
+    } else {
+        &[
+            ("Tab", "section"),
+            ("\u{2191}\u{2193}", "move"),
+            ("1-9", "open"),
+            ("Enter", "open"),
+            ("Esc", "close"),
+        ]
+    };
+    for (k, w) in bindings {
         spans.push(Span::styled(format!(" {k} "), key));
-        spans.push(Span::styled(w, what));
+        spans.push(Span::styled(*w, what));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -205,6 +216,7 @@ mod tests {
     use super::*;
     use crate::config::LayoutConfig;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::Arc;
 
     /// Render the menu at a fixed size and hand back the buffer as lines.
     ///
@@ -212,12 +224,15 @@ mod tests {
     /// the menu is not a panel, so it cannot go through
     /// `PanelRegistry::render_panel` and needs its own harness.
     fn draw(w: u16, h: u16, state: &MenuState) -> Vec<String> {
+        draw_with_metrics(w, h, state, &SdrMetrics::fixture())
+    }
+
+    fn draw_with_metrics(w: u16, h: u16, state: &MenuState, metrics: &SdrMetrics) -> Vec<String> {
         let menu = model::build(&LayoutConfig::default_config().presets);
-        let metrics = SdrMetrics::fixture();
         let theme = crate::Theme::sdr();
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| render(f, f.size(), &metrics, &menu, state, &theme))
+            .draw(|f| render(f, f.size(), metrics, &menu, state, &theme))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
@@ -388,6 +403,27 @@ mod tests {
         assert!(all.contains("Settings will live here"), "{all}");
         // And the pane replaces the right column only, the same as Keys.
         assert!(all.contains("Command Rail"), "{all}");
+    }
+
+    #[test]
+    fn a_short_folded_options_pane_keeps_the_selected_option_visible() {
+        let state = MenuState {
+            pane: MenuPane::Options,
+            scroll: 5,
+            ..MenuState::default()
+        };
+        let mut metrics = SdrMetrics::fixture();
+        for index in 0..6 {
+            Arc::make_mut(&mut metrics.device_options).push(crate::hardware::DeviceOption {
+                id: format!("option-{index}"),
+                label: format!("Option {index}"),
+                choices: vec!["Off".into(), "On".into()],
+                selected_choice: "On".into(),
+            });
+        }
+
+        let all = draw_with_metrics(40, 10, &state, &metrics).join("\n");
+        assert!(all.contains("Option 5"), "{all}");
     }
 
     /// Small enough that nothing sensible fits. The requirement is only that it

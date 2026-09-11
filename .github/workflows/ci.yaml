@@ -50,10 +50,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Install system dependencies
+      - name: Install native runtimes
         # Keep coverage with both native runtime libraries installed
-        run: sudo apt-get update && sudo apt-get install -y libhackrf-dev librtlsdr-dev pkg-config libusb-1.0-0-dev
+        run: sudo apt-get update && sudo apt-get install -y libhackrf0 librtlsdr2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -73,6 +75,9 @@ jobs:
       # morning.
       - name: Test
         run: cargo test --all --locked
+
+      - name: Resolve installed native libraries
+        run: cargo test --locked hardware::native::tests::installed_native_libraries_resolve -- --ignored --exact
 
       # sdrtop is published to crates.io, and a publish cannot be undone: a
       # version that fails to package can only be fixed by burning the version
@@ -94,6 +99,7 @@ jobs:
       contents: read
     container:
       image: debian:12@sha256:6ebd97fa83deb272194a2cf015b3d26a4d538e9ad3a7a79d544c8af5b0a01443
+      # Hide host radios so discovery cannot enter the TUI
       options: --tmpfs /sys:ro
     steps:
       - name: Install build tools
@@ -118,9 +124,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libhackrf-dev librtlsdr-dev pkg-config libusb-1.0-0-dev
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@stable

@@ -19,3 +19,13 @@ pub mod rtlsdr;
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires installed libhackrf and librtlsdr runtimes"]
+    fn installed_native_libraries_resolve() {
+        super::hackrf::ffi::api().expect("the installed libhackrf must resolve");
+        super::rtlsdr::ffi::api().expect("the installed librtlsdr must resolve");
+    }
+}

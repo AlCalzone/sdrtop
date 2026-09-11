@@ -20,17 +20,18 @@ if find /usr/lib /usr/local/lib /lib /usr/include /usr/local/include \
 fi
 
 cargo build --locked
+cargo test --locked
 bin="${CARGO_TARGET_DIR:-target}/debug/sdrtop"
 needed=$(readelf -d "$bin")
 if printf '%s\n' "$needed" | grep -Eq 'NEEDED.*lib(hackrf|rtlsdr)'; then
     die "The binary requires a native SDR library"
 fi
-"$bin" --help >/dev/null
-"$bin" --version
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-export XDG_CONFIG_HOME="$work"
+# The CLI reads HOME/.config. Cargo and rustup must use the original HOME
+export HOME="$work"
+"$bin" --help >/dev/null
+"$bin" --version
 
 expect_failure() {
     if "$bin" "$@" >"$work/output" 2>&1; then
@@ -47,6 +48,7 @@ expect_text() {
     }
 }
 
+# These package and version assertions keep installation advice actionable
 expect_failure --device hackrf
 expect_text "libhackrf backend unavailable"
 expect_text "2023.01.1"

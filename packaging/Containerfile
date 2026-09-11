@@ -10,6 +10,7 @@
 # demand glibc 2.39 and lose the older half for nothing.
 #
 # SDR libraries are loaded at runtime. This image needs only the build tools
+#
 # Pinned by digest, not by the `debian:12` tag. A tag is a moving pointer: it
 # advances on every Debian point release, so the same commit built two months
 # apart would come out of two different base images and produce two different

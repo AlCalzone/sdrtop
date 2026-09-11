@@ -101,13 +101,9 @@ jobs:
             | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
           actual=${actual% }
           echo "needs: $actual"
-          case "$actual" in
-            *libhackrf.so*|*librtlsdr.so*)
-              echo "::error::native SDR libraries must remain optional runtime loads"
-              exit 1 ;;
-          esac
           test "$actual" = "$expected" || {
             echo "::error::the set of shared libraries changed"
+            echo "::error::libhackrf and librtlsdr must remain optional runtime loads; remove native link directives"
             echo "::error::expected: $expected"
             echo "::error::actual:   $actual"
             exit 1; }
@@ -231,6 +227,7 @@ jobs:
             echo "sdrtop $version is already on crates.io; nothing to do"
             exit 0
           fi
+          # Verify the packaged source builds before publishing an immutable version
           cargo publish --locked
 
   release:

@@ -184,7 +184,7 @@ cargo install sdrtop --locked
 
 Building needs Rust 1.88+ and a C compiler/linker. Install Rust with [rustup](https://rustup.rs). No SDR libraries, development headers or pkg-config are required. At runtime, HackRF needs libhackrf 2023.01.1+ and RTL-SDR needs librtlsdr. A missing or incompatible library disables only its backend.
 
-Runtime loading is independent preparation for the tinySA support proposed in [musithang/sdrtop#7](https://github.com/musithang/sdrtop/pull/7) and [musithang/sdrtop#8](https://github.com/musithang/sdrtop/pull/8). The tinySA backend is provided by that companion work.
+tinySA builds and runs without libhackrf or librtlsdr. Install native SDR runtimes only for the backends you use.
 
 Then go make coffee: a few minutes on a laptop, considerably more on a Raspberry Pi. It's not frozen, it's just Rust.
 

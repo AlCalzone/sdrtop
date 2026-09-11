@@ -289,8 +289,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_availability_check_accepts_soapy() {
+    fn native_availability_check_accepts_non_native_backends() {
         assert!(DeviceKind::Soapy.check_available().is_ok());
+        assert!(DeviceKind::TinySa.check_available().is_ok());
     }
 
     fn listing(

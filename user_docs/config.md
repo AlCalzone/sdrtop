@@ -148,14 +148,19 @@ Basic LOW and Ultra use `attenuation`. Its choices are `auto` or 0–31 dB. Basi
 HIGH uses `high_attenuation`. `false` sends `attenuate 0`. `true` sends
 `attenuate 1`, which enables the firmware's frequency-dependent coarse
 attenuation of roughly 25–40 dB. Each connector's setting is saved separately.
+Press Enter on LOW or Ultra attenuation to type a value from 0 to 31. Use the
+arrow keys to select `auto`. External gain accepts direct integer entry from
+-100 to 100 dB.
 
 Ultra firmware always selects its input automatically. `basic_input` remains
 unchanged after an Ultra session. An explicit Basic input in `--device` is
 ignored on Ultra and produces a note in the startup log.
 
-Basic analyzers convert `spur = "auto"` to `"on"`. They also convert Ultra-only
-RBW values `0.2`, `1` and `850` to `"auto"`. The Ultra-only LNA value stays in
-the file when a Basic analyzer is used.
+Basic analyzers use `spur = "on"` when the file contains `"auto"` and use
+`rbw = "auto"` for Ultra-only RBW values `0.2`, `1` and `850`. These original
+values stay in the file unless you explicitly change the corresponding option
+during the Basic session. The Ultra-only LNA value also stays in the file when
+a Basic analyzer is used.
 
 Invalid values are reported with the `[tinysa]` key and its allowed choices when
 a tinySA opens.

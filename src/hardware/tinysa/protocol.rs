@@ -71,9 +71,27 @@ pub(super) fn parse_text_frame(frame: &[u8], command: &str) -> anyhow::Result<Ve
 
 pub(super) fn validate_setter_body(body: &[u8], command: &str) -> anyhow::Result<()> {
     if !body.is_empty() {
-        bail!("tinySA {command} command returned an unexpected response");
+        bail!(
+            "tinySA {command} command returned an unexpected response: {}",
+            escaped_excerpt(body)
+        );
     }
     Ok(())
+}
+
+fn escaped_excerpt(body: &[u8]) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut excerpt = String::new();
+    for byte in body {
+        for escaped in std::ascii::escape_default(*byte) {
+            if excerpt.len() == MAX_CHARS {
+                excerpt.push_str("...");
+                return excerpt;
+            }
+            excerpt.push(char::from(escaped));
+        }
+    }
+    excerpt
 }
 
 pub(super) fn parse_identity(
@@ -214,6 +232,20 @@ mod tests {
         ] {
             assert!(validate_setter_body(body, "rbw 10").is_err());
         }
+    }
+
+    #[test]
+    fn setter_rejections_include_a_bounded_escaped_excerpt() {
+        let mut body = b"error:\tinvalid\x00value\r\n".to_vec();
+        body.extend(std::iter::repeat_n(b'x', 200));
+
+        let error = validate_setter_body(&body, "rbw 10")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(r"error:\tinvalid\x00value\r\n"));
+        assert!(error.ends_with("..."));
+        assert!(error.len() < 200);
     }
 
     #[test]

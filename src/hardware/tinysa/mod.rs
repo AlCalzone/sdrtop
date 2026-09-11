@@ -4,6 +4,7 @@
 mod discovery;
 mod protocol;
 
+use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -138,6 +139,7 @@ pub struct TinySaDevice {
     model: Model,
     basic_input: BasicInput,
     options: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
     command_tx: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -161,7 +163,9 @@ impl TinySaDevice {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let (init_tx, init_rx) = bounded(1);
         let options = Arc::new(Mutex::new(Vec::new()));
+        let modified_options = Arc::new(Mutex::new(HashSet::new()));
         let worker_options = Arc::clone(&options);
+        let worker_modified_options = Arc::clone(&modified_options);
         let settings = settings.clone();
         let worker = thread::Builder::new()
             .name("tinysa-serial".to_string())
@@ -173,6 +177,7 @@ impl TinySaDevice {
                     basic_input,
                     settings,
                     worker_options,
+                    worker_modified_options,
                 )
             })
             .context("failed to start tinySA serial worker")?;
@@ -215,6 +220,7 @@ impl TinySaDevice {
             model: initialized.identity.model,
             basic_input,
             options,
+            modified_options,
             command_tx,
             worker: Mutex::new(Some(worker)),
         })
@@ -299,6 +305,10 @@ impl SdrDevice for TinySaDevice {
             &self.options(),
             self.model,
             self.basic_input,
+            &self
+                .modified_options
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
         )?;
         Ok(())
     }
@@ -350,6 +360,7 @@ struct Worker {
     identity: Identity,
     options: Vec<DeviceOption>,
     option_state: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
     basic_input: BasicInput,
     center_hz: u64,
     span_hz: u64,
@@ -393,6 +404,7 @@ fn worker_entry(
     basic_input: BasicInput,
     settings: TinySaSettings,
     option_state: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
 ) {
     let (identity, options) = match initialize(&mut *port, basic_input, &settings) {
         Ok(value) => value,
@@ -419,6 +431,7 @@ fn worker_entry(
         identity,
         options,
         option_state,
+        modified_options,
         basic_input,
         center_hz,
         span_hz: DEFAULT_SPAN_HZ,
@@ -624,13 +637,12 @@ impl Worker {
                 &self.options,
             );
             self.prompt_ready = recovery.is_ok();
-            return match recovery {
-                Ok(()) => Err(error),
-                Err(recovery_error) => Err(error.context(format!(
-                    "failed to restore tinySA controls after the error: {recovery_error}"
-                ))),
-            };
+            return Err(option_update_failure(error, recovery));
         }
+        self.modified_options
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string());
         *self
             .option_state
             .lock()
@@ -690,6 +702,20 @@ impl Worker {
             effective_center_hz,
             effective_span_hz,
         })
+    }
+}
+
+fn option_update_failure(
+    setter_error: anyhow::Error,
+    recovery: anyhow::Result<()>,
+) -> anyhow::Error {
+    match recovery {
+        Ok(()) => anyhow!(
+            "{setter_error:#}; previous accepted tinySA controls were restored and acquisition was stopped"
+        ),
+        Err(recovery_error) => anyhow!(
+            "{setter_error:#}; acquisition was stopped; failed to restore tinySA controls: {recovery_error:#}"
+        ),
     }
 }
 
@@ -1268,11 +1294,18 @@ fn persisted_settings(
     options: &[DeviceOption],
     model: Model,
     basic_input: BasicInput,
+    modified_options: &HashSet<String>,
 ) -> anyhow::Result<TinySaSettings> {
     let mut settings = loaded.clone();
     for option in options {
         let value = option.selected_choice.as_str();
         validate_option_choice(options, &option.id, value)?;
+        if model == Model::Basic
+            && matches!(option.id.as_str(), "rbw" | "spur")
+            && !modified_options.contains(&option.id)
+        {
+            continue;
+        }
         match option.id.as_str() {
             "points" => {
                 settings.points = value.parse().context("tinySA point setting is invalid")?;
@@ -1413,12 +1446,13 @@ fn option_definitions(model: Model, basic_input: BasicInput) -> Vec<DeviceOption
             strings(&["off", "on"]),
         ));
     } else {
-        options.push(option(
+        options.push(integer_option(
             "attenuation",
             "Attenuation (dB)",
             std::iter::once("auto".to_string())
                 .chain((0..=31).map(|value| value.to_string()))
                 .collect(),
+            0..=31,
         ));
     }
     if model.is_ultra() {
@@ -1433,10 +1467,11 @@ fn option_definitions(model: Model, basic_input: BasicInput) -> Vec<DeviceOption
             strings(&["off", "on"])
         },
     ));
-    options.push(option(
+    options.push(integer_option(
         "ext_gain",
         "External gain (dB)",
         (-100..=100).map(|value| value.to_string()).collect(),
+        -100..=100,
     ));
     options
 }
@@ -1447,6 +1482,19 @@ fn option(id: &str, label: &str, choices: Vec<String>) -> DeviceOption {
         label: label.to_string(),
         selected_choice: choices.first().cloned().unwrap_or_default(),
         choices,
+        integer_range: None,
+    }
+}
+
+fn integer_option(
+    id: &str,
+    label: &str,
+    choices: Vec<String>,
+    range: std::ops::RangeInclusive<i32>,
+) -> DeviceOption {
+    DeviceOption {
+        integer_range: Some(range),
+        ..option(id, label, choices)
     }
 }
 
@@ -1902,6 +1950,11 @@ mod tests {
         assert_eq!(low_attenuation.label, "Attenuation (dB)");
         assert_eq!(low_attenuation.choices.first().unwrap(), "auto");
         assert_eq!(low_attenuation.choices.last().unwrap(), "31");
+        assert_eq!(low_attenuation.integer_range, Some(0..=31));
+        assert!(basic
+            .iter()
+            .filter(|option| option.id != "attenuation" && option.id != "ext_gain")
+            .all(|option| option.integer_range.is_none()));
         assert!(!basic.iter().any(|option| option.id == "lna"));
         assert_eq!(
             basic
@@ -1919,6 +1972,7 @@ mod tests {
             .unwrap();
         assert_eq!(high_attenuation.label, "Coarse attenuation");
         assert_eq!(high_attenuation.choices, ["off", "on"]);
+        assert!(high_attenuation.integer_range.is_none());
         assert!(!high.iter().any(|option| option.id == "attenuation"));
 
         let ultra = option_definitions(Model::Zs407, BasicInput::Low);
@@ -1933,15 +1987,9 @@ mod tests {
         assert!(ultra.iter().any(|option| option.id == "lna"));
         assert!(!ultra.iter().any(|option| option.id == "lna2"));
         assert!(!ultra.iter().any(|option| option.id == "agc"));
-        assert_eq!(
-            ultra
-                .iter()
-                .find(|option| option.id == "ext_gain")
-                .unwrap()
-                .choices
-                .len(),
-            201
-        );
+        let external_gain = ultra.iter().find(|option| option.id == "ext_gain").unwrap();
+        assert_eq!(external_gain.choices.len(), 201);
+        assert_eq!(external_gain.integer_range, Some(-100..=100));
     }
 
     #[test]
@@ -2287,7 +2335,16 @@ mod tests {
             set_selected_option(&mut options, id, choice).unwrap();
         }
 
-        let saved = persisted_settings(&loaded, &options, Model::Zs407, BasicInput::Low).unwrap();
+        let modified = HashSet::from([
+            "points".to_string(),
+            "rbw".to_string(),
+            "attenuation".to_string(),
+            "lna".to_string(),
+            "spur".to_string(),
+            "ext_gain".to_string(),
+        ]);
+        let saved = persisted_settings(&loaded, &options, Model::Zs407, BasicInput::Low, &modified)
+            .unwrap();
 
         assert_eq!(saved.points, 900);
         assert_eq!(saved.rbw, "0.2");
@@ -2318,6 +2375,7 @@ mod tests {
             model: Model::Basic,
             basic_input: BasicInput::High,
             options: Arc::new(Mutex::new(options)),
+            modified_options: Arc::new(Mutex::new(HashSet::from(["high_attenuation".to_string()]))),
             command_tx,
             worker: Mutex::new(None),
         };
@@ -2345,8 +2403,14 @@ mod tests {
 
         let (mut low_options, _) = startup_options(Model::Basic, BasicInput::Low, &loaded).unwrap();
         set_selected_option(&mut low_options, "attenuation", "7").unwrap();
-        let low_saved =
-            persisted_settings(&loaded, &low_options, Model::Basic, BasicInput::Low).unwrap();
+        let low_saved = persisted_settings(
+            &loaded,
+            &low_options,
+            Model::Basic,
+            BasicInput::Low,
+            &HashSet::from(["attenuation".to_string()]),
+        )
+        .unwrap();
         assert_eq!(low_saved.basic_input, BasicInput::Low);
         assert_eq!(low_saved.attenuation, "7");
         assert!(low_saved.high_attenuation);
@@ -2354,11 +2418,69 @@ mod tests {
         let (mut high_options, _) =
             startup_options(Model::Basic, BasicInput::High, &loaded).unwrap();
         set_selected_option(&mut high_options, "high_attenuation", "off").unwrap();
-        let high_saved =
-            persisted_settings(&loaded, &high_options, Model::Basic, BasicInput::High).unwrap();
+        let high_saved = persisted_settings(
+            &loaded,
+            &high_options,
+            Model::Basic,
+            BasicInput::High,
+            &HashSet::from(["high_attenuation".to_string()]),
+        )
+        .unwrap();
         assert_eq!(high_saved.basic_input, BasicInput::High);
         assert_eq!(high_saved.attenuation, "12");
         assert!(!high_saved.high_attenuation);
+    }
+
+    #[test]
+    fn basic_normalization_persists_only_after_successful_operator_updates() {
+        for rbw in ["0.2", "1", "850"] {
+            let loaded = TinySaSettings {
+                rbw: rbw.into(),
+                spur: "auto".into(),
+                ..TinySaSettings::default()
+            };
+            let (options, _) = startup_options(Model::Basic, BasicInput::Low, &loaded).unwrap();
+            assert_eq!(selected_option_value(&options, "rbw"), Some("auto"));
+            assert_eq!(selected_option_value(&options, "spur"), Some("on"));
+
+            let unchanged = persisted_settings(
+                &loaded,
+                &options,
+                Model::Basic,
+                BasicInput::Low,
+                &HashSet::new(),
+            )
+            .unwrap();
+            assert_eq!(unchanged.rbw, rbw);
+            assert_eq!(unchanged.spur, "auto");
+
+            let modified = HashSet::from(["rbw".to_string(), "spur".to_string()]);
+            let changed =
+                persisted_settings(&loaded, &options, Model::Basic, BasicInput::Low, &modified)
+                    .unwrap();
+            assert_eq!(changed.rbw, "auto");
+            assert_eq!(changed.spur, "on");
+        }
+    }
+
+    #[test]
+    fn option_failure_reports_successful_and_failed_recovery() {
+        let recovered =
+            option_update_failure(anyhow!("setter rejected: invalid\\x00response"), Ok(()))
+                .to_string();
+        assert!(recovered.contains("setter rejected: invalid\\x00response"));
+        assert!(recovered.contains("previous accepted tinySA controls were restored"));
+        assert!(recovered.contains("acquisition was stopped"));
+
+        let failed = option_update_failure(
+            anyhow!("setter rejected: invalid response"),
+            Err(anyhow!("recovery command was rejected")),
+        )
+        .to_string();
+        assert!(failed.contains("setter rejected: invalid response"));
+        assert!(failed.contains("failed to restore tinySA controls"));
+        assert!(failed.contains("recovery command was rejected"));
+        assert!(failed.contains("acquisition was stopped"));
     }
 
     #[test]
@@ -2390,7 +2512,14 @@ mod tests {
             ..TinySaSettings::default()
         };
         let options = option_definitions(Model::Basic, BasicInput::Low);
-        let saved = persisted_settings(&loaded, &options, Model::Basic, BasicInput::Low).unwrap();
+        let saved = persisted_settings(
+            &loaded,
+            &options,
+            Model::Basic,
+            BasicInput::Low,
+            &HashSet::new(),
+        )
+        .unwrap();
 
         assert!(saved.lna);
     }
@@ -2436,7 +2565,8 @@ mod tests {
                 &TinySaSettings::default(),
                 &options,
                 Model::Zs407,
-                BasicInput::Low
+                BasicInput::Low,
+                &HashSet::new(),
             )
             .is_err());
         }
@@ -2729,8 +2859,14 @@ mod tests {
             ..TinySaSettings::default()
         };
         let (options, _) = startup_options(Model::Zs407, settings.basic_input, &settings).unwrap();
-        let saved =
-            persisted_settings(&settings, &options, Model::Zs407, settings.basic_input).unwrap();
+        let saved = persisted_settings(
+            &settings,
+            &options,
+            Model::Zs407,
+            settings.basic_input,
+            &HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(saved.basic_input, BasicInput::High);
         assert_eq!(
             input_mode_command(Model::Zs407, BasicInput::High),

@@ -434,7 +434,7 @@ impl App {
                 crate::state::recall_to_hz(&m.ui.recall),
             )
         };
-        let mut cfg = AppConfig {
+        let cfg = AppConfig {
             radio: RadioConfig {
                 frequency_hz: freq,
                 sample_rate: rate,
@@ -469,8 +469,22 @@ impl App {
             tinysa: self.tinysa_config.clone(),
             presets: self.user_presets.clone(),
         };
-        device.update_config(&mut cfg)?;
-        cfg.save(path)
+        let mut candidate = cfg.clone();
+        let hook_error = device.update_config(&mut candidate).err();
+        let save_result = if hook_error.is_some() {
+            cfg.save(path)
+        } else {
+            candidate.save(path)
+        };
+        match (hook_error, save_result) {
+            (None, result) => result,
+            (Some(error), Ok(())) => Err(error.context(
+                "device settings could not be updated; previous device settings and other settings were saved",
+            )),
+            (Some(hook_error), Err(save_error)) => anyhow::bail!(
+                "failed to save config: {save_error:#}; device settings update also failed: {hook_error:#}"
+            ),
+        }
     }
 }
 
@@ -482,11 +496,20 @@ mod tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[derive(Clone, Copy)]
+    enum ConfigHook {
+        Preserve,
+        Apply,
+        FailAfterMutation,
+    }
+
     struct QuitDevice {
         caps: DeviceCapabilities,
         tuned_hz: AtomicU64,
         tune_calls: AtomicUsize,
         drops: Arc<AtomicUsize>,
+        config_hook: ConfigHook,
     }
 
     impl QuitDevice {
@@ -496,7 +519,13 @@ mod tests {
                 tuned_hz: AtomicU64::new(0),
                 tune_calls: AtomicUsize::new(0),
                 drops: Arc::new(AtomicUsize::new(0)),
+                config_hook: ConfigHook::Preserve,
             }
+        }
+
+        fn with_config_hook(mut self, config_hook: ConfigHook) -> Self {
+            self.config_hook = config_hook;
+            self
         }
     }
 
@@ -539,6 +568,20 @@ mod tests {
 
         fn set_lna_gain(&self, _db: u32) -> anyhow::Result<()> {
             Ok(())
+        }
+
+        fn update_config(&self, config: &mut AppConfig) -> anyhow::Result<()> {
+            match self.config_hook {
+                ConfigHook::Preserve => Ok(()),
+                ConfigHook::Apply => {
+                    config.tinysa.points = 900;
+                    Ok(())
+                }
+                ConfigHook::FailAfterMutation => {
+                    config.tinysa.points = 900;
+                    anyhow::bail!("injected backend config failure")
+                }
+            }
         }
     }
 
@@ -629,6 +672,112 @@ mod tests {
             .is_some_and(|entry| entry.text.contains("Bandwidth set to Wide")));
         drop(m);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn successful_backend_config_hook_updates_the_saved_snapshot() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        state.lock().unwrap().radio.frequency = 144_390_000;
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::Apply),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-success-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let app = App::assemble(
+            AppConfig::default(),
+            Some(path.clone()),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+
+        app.save_config().unwrap();
+
+        let saved = AppConfig::load_or_default(&path);
+        assert_eq!(saved.radio.frequency_hz, 144_390_000);
+        assert_eq!(saved.tinysa.points, 900);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_backend_config_hook_saves_the_unmodified_backend_block() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        {
+            let mut metrics = state.lock().unwrap();
+            metrics.radio.frequency = 433_920_000;
+            metrics.spectrum.markers.push(crate::state::SpectrumMarker {
+                freq_hz: 434_500_000,
+                label: "review".into(),
+                channel_bw_hz: Some(25_000),
+                measured_bw_hz: None,
+            });
+        }
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::FailAfterMutation),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-failure-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut config = AppConfig::default();
+        config.tinysa.points = 450;
+        config.tinysa.lna = true;
+        let app =
+            App::assemble(config, Some(path.clone()), state, Some(device), None, None).unwrap();
+
+        let error = format!("{:#}", app.save_config().unwrap_err());
+
+        assert!(error.contains("device settings could not be updated"));
+        assert!(error.contains("previous device settings and other settings were saved"));
+        assert!(error.contains("injected backend config failure"));
+        let saved = AppConfig::load_or_default(&path);
+        assert_eq!(saved.radio.frequency_hz, 433_920_000);
+        assert_eq!(saved.tinysa.points, 450);
+        assert!(saved.tinysa.lna);
+        assert_eq!(saved.display.spectrum_markers.len(), 1);
+        assert_eq!(saved.display.spectrum_markers[0].freq_hz, 434_500_000);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn backend_hook_and_file_save_failures_are_both_reported() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::FailAfterMutation),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-double-failure-{}",
+            std::process::id()
+        ));
+        let blocker = root.join("not-a-directory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&blocker, b"block config parent").unwrap();
+        let app = App::assemble(
+            AppConfig::default(),
+            Some(blocker.join("config.toml")),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let error = app.save_config().unwrap_err().to_string();
+
+        assert!(error.contains("failed to save config"));
+        assert!(error.contains("device settings update also failed"));
+        assert!(error.contains("injected backend config failure"));
+        std::fs::remove_file(blocker).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

@@ -245,7 +245,9 @@ RTL-SDR needs librtlsdr with all required symbols. Linux candidates are
 `librtlsdr0` on Debian, `librtlsdr2` on Ubuntu and `rtl-sdr` on Arch.
 
 Library loading results are cached for the process lifetime. Unavailable-backend
-diagnostics are logged once. Loaded library handles stay open until process exit.
+diagnostics appear on explicit selection or when automatic discovery finds no devices.
+Successful discovery stays quiet about unused native backends.
+Loaded library handles stay open until process exit.
 Restart sdrtop after installing or updating a library.
 
 **libSoapySDR is not needed to build and not needed to run.** It is opened at

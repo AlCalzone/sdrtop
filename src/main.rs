@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     if devices.is_empty() {
         eprintln!(
             "No device found. Connect a HackRF, RTL-SDR, or tinySA and try again.{}",
-            hardware::discovery::no_device_hint()
+            hardware::discovery::no_device_hint(want)
         );
         std::process::exit(1);
     }

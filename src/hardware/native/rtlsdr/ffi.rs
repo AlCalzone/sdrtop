@@ -45,7 +45,12 @@ pub fn api() -> anyhow::Result<&'static RtlSdrApi> {
     static API: OnceLock<Result<RtlSdrApi, String>> = OnceLock::new();
     API.get_or_init(|| load("librtlsdr", CANDIDATES, resolve))
         .as_ref()
-        .map_err(|err| anyhow::anyhow!("{err}"))
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "{err}\nRTL-SDR needs the librtlsdr runtime. \
+                 Install librtlsdr0 on Debian, librtlsdr2 on Ubuntu or rtl-sdr on Arch/Fedora."
+            )
+        })
 }
 
 pub(super) fn resolve(lib: libloading::Library) -> Result<RtlSdrApi, String> {

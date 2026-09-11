@@ -77,7 +77,20 @@ impl TestLibrary {
 
 impl Drop for TestLibrary {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.path).unwrap();
-        std::fs::remove_dir(self.path.parent().unwrap()).unwrap();
+        let result = std::fs::remove_file(&self.path)
+            .and_then(|()| std::fs::remove_dir(self.path.parent().unwrap()));
+        if let Err(err) = result {
+            if std::thread::panicking() {
+                eprintln!(
+                    "Could not clean up native fixture {}: {err}",
+                    self.path.display()
+                );
+            } else {
+                panic!(
+                    "Could not clean up native fixture {}: {err}",
+                    self.path.display()
+                );
+            }
+        }
     }
 }

@@ -198,9 +198,9 @@ impl Drop for HackRfDevice {
 // ── Open / enumerate ─────────────────────────────────────────────────────────
 
 impl HackRfDevice {
-    /// Opens the HackRF at `index` and reads its metadata once. Only a failed
-    /// libhackrf open fails here; missing optional metadata reads degrade to
-    /// fallbacks rather than aborting (so a quirky unit still comes up).
+    /// Opens the HackRF at `index` and reads its metadata once.
+    /// The library must export every required symbol. Firmware metadata read
+    /// failures leave the corresponding fields unavailable.
     pub fn open(index: usize) -> anyhow::Result<Self> {
         Self::open_with_api(api()?, index)
     }
@@ -272,13 +272,8 @@ impl HackRfDevice {
 /// enumeration errors (returns an empty list) - the caller unions backends and
 /// reports "no device" only when every backend is empty.
 pub fn list() -> Vec<DeviceListing> {
-    let api = match api() {
-        Ok(api) => api,
-        Err(err) => {
-            static LOG: std::sync::Once = std::sync::Once::new();
-            LOG.call_once(|| eprintln!("{err}"));
-            return Vec::new();
-        }
+    let Ok(api) = api() else {
+        return Vec::new();
     };
     list_with_api(api)
 }
@@ -386,7 +381,7 @@ unsafe fn read_board_id(api: &HackrfApi, ptr: *mut c_void) -> Option<u8> {
 }
 
 unsafe fn read_board_name(api: &HackrfApi, id: u8) -> String {
-    let p = (api.hackrf_board_id_name)(id);
+    let p = (api.hackrf_board_id_name)(c_int::from(id));
     if p.is_null() {
         "Unknown".to_string()
     } else {

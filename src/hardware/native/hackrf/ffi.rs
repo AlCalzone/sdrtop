@@ -59,7 +59,7 @@ pub struct HackrfApi {
     pub hackrf_board_partid_serialno_read:
         unsafe extern "C" fn(*mut c_void, *mut ReadPartidSerialno) -> c_int,
     pub hackrf_board_id_read: unsafe extern "C" fn(*mut c_void, *mut u8) -> c_int,
-    pub hackrf_board_id_name: unsafe extern "C" fn(u8) -> *const c_char,
+    pub hackrf_board_id_name: unsafe extern "C" fn(c_int) -> *const c_char,
     pub hackrf_error_name: unsafe extern "C" fn(c_int) -> *const c_char,
     pub hackrf_board_rev_read: unsafe extern "C" fn(*mut c_void, *mut u8) -> c_int,
     pub hackrf_usb_api_version_read: unsafe extern "C" fn(*mut c_void, *mut u16) -> c_int,
@@ -71,7 +71,12 @@ pub fn api() -> anyhow::Result<&'static HackrfApi> {
     static API: OnceLock<Result<HackrfApi, String>> = OnceLock::new();
     API.get_or_init(|| load("libhackrf", CANDIDATES, resolve))
         .as_ref()
-        .map_err(|err| anyhow::anyhow!("{err}"))
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "{err}\nHackRF needs libhackrf 2023.01.1 or newer. \
+                 Install libhackrf0 on Debian/Ubuntu or hackrf on Arch/Fedora."
+            )
+        })
 }
 
 pub(super) fn resolve(lib: libloading::Library) -> Result<HackrfApi, String> {

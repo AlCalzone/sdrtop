@@ -28,7 +28,8 @@ size_t fixture_list_layout(int field) {
         case 1: return offsetof(struct hackrf_device_list, usb_device_index);
         case 2: return offsetof(struct hackrf_device_list, devicecount);
         case 3: return offsetof(struct hackrf_device_list, usb_devices);
-        default: return offsetof(struct hackrf_device_list, usb_devicecount);
+        case 4: return offsetof(struct hackrf_device_list, usb_devicecount);
+        default: abort();
     }
 }
 
@@ -57,7 +58,7 @@ int hackrf_device_list_open(struct hackrf_device_list *list, int index, void **d
 }
 int hackrf_close(void *device) { calls[3]++; free(device); return 0; }
 const char *hackrf_error_name(int code) { return "fixture error"; }
-const char *hackrf_board_id_name(uint8_t id) { return "Fixture HackRF"; }
+const char *hackrf_board_id_name(int id) { return "Fixture HackRF"; }
 
 #define OPTIONAL(name, args) int name args { return -1005; }
 OPTIONAL(hackrf_version_string_read, (void *device, char *version, uint8_t length))
@@ -82,6 +83,7 @@ int hackrf_stop_rx(void *device) { calls[4]++; return 0; }
 uint32_t rtlsdr_get_device_count(void) { return 1; }
 const char *rtlsdr_get_device_name(uint32_t index) { return "Fixture RTL-SDR"; }
 int rtlsdr_get_device_usb_strings(uint32_t index, char *manufacturer, char *product, char *serial) {
+    calls[0]++;
     strcpy(manufacturer, "Fixture");
     strcpy(product, "RTL-SDR");
     strcpy(serial, "00000001");

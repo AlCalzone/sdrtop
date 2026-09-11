@@ -164,7 +164,7 @@ sh install.sh --help                # this list, from the script itself
 
 Piped straight into a shell they go after `sh -s --`. `--no-verify` turns off the checksum check on a download, which is the one thing standing between you and a tarball that isn't the one I published, so have a reason. The rest are explained in [Getting started](user_docs/getting-started.md#every-flag-it-takes).
 
-`--deps-only` without a runtime flag does nothing. It never installs build tools.
+`--deps-only` requires a runtime flag. It never installs build tools.
 
 </details>
 

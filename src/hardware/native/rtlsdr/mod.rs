@@ -53,6 +53,7 @@ unsafe impl Sync for RtlDevice {}
 /// Serializes the fd-2 redirect dance so two control calls on different threads
 /// (e.g. the input handler and the sweep task) can't clobber each other's saved
 /// descriptor and leave stderr pointing at /dev/null permanently.
+#[cfg(not(test))]
 static STDERR_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run `f` with the process's stderr redirected to /dev/null, then restore it.
@@ -63,6 +64,7 @@ static STDERR_LOCK: Mutex<()> = Mutex::new(());
 /// control call is wrapped in this; the long-lived async read is not (it runs on
 /// its own thread). Best-effort: if the redirect can't be set up, `f` runs
 /// unsilenced.
+#[cfg(not(test))]
 fn with_stderr_silenced<R>(f: impl FnOnce() -> R) -> R {
     let _guard = STDERR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
@@ -82,6 +84,11 @@ fn with_stderr_silenced<R>(f: impl FnOnce() -> R) -> R {
         libc::close(saved);
         result
     }
+}
+
+#[cfg(test)]
+fn with_stderr_silenced<R>(f: impl FnOnce() -> R) -> R {
+    f()
 }
 
 // ── Async read callback (our read thread) ─────────────────────────────────────
@@ -301,13 +308,8 @@ impl RtlDevice {
 /// Enumerates connected RTL-SDR dongles. Never fails - returns an empty list
 /// when librtlsdr finds none.
 pub fn list() -> Vec<DeviceListing> {
-    let api = match api() {
-        Ok(api) => api,
-        Err(err) => {
-            static LOG: std::sync::Once = std::sync::Once::new();
-            LOG.call_once(|| eprintln!("{err}"));
-            return Vec::new();
-        }
+    let Ok(api) = api() else {
+        return Vec::new();
     };
     list_with_api(api)
 }
@@ -317,18 +319,14 @@ fn list_with_api(api: &RtlSdrApi) -> Vec<DeviceListing> {
     let count = unsafe { (api.rtlsdr_get_device_count)() };
     for i in 0..count {
         let name = device_name(api, i);
-        let serial = device_serial(api, i).unwrap_or_default();
-        let shown = if serial.is_empty() {
-            format!("#{i}")
-        } else {
-            serial
-        };
+        let serial = device_serial(api, i);
+        let shown = serial.clone().unwrap_or_else(|| format!("#{i}"));
         out.push(DeviceListing {
             kind: DeviceKind::RtlSdr,
             index: i as usize,
             label: format!("RTL-SDR · {} · {}", name, shown),
             args: None,
-            serial: device_serial(api, i),
+            serial,
             path: None,
             tiny_sa_input: None,
         });
@@ -519,6 +517,7 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].index, 0);
         assert_eq!(devices[0].serial.as_deref(), Some("00000001"));
+        assert_eq!(fixture.calls(0), 1, "enumeration reads USB strings once");
         let device = RtlDevice::open_with_api(api, 0).unwrap();
         assert_eq!(device.info().board_name, "Fixture RTL-SDR");
         assert_eq!(device.info().tuner_name.as_deref(), Some("R820T"));

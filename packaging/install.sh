@@ -64,11 +64,12 @@ sdrtop installer
   --uninstall     remove what a previous run installed
   --help          this
 
-No SDR libraries are installed by default.
---deps-only without a runtime flag does nothing. It never installs build tools.
+Runtime libraries are opt-in for current releases.
+--deps-only requires a runtime flag. It never installs build tools.
 Source builds need Rust 1.88+ and a C compiler/linker.
 SDR headers are unnecessary for runtime-loading builds.
-Older releases may require SDR development packages. --git builds main.
+Recognized native-link failures in older releases install SDR development
+packages and retry the same version once. --git builds main.
 EOF
 }
 
@@ -88,6 +89,12 @@ while [ $# -gt 0 ]; do
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+if [ "$RAW_DEPS_ONLY" -eq 1 ] && [ "$WANT_HACKRF" -eq 0 ] \
+   && [ "$WANT_RTLSDR" -eq 0 ] && [ "$WANT_SOAPY" -eq 0 ]; then
+    usage >&2
+    die "--deps-only requires --hackrf, --rtlsdr or --soapy"
+fi
 
 [ "$(uname -s)" = Linux ] || die "sdrtop is Linux only; this is $(uname -s)"
 
@@ -165,30 +172,35 @@ RTLSDR_UDEV=""
 # and correct the list, not to add another guess.
 SOAPY_LIB=""
 SOAPY_MODULES=""
+LEGACY_DEV_PKGS=""
 case "$PM" in
     apt-get)
         LIB_HACKRF="libhackrf0 libhackrf-dev"
         LIB_RTLSDR="librtlsdr0 librtlsdr2 librtlsdr-dev"
         SOAPY_LIB="libsoapysdr0.8 libsoapysdr0.7 libsoapysdr-dev"
         SOAPY_MODULES="soapysdr-module-all"
+        LEGACY_DEV_PKGS="libhackrf-dev librtlsdr-dev pkg-config"
         DEV_PKGS="build-essential" ;;
     dnf|yum)
         LIB_HACKRF="hackrf hackrf-devel"
         LIB_RTLSDR="rtl-sdr rtl-sdr-devel"
         SOAPY_LIB="SoapySDR"
         SOAPY_MODULES="SoapySDR-hackrf SoapySDR-rtlsdr SoapySDR-airspy SoapySDR-plutosdr"
+        LEGACY_DEV_PKGS="hackrf-devel rtl-sdr-devel pkgconf-pkg-config"
         DEV_PKGS="gcc" ;;
     pacman)
         LIB_HACKRF="hackrf"
         LIB_RTLSDR="rtl-sdr"
         SOAPY_LIB="soapysdr"
         SOAPY_MODULES="soapyhackrf soapyrtlsdr soapyairspy soapyplutosdr"
+        LEGACY_DEV_PKGS="hackrf rtl-sdr pkgconf"
         DEV_PKGS="base-devel" ;;
     zypper)
         LIB_HACKRF="libhackrf0 hackrf libhackrf-devel"
         LIB_RTLSDR="librtlsdr0 rtl-sdr rtl-sdr-devel"
         SOAPY_LIB="libSoapySDR0_8 SoapySDR SoapySDR-devel"
         SOAPY_MODULES="SoapySDR-module-hackrf SoapySDR-module-rtlsdr"
+        LEGACY_DEV_PKGS="libhackrf-devel rtl-sdr-devel pkg-config"
         DEV_PKGS="gcc" ;;
     apk)
         # Alpine splits further than anyone else: the library, the headers and
@@ -199,24 +211,28 @@ case "$PM" in
         SOAPY_MODULES="soapysdr-hackrf soapysdr-rtlsdr"
         HACKRF_UDEV="hackrf-udev"
         RTLSDR_UDEV="librtlsdr-udev"
+        LEGACY_DEV_PKGS="hackrf-dev librtlsdr-dev pkgconf"
         DEV_PKGS="build-base" ;;
     xbps-install)
         LIB_HACKRF="hackrf hackrf-devel"
         LIB_RTLSDR="rtl-sdr rtl-sdr-devel"
         SOAPY_LIB="SoapySDR SoapySDR-devel"
         SOAPY_MODULES="SoapyHackRF SoapyRTLSDR"
+        LEGACY_DEV_PKGS="hackrf-devel rtl-sdr-devel pkg-config"
         DEV_PKGS="base-devel" ;;
     emerge)
         LIB_HACKRF="net-wireless/hackrf"
         LIB_RTLSDR="net-wireless/rtl-sdr"
         SOAPY_LIB="net-wireless/soapysdr"
         SOAPY_MODULES="net-wireless/soapyhackrf net-wireless/soapyrtlsdr"
+        LEGACY_DEV_PKGS="net-wireless/hackrf net-wireless/rtl-sdr"
         DEV_PKGS="sys-devel/gcc" ;;
     nix-env)
         LIB_HACKRF="hackrf"
         LIB_RTLSDR="rtl-sdr"
         SOAPY_LIB="soapysdr-with-plugins soapysdr"
         SOAPY_MODULES=""
+        LEGACY_DEV_PKGS="hackrf rtl-sdr pkg-config"
         DEV_PKGS="gcc" ;;
     "")
         LIB_HACKRF=""; LIB_RTLSDR=""; DEV_PKGS="" ;;
@@ -314,9 +330,6 @@ install_runtime_deps() {
 install_runtime_deps
 [ "$WANT_SOAPY" -eq 1 ] && install_soapy
 if [ "$RAW_DEPS_ONLY" -eq 1 ]; then
-    if [ "$WANT_HACKRF" -eq 0 ] && [ "$WANT_RTLSDR" -eq 0 ] && [ "$WANT_SOAPY" -eq 0 ]; then
-        say "no runtimes selected; use --hackrf, --rtlsdr or --soapy with --deps-only"
-    fi
     exit 0
 fi
 
@@ -491,7 +504,7 @@ if [ -z "$BINARY" ]; then
         src_args="--git https://github.com/$REPO"
         src_label="the main branch from git"
     elif [ -n "$TAG" ]; then
-        src_args="--version ${TAG#v}"
+        src_args="--version =${TAG#v}"
         src_label="$CRATE ${TAG#v} from crates.io"
     fi
     say "building $src_label"
@@ -500,16 +513,56 @@ if [ -z "$BINARY" ]; then
     # temporary directory, which stops existing seconds later, and this script
     # prints the correct PATH line about $BIN_DIR at the end anyway. Two pieces
     # of contradictory advice is worse than one.
-    # shellcheck disable=SC2086 # deliberate: $src_args is an argument list
-    PATH="$WORK/cargo/bin:$PATH" \
-        cargo install "$CRATE" --locked --root "$WORK/cargo" $src_args \
-        || {
-            if [ "$FROM_GIT" -eq 0 ]; then
-                warn "older releases require native SDR development packages"
-                warn "use --git to build main with runtime loading"
+    run_cargo_install() {
+        (
+            # The status file preserves Cargo's result across the tee pipeline
+            # shellcheck disable=SC2086 # deliberate: $src_args is an argument list
+            if PATH="$WORK/cargo/bin:$PATH" CARGO_TERM_COLOR=never \
+                cargo install "$CRATE" --locked --root "$WORK/cargo" $src_args; then
+                echo 0 > "$WORK/cargo.status"
+            else
+                echo "$?" > "$WORK/cargo.status"
             fi
+        ) 2>&1 | tee "$WORK/cargo.log"
+        return "$(cat "$WORK/cargo.status")"
+    }
+
+    legacy_native_failure() {
+        if grep -Fq 'error: failed to run custom build command for `sdrtop v' "$WORK/cargo.log" \
+           && grep -Eq 'panicked at .*build\.rs:[0-9]+:' "$WORK/cargo.log" \
+           && grep -Fq 'libhackrf not found (' "$WORK/cargo.log" \
+           && grep -Fq 'Install: apt install libhackrf-dev' "$WORK/cargo.log"; then
+            return 0
+        fi
+        grep -Fq 'error: could not compile `sdrtop` (bin "sdrtop")' "$WORK/cargo.log" \
+            && grep -Eq '(cannot find|unable to find library|library not found for) -l(hackrf|rtlsdr)(:|[[:space:]]|$)' "$WORK/cargo.log"
+    }
+
+    if ! run_cargo_install; then
+        if [ "$FROM_GIT" -eq 1 ] || ! legacy_native_failure; then
             die "the build failed; see the output above"
-        }
+        fi
+        if [ -z "$TAG" ]; then
+            # Pin Cargo's resolved release before retrying an unversioned install
+            TAG=$(sed -n 's/^error: failed to compile `sdrtop v\([0-9][0-9A-Za-z.+-]*\)`.*/\1/p' \
+                "$WORK/cargo.log" | head -1)
+            printf '%s\n' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' \
+                || die "could not identify the failed release; retry with --version"
+            src_args="--version =$TAG"
+        fi
+        [ -n "$LEGACY_DEV_PKGS" ] \
+            || die "this release needs libhackrf and librtlsdr development packages plus pkg-config; install them and retry"
+        step "Installing native development packages for $CRATE ${TAG#v}"
+        say "(this may ask for your password)"
+        if [ "$PM" = apt-get ]; then
+            as_root apt-get update -qq || warn "apt-get update failed, trying anyway"
+        fi
+        for p in $LEGACY_DEV_PKGS; do
+            pm_install "$p" || die "could not install $p; the existing installation was left unchanged"
+        done
+        say "retrying $CRATE ${TAG#v}"
+        run_cargo_install || die "the build failed; see the output above"
+    fi
 
     BINARY="$WORK/cargo/bin/sdrtop"
     [ -x "$BINARY" ] || die "cargo reported success but produced no binary"
@@ -602,5 +655,6 @@ case ":$PATH:" in
 esac
 
 say ""
+say "For a HackRF or RTL-SDR, re-run this installer with --hackrf or --rtlsdr."
 say "Run 'sdrtop'. It opens on its menu: Enter takes a layout, Space starts"
 say "receiving, Esc brings the menu back, q quits and saves."

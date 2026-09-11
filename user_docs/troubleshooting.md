@@ -56,9 +56,13 @@ sdrtop --device rtlsdr
 ```
 
 Explicit selection reports the library and candidate filename that failed.
-A missing-symbol error names the symbol too. Automatic discovery skips only
-the unavailable backend. Other installed backends remain available.
-Startup discovery diagnostics are printed to stderr before the TUI opens.
+A missing-symbol error names the symbol too.
+Errors include runtime package names.
+HackRF errors also state the libhackrf 2023.01.1+ requirement.
+Automatic discovery skips unavailable backends quietly.
+An empty automatic device list reports cached native failures in its error hint.
+Explicit native selection reports failures for that backend only.
+Explicit tinySA or SoapySDR selection produces no native-library diagnostics.
 
 1. **Install the selected runtime.** Use `sh install.sh --deps-only --hackrf`
    or `sh install.sh --deps-only --rtlsdr`. Distribution package names are in
@@ -70,8 +74,8 @@ Startup discovery diagnostics are printed to stderr before the TUI opens.
 3. **Upgrade an incompatible library.** HackRF needs libhackrf 2023.01.1+
    with `hackrf_board_rev_read`, `hackrf_usb_api_version_read` and the other
    required symbols. Firmware metadata read errors remain optional.
-4. **Restart sdrtop.** Load results are cached. Discovery logs an unavailable
-   backend once per process. Loaded handles remain open until process exit.
+4. **Restart sdrtop.** Load results are cached for the process.
+   Loaded handles remain open until process exit.
 
 ### A SoapySDR device doesn't appear
 
@@ -455,15 +459,20 @@ the fix is the same command above: `rustup update stable`.
 Current source builds need Rust 1.88+ and a C compiler/linker. They need no
 libhackrf, librtlsdr, SDR development headers or pkg-config.
 
-Check whether you selected an older release with `--version`. Those releases
-may still require both development libraries. On Debian or Ubuntu, install
-`libhackrf-dev librtlsdr-dev pkg-config` to build an older release.
+Older releases may still require both development libraries.
+The installer recognizes sdrtop's missing-libhackrf `build.rs` panic and native
+linker errors for missing `-lhackrf` or `-lrtlsdr`.
+It installs the distribution's development packages and retries the same
+release once. Unrelated build failures receive no retry.
+On Debian or Ubuntu, the packages are `libhackrf-dev librtlsdr-dev pkg-config`.
+Install these by hand if automatic package installation fails.
 
 The installer from `main` may also select an older version through the latest
 release URL. It checks downloaded binaries before installation. An old binary
 with missing libraries triggers a source build of that same release.
-Use `sh install.sh --git` to build `main` with runtime loading before the next
-release. A failed build or startup check leaves an existing installation unchanged.
+Use `sh install.sh --git` to select `main` explicitly.
+Git builds receive no legacy dependency retry.
+A failed build or startup check leaves an existing installation unchanged.
 
 For a runtime loading error, follow
 [A native backend's library is unavailable](#a-native-backends-library-is-unavailable).

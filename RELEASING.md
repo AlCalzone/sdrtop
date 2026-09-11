@@ -335,14 +335,16 @@ The release workflow requires exactly `libc.so.6`, `libgcc_s.so.1` and
 `libm.so.6` in `DT_NEEDED`. It explicitly rejects libhackrf and librtlsdr links.
 `cargo publish` retains its verification build without installing SDR libraries.
 
-`install.sh` installs native runtimes only with `--hackrf` or `--rtlsdr`.
+`install.sh` installs native runtimes for current releases only with `--hackrf` or `--rtlsdr`.
 `--soapy` selects SoapySDR and its driver modules. `--deps-only` installs only
-selected runtimes. With no runtime flags it does nothing. Source-build packages
-contain compiler/linker tools. Older releases selected by `--version` or the
-latest-release URL may still need SDR development packages installed by hand.
-Failed source builds report that requirement. A built binary must pass its startup
-check before it replaces an existing installation. `--git` selects `main` before
-the next release.
+selected runtimes. With no runtime flags it exits with a usage error.
+Source-build packages contain compiler/linker tools.
+Older releases can still need SDR development packages.
+The installer recognizes sdrtop's missing-libhackrf build-script panic and
+linker errors for missing `-lhackrf` or `-lrtlsdr`.
+Only these failures trigger development package installation and one retry.
+The retry pins the same release version. `--git` receives no legacy retry.
+A built binary must pass its startup check before it replaces an existing installation.
 
 ---
 

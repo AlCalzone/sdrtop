@@ -34,12 +34,13 @@ An incompatible architecture or libc triggers a source build through
 
 Runtime installation is opt-in. `--hackrf` adds libhackrf. `--rtlsdr` adds
 librtlsdr. `--soapy` adds SoapySDR and its driver modules. These flags can be
-combined. A plain install adds none of these libraries.
+combined. A plain install of a runtime-loading release adds none of these libraries.
 Missing or incompatible libraries disable only their respective backends.
 
-Before a runtime-loading release is published, the latest-release URL can still
-select an older version that requires native SDR development packages.
-Use `sh install.sh --git` to build `main`. See
+Older releases can require native SDR development packages.
+After a recognized native-link build failure, the installer adds those packages
+and retries the same release once. It never switches to `main`.
+Use `sh install.sh --git` to select `main` explicitly. See
 [older-release build failures](troubleshooting.md#the-build-fails-looking-for-libhackrf).
 
 Runtime package installation is best-effort. Check warnings for packages that
@@ -75,7 +76,7 @@ that list cannot drift out of date the way this page can.
 
 `--deps-only` installs only the runtimes selected by `--hackrf`, `--rtlsdr`
 and `--soapy`. It never installs sdrtop or build tools. Without a runtime flag
-it does nothing.
+it exits with a usage error.
 
 `--no-verify` earns a warning of its own. It turns off the checksum check on a
 download, which is the one thing standing between you and a tarball that isn't
@@ -91,7 +92,8 @@ Everything below is the same job done by hand.
 - **Host:** A Linux machine.
 - **Radio:** A HackRF One, RTL-SDR or a supported SoapySDR device.
 - **Source builds:** Rust 1.88+ and a C compiler/linker. Install Rust with
-  [rustup](https://rustup.rs). No SDR development headers or pkg-config are needed.
+  [rustup](https://rustup.rs). Runtime-loading releases need no SDR development
+  headers or pkg-config. Older releases can require both native development libraries.
 - **Runtime:** Install only the library for the backend you use.
 
 Build tools by distribution:

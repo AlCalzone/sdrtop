@@ -48,6 +48,7 @@ pub struct App {
     /// and never touches again - so without a copy of them there is nothing left
     /// to write back.
     pub(super) theme_config: crate::config::ThemeConfig,
+    pub(super) tinysa_config: crate::config::TinySaSettings,
 }
 
 impl App {
@@ -56,7 +57,7 @@ impl App {
         config_path: Option<PathBuf>,
         listing: &hardware::DeviceListing,
     ) -> anyhow::Result<Self> {
-        match hardware::open_device(listing) {
+        match hardware::open_device(listing, &cfg.tinysa) {
             Ok(device) => Self::new_normal(cfg, config_path, device),
             Err(open_err) => {
                 // Device is present but couldn't be opened (e.g. busy) - fall back
@@ -106,7 +107,7 @@ impl App {
                                         return Err(self.forced_option_quit_error());
                                     }
                                 } else {
-                                    self.finish_session();
+                                    self.finish_session()?;
                                     return Ok(());
                                 }
                             }
@@ -121,7 +122,7 @@ impl App {
                 AppEvent::Tick => true,
                 AppEvent::DeviceOptionComplete(completion) => {
                     if input::complete_device_option(&self.state, completion) {
-                        self.finish_session();
+                        self.finish_session()?;
                         return Ok(());
                     }
                     true
@@ -190,10 +191,10 @@ impl App {
         )
     }
 
-    fn finish_session(&self) {
+    fn finish_session(&self) -> io::Result<()> {
         self.restore_noise_sweep();
         self.restore_sweep_tuning();
-        self.save_config();
+        self.save_config().map_err(io::Error::other)
     }
 
     fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -411,12 +412,12 @@ impl App {
         let _ = device.set_frequency(hz);
     }
 
-    fn save_config(&self) {
-        if self.device.is_none() {
-            return;
-        }
+    fn save_config(&self) -> anyhow::Result<()> {
+        let Some(device) = self.device.as_ref() else {
+            return Ok(());
+        };
         let Some(path) = &self.config_path else {
-            return;
+            return Ok(());
         };
         let (freq, rate, gains, amp, wf_rows, wf_palette, spec_style, markers, sweep_cfg, recall) = {
             let m = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -465,9 +466,25 @@ impl App {
                 stop_hz: sweep_cfg.stop_hz,
                 dwell_ms: sweep_cfg.dwell_ms,
             },
+            tinysa: self.tinysa_config.clone(),
             presets: self.user_presets.clone(),
         };
-        let _ = cfg.save(path);
+        let mut candidate = cfg.clone();
+        let hook_error = device.update_config(&mut candidate).err();
+        let save_result = if hook_error.is_some() {
+            cfg.save(path)
+        } else {
+            candidate.save(path)
+        };
+        match (hook_error, save_result) {
+            (None, result) => result,
+            (Some(error), Ok(())) => Err(error.context(
+                "device settings could not be updated; previous device settings and other settings were saved",
+            )),
+            (Some(hook_error), Err(save_error)) => anyhow::bail!(
+                "failed to save config: {save_error:#}; device settings update also failed: {hook_error:#}"
+            ),
+        }
     }
 }
 
@@ -480,11 +497,19 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
 
+    #[derive(Clone, Copy)]
+    enum ConfigHook {
+        Preserve,
+        Apply,
+        FailAfterMutation,
+    }
+
     struct QuitDevice {
         caps: DeviceCapabilities,
         tuned_hz: AtomicU64,
         tune_calls: AtomicUsize,
         drops: Arc<AtomicUsize>,
+        config_hook: ConfigHook,
     }
 
     impl QuitDevice {
@@ -494,7 +519,13 @@ mod tests {
                 tuned_hz: AtomicU64::new(0),
                 tune_calls: AtomicUsize::new(0),
                 drops: Arc::new(AtomicUsize::new(0)),
+                config_hook: ConfigHook::Preserve,
             }
+        }
+
+        fn with_config_hook(mut self, config_hook: ConfigHook) -> Self {
+            self.config_hook = config_hook;
+            self
         }
     }
 
@@ -538,6 +569,20 @@ mod tests {
         fn set_lna_gain(&self, _db: u32) -> anyhow::Result<()> {
             Ok(())
         }
+
+        fn update_config(&self, config: &mut AppConfig) -> anyhow::Result<()> {
+            match self.config_hook {
+                ConfigHook::Preserve => Ok(()),
+                ConfigHook::Apply => {
+                    config.tinysa.points = 900;
+                    Ok(())
+                }
+                ConfigHook::FailAfterMutation => {
+                    config.tinysa.points = 900;
+                    anyhow::bail!("injected backend config failure")
+                }
+            }
+        }
     }
 
     fn pending_request() -> DeviceOptionRequest {
@@ -572,8 +617,10 @@ mod tests {
             NEXT_PATH.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_file(&path);
+        let mut config = AppConfig::default();
+        config.tinysa.lna = true;
         let mut app = App::assemble(
-            AppConfig::default(),
+            config,
             Some(path.clone()),
             state,
             Some(device.clone()),
@@ -611,6 +658,7 @@ mod tests {
             AppConfig::load_or_default(&path).radio.frequency_hz,
             100_000_000
         );
+        assert!(AppConfig::load_or_default(&path).tinysa.lna);
         let m = app.state.lock().unwrap();
         assert_eq!(m.device_options[0].selected_choice, "Wide");
         assert!(matches!(
@@ -624,6 +672,152 @@ mod tests {
             .is_some_and(|entry| entry.text.contains("Bandwidth set to Wide")));
         drop(m);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn successful_backend_config_hook_updates_the_saved_snapshot() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        state.lock().unwrap().radio.frequency = 144_390_000;
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::Apply),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-success-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let app = App::assemble(
+            AppConfig::default(),
+            Some(path.clone()),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+
+        app.save_config().unwrap();
+
+        let saved = AppConfig::load_or_default(&path);
+        assert_eq!(saved.radio.frequency_hz, 144_390_000);
+        assert_eq!(saved.tinysa.points, 900);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_backend_config_hook_saves_the_unmodified_backend_block() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        {
+            let mut metrics = state.lock().unwrap();
+            metrics.radio.frequency = 433_920_000;
+            metrics.spectrum.markers.push(crate::state::SpectrumMarker {
+                freq_hz: 434_500_000,
+                label: "review".into(),
+                channel_bw_hz: Some(25_000),
+                measured_bw_hz: None,
+            });
+        }
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::FailAfterMutation),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-failure-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut config = AppConfig::default();
+        config.tinysa.points = 450;
+        config.tinysa.lna = true;
+        let app =
+            App::assemble(config, Some(path.clone()), state, Some(device), None, None).unwrap();
+
+        let error = format!("{:#}", app.save_config().unwrap_err());
+
+        assert!(error.contains("device settings could not be updated"));
+        assert!(error.contains("previous device settings and other settings were saved"));
+        assert!(error.contains("injected backend config failure"));
+        let saved = AppConfig::load_or_default(&path);
+        assert_eq!(saved.radio.frequency_hz, 433_920_000);
+        assert_eq!(saved.tinysa.points, 450);
+        assert!(saved.tinysa.lna);
+        assert_eq!(saved.display.spectrum_markers.len(), 1);
+        assert_eq!(saved.display.spectrum_markers[0].freq_hz, 434_500_000);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn backend_hook_and_file_save_failures_are_both_reported() {
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let device = Arc::new(
+            QuitDevice::new(state.lock().unwrap().caps.as_ref().clone())
+                .with_config_hook(ConfigHook::FailAfterMutation),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "sdrtop-config-hook-double-failure-{}",
+            std::process::id()
+        ));
+        let blocker = root.join("not-a-directory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&blocker, b"block config parent").unwrap();
+        let app = App::assemble(
+            AppConfig::default(),
+            Some(blocker.join("config.toml")),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let error = app.save_config().unwrap_err().to_string();
+
+        assert!(error.contains("failed to save config"));
+        assert!(error.contains("device settings update also failed"));
+        assert!(error.contains("injected backend config failure"));
+        std::fs::remove_file(blocker).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_quit_reports_save_failure_and_preserves_existing_config() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "sdrtop-quit-save-failure-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let original = b"[radio]\nfrequency_hz = 123456789\n";
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(path.with_extension("tmp")).unwrap();
+
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let device = Arc::new(QuitDevice::new(state.lock().unwrap().caps.as_ref().clone()));
+        let mut app = App::assemble(
+            AppConfig::default(),
+            Some(path.clone()),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        app.events = EventStream::from_channel(tx.clone(), rx);
+        tx.send(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))))
+            .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        let error = app.run(&mut terminal).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir(path.with_extension("tmp")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

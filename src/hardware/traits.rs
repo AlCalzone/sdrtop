@@ -1131,6 +1131,11 @@ pub trait SdrDevice: Send + Sync {
         anyhow::bail!("this backend has no device options")
     }
 
+    /// Update backend-owned settings before the app saves its config snapshot.
+    fn update_config(&self, _config: &mut crate::config::AppConfig) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Set one stage by position, exactly.
     ///
     /// **One path for every backend.** The default maps position onto the two

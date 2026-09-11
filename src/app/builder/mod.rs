@@ -339,6 +339,7 @@ impl App {
             theme,
             focus_keys,
             theme_config: cfg.theme.clone(),
+            tinysa_config: cfg.tinysa.clone(),
             user_presets: cfg.presets,
         })
     }

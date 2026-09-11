@@ -4,6 +4,7 @@
 mod discovery;
 mod protocol;
 
+use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,10 +13,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
+use crate::config::TinySaSettings;
 use crate::hardware::{
-    AcquisitionKind, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceListing,
+    AcquisitionKind, DeliveryModel, DeviceCapabilities, DeviceInfo, DeviceListing, DeviceOption,
     DirectSweepConfig, GainModel, LevelUnit, PowerTrace, PowerTraceTarget, RxContext, SampleFormat,
     SampleGeometry, SdrDevice, SoftwareStack,
 };
@@ -26,6 +29,7 @@ use protocol::{Identity, Model, PROMPT};
 const MIN_FREQUENCY_HZ: u64 = 100_000;
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SPAN_HZ: u64 = 10_000_000;
+#[cfg(test)]
 const DEFAULT_POINTS: u32 = 450;
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,7 +41,8 @@ const BASIC_HIGH_MAX_HZ: u64 = 959_000_000;
 
 type UnitReply = Sender<anyhow::Result<()>>;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BasicInput {
     #[default]
     Low,
@@ -75,17 +80,8 @@ impl BasicInput {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ScanSettings {
-    points: u32,
-    rbw_khz: Option<f64>,
-    spur: SpurMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SpurMode {
-    On,
-    Auto,
+pub fn resolve_basic_input(explicit: Option<BasicInput>, configured: BasicInput) -> BasicInput {
+    explicit.unwrap_or(configured)
 }
 
 pub fn list(selector: Option<&str>) -> Vec<DeviceListing> {
@@ -140,12 +136,22 @@ pub struct TinySaDevice {
     caps: DeviceCapabilities,
     info: DeviceInfo,
     notes: Vec<String>,
+    model: Model,
+    basic_input: BasicInput,
+    options: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
     command_tx: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl TinySaDevice {
-    pub fn open(path: &Path, basic_input: BasicInput) -> anyhow::Result<Self> {
+    pub fn open(
+        path: &Path,
+        basic_input: BasicInput,
+        explicit_basic_input: Option<BasicInput>,
+        settings: &TinySaSettings,
+    ) -> anyhow::Result<Self> {
+        validate_settings_shape(settings)?;
         let port = serialport::new(path.to_string_lossy(), 115_200)
             .data_bits(DataBits::Eight)
             .stop_bits(StopBits::One)
@@ -156,9 +162,24 @@ impl TinySaDevice {
             .with_context(|| format!("failed to open tinySA at {}", path.display()))?;
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let (init_tx, init_rx) = bounded(1);
+        let options = Arc::new(Mutex::new(Vec::new()));
+        let modified_options = Arc::new(Mutex::new(HashSet::new()));
+        let worker_options = Arc::clone(&options);
+        let worker_modified_options = Arc::clone(&modified_options);
+        let settings = settings.clone();
         let worker = thread::Builder::new()
             .name("tinysa-serial".to_string())
-            .spawn(move || worker_entry(port, command_rx, init_tx, basic_input))
+            .spawn(move || {
+                worker_entry(
+                    port,
+                    command_rx,
+                    init_tx,
+                    basic_input,
+                    settings,
+                    worker_options,
+                    worker_modified_options,
+                )
+            })
             .context("failed to start tinySA serial worker")?;
         let initialized = match init_rx.recv() {
             Ok(Ok(initialized)) => initialized,
@@ -172,12 +193,17 @@ impl TinySaDevice {
             }
         };
         let caps = capabilities(initialized.identity.model, basic_input);
-        let notes = initialized
+        let mut notes = initialized
             .identity
             .hardware
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+        if let Some(note) =
+            ignored_explicit_basic_input_note(initialized.identity.model, explicit_basic_input)
+        {
+            notes.push(note);
+        }
         let info = DeviceInfo {
             board_name: initialized.identity.board.clone(),
             serial: path.display().to_string(),
@@ -191,6 +217,10 @@ impl TinySaDevice {
             caps,
             info,
             notes,
+            model: initialized.identity.model,
+            basic_input,
+            options,
+            modified_options,
             command_tx,
             worker: Mutex::new(Some(worker)),
         })
@@ -247,6 +277,42 @@ impl SdrDevice for TinySaDevice {
         self.request(|reply| Command::SetDirectSweep(config, reply))
     }
 
+    fn options(&self) -> Vec<DeviceOption> {
+        self.options
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn set_option(&self, id: &str, choice: &str) -> anyhow::Result<()> {
+        {
+            let options = self
+                .options
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            validate_option_choice(&options, id, choice)?;
+        }
+        self.request(|reply| Command::SetOption {
+            id: id.to_string(),
+            choice: choice.to_string(),
+            reply,
+        })
+    }
+
+    fn update_config(&self, config: &mut crate::config::AppConfig) -> anyhow::Result<()> {
+        config.tinysa = persisted_settings(
+            &config.tinysa,
+            &self.options(),
+            self.model,
+            self.basic_input,
+            &self
+                .modified_options
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )?;
+        Ok(())
+    }
+
     fn open_notes(&self) -> &[String] {
         &self.notes
     }
@@ -276,6 +342,11 @@ enum Command {
     SetSpan(f64, Sender<anyhow::Result<RateSet>>),
     NoOp(UnitReply),
     SetDirectSweep(Option<DirectSweepConfig>, UnitReply),
+    SetOption {
+        id: String,
+        choice: String,
+        reply: UnitReply,
+    },
     Shutdown(UnitReply),
 }
 
@@ -287,12 +358,15 @@ struct Worker {
     port: Box<dyn SerialPort>,
     command_rx: Receiver<Command>,
     identity: Identity,
-    settings: ScanSettings,
+    options: Vec<DeviceOption>,
+    option_state: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
     basic_input: BasicInput,
     center_hz: u64,
     span_hz: u64,
     direct_sweep: Option<DirectSweepConfig>,
     rx_context: Option<Arc<RxContext>>,
+    prompt_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,14 +402,20 @@ fn worker_entry(
     command_rx: Receiver<Command>,
     init_tx: Sender<anyhow::Result<Initialized>>,
     basic_input: BasicInput,
+    settings: TinySaSettings,
+    option_state: Arc<Mutex<Vec<DeviceOption>>>,
+    modified_options: Arc<Mutex<HashSet<String>>>,
 ) {
-    let (identity, settings) = match initialize(&mut *port, basic_input) {
+    let (identity, options) = match initialize(&mut *port, basic_input, &settings) {
         Ok(value) => value,
         Err(error) => {
             let _ = init_tx.send(Err(error));
             return;
         }
     };
+    *option_state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = options.clone();
     if init_tx
         .send(Ok(Initialized {
             identity: identity.clone(),
@@ -349,12 +429,15 @@ fn worker_entry(
         port,
         command_rx,
         identity,
-        settings,
+        options,
+        option_state,
+        modified_options,
+        basic_input,
         center_hz,
         span_hz: DEFAULT_SPAN_HZ,
-        basic_input,
         direct_sweep: None,
         rx_context: None,
+        prompt_ready: true,
     }
     .run();
 }
@@ -404,10 +487,7 @@ impl Worker {
                                     .unwrap_or(0),
                                 frequencies_hz,
                                 levels_dbm,
-                                rbw_hz: self
-                                    .settings
-                                    .rbw_khz
-                                    .map(|khz| (khz * 1_000.0).round() as u32),
+                                rbw_hz: current_rbw_hz(&self.options),
                             })
                             .is_ok();
                         if published && target == PowerTraceTarget::Spectrum {
@@ -426,6 +506,7 @@ impl Worker {
                 Ok(ScanResult::Interrupted(command, abort_result)) => {
                     if let Err(error) = abort_result {
                         let message = error.to_string();
+                        self.prompt_ready = false;
                         self.stop_acquisition(&message);
                         reject_command(command, anyhow!(message));
                         return;
@@ -436,6 +517,7 @@ impl Worker {
                 }
                 Err(error) => {
                     best_effort_abort(&mut *self.port);
+                    self.prompt_ready = false;
                     self.stop_acquisition(&error.to_string());
                     return;
                 }
@@ -455,7 +537,11 @@ impl Worker {
     fn handle_command(&mut self, command: Command) -> bool {
         match command {
             Command::Start(context, reply) => {
-                let result = if self.rx_context.is_some() {
+                let result = if !self.prompt_ready {
+                    Err(anyhow!(
+                        "tinySA serial state is unknown; restart sdrtop, reconnecting the analyzer first if needed"
+                    ))
+                } else if self.rx_context.is_some() {
                     Err(anyhow!("tinySA acquisition is already running"))
                 } else {
                     self.rx_context = Some(context);
@@ -478,16 +564,15 @@ impl Worker {
             Command::SetSpan(hz, reply) => {
                 let (minimum, maximum) = frequency_range(self.identity.model, self.basic_input);
                 let maximum = maximum - minimum;
-                let result = normalize_span(hz, maximum, self.settings.points).map(|span_hz| {
-                    self.span_hz = span_hz;
-                    RateSet::new(
-                        hz,
-                        Some(self.span_hz as f64),
-                        self.settings
-                            .rbw_khz
-                            .map(|khz| (khz * 1_000.0).round() as u32)
-                            .unwrap_or(0),
-                    )
+                let result = selected_points(&self.options).and_then(|points| {
+                    normalize_span(hz, maximum, points).map(|span_hz| {
+                        self.span_hz = span_hz;
+                        RateSet::new(
+                            hz,
+                            Some(self.span_hz as f64),
+                            current_rbw_hz(&self.options).unwrap_or(0),
+                        )
+                    })
                 });
                 let _ = reply.send(result);
             }
@@ -495,8 +580,16 @@ impl Worker {
                 let _ = reply.send(Ok(()));
             }
             Command::SetDirectSweep(config, reply) => {
-                let result = validate_direct_sweep(config, self.identity.model, self.basic_input)
-                    .map(|()| self.direct_sweep = config);
+                let result = selected_points(&self.options).and_then(|points| {
+                    validate_direct_sweep(config, self.identity.model, self.basic_input, points)
+                        .map(|()| {
+                            self.direct_sweep = config;
+                        })
+                });
+                let _ = reply.send(result);
+            }
+            Command::SetOption { id, choice, reply } => {
+                let result = self.apply_option(&id, &choice);
                 let _ = reply.send(result);
             }
             Command::Shutdown(reply) => {
@@ -519,6 +612,46 @@ impl Worker {
         }
     }
 
+    fn apply_option(&mut self, id: &str, choice: &str) -> anyhow::Result<()> {
+        if !self.prompt_ready {
+            bail!(
+                "tinySA serial state is unknown; restart sdrtop, reconnecting the analyzer first if needed"
+            );
+        }
+        let prepared = prepare_option_update(
+            &self.options,
+            self.identity.model,
+            id,
+            choice,
+            self.span_hz,
+            self.direct_sweep,
+        )?;
+        if let Err(error) =
+            execute_option_update(&mut self.options, prepared, id, choice, |command| {
+                send_setter_command(&mut *self.port, command)
+            })
+        {
+            self.stop_acquisition(&error.to_string());
+            let recovery = recover_option_state(
+                &mut *self.port,
+                self.identity.model,
+                self.basic_input,
+                &self.options,
+            );
+            self.prompt_ready = recovery.is_ok();
+            return Err(option_update_failure(error, recovery));
+        }
+        self.modified_options
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string());
+        *self
+            .option_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self.options.clone();
+        Ok(())
+    }
+
     fn scan_once(&mut self) -> anyhow::Result<ScanResult> {
         let (minimum_hz, maximum_hz) = frequency_range(self.identity.model, self.basic_input);
         let (start_hz, stop_hz) = self
@@ -527,7 +660,7 @@ impl Worker {
             .unwrap_or_else(|| {
                 centered_window(self.center_hz, self.span_hz, minimum_hz, maximum_hz)
             });
-        let points = self.settings.points;
+        let points = selected_points(&self.options)?;
         let scan_span_hz = stop_hz - start_hz;
         if scan_span_hz < points as u64 {
             bail!("tinySA scan span is too narrow for {points} points");
@@ -540,7 +673,7 @@ impl Worker {
             points,
         };
         let inactivity_timeout =
-            scan_inactivity_timeout(segment, self.identity.model, self.settings)?;
+            scan_inactivity_timeout(segment, self.identity.model, &self.options)?;
         match scan_segment(
             &mut *self.port,
             &self.command_rx,
@@ -574,10 +707,25 @@ impl Worker {
     }
 }
 
+fn option_update_failure(
+    setter_error: anyhow::Error,
+    recovery: anyhow::Result<()>,
+) -> anyhow::Error {
+    match recovery {
+        Ok(()) => anyhow!(
+            "{setter_error:#}; previous accepted tinySA controls were restored and acquisition was stopped"
+        ),
+        Err(recovery_error) => anyhow!(
+            "{setter_error:#}; acquisition was stopped; failed to restore tinySA controls: {recovery_error:#}"
+        ),
+    }
+}
+
 fn initialize(
     port: &mut dyn SerialPort,
     basic_input: BasicInput,
-) -> anyhow::Result<(Identity, ScanSettings)> {
+    settings: &TinySaSettings,
+) -> anyhow::Result<(Identity, Vec<DeviceOption>)> {
     best_effort_abort(port);
     drain_startup(port)?;
     let mut last_error = None;
@@ -599,26 +747,21 @@ fn initialize(
     }
     let version = version
         .ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("tinySA version probe failed")))?;
-    send_text_command(port, "output off")?;
+    send_setter_command(port, "output off")?;
     let info = send_text_command(port, "info")?;
     let help = send_text_command(port, "help")?;
     let zero = send_text_command(port, "zero")?;
     let identity = protocol::parse_identity(&version, &info, &help, &zero)?;
-    if identity.model.is_ultra() && basic_input == BasicInput::High {
-        bail!("tinySA HIGH input selection applies only to the basic model");
+    let (options, saved_commands) = startup_options(identity.model, basic_input, settings)?;
+    send_setter_command(port, input_mode_command(identity.model, basic_input))?;
+    send_setter_command(port, "abort on")?;
+    for command in baseline_commands(identity.model, basic_input) {
+        send_setter_command(port, &command)?;
     }
-    send_text_command(port, "abort on")?;
-    send_text_command(port, input_mode_command(identity.model, basic_input))?;
-    let (settings, _) = startup_settings(identity.model);
-    apply_scan_settings(port, identity.model)?;
-    Ok((identity, settings))
-}
-
-fn apply_scan_settings(port: &mut dyn SerialPort, model: Model) -> anyhow::Result<()> {
-    for command in startup_settings(model).1 {
-        send_text_command(port, command)?;
+    for command in saved_commands {
+        send_setter_command(port, &command)?;
     }
-    Ok(())
+    Ok((identity, options))
 }
 
 fn best_effort_abort(port: &mut dyn SerialPort) {
@@ -634,6 +777,20 @@ fn input_mode_command(model: Model, basic_input: BasicInput) -> &'static str {
     }
 }
 
+fn ignored_explicit_basic_input_note(
+    model: Model,
+    explicit_basic_input: Option<BasicInput>,
+) -> Option<String> {
+    explicit_basic_input.and_then(|input| {
+        model.is_ultra().then(|| {
+            format!(
+                "tinySA Ultra uses automatic input selection; explicit Basic {} input selection was ignored",
+                input.label()
+            )
+        })
+    })
+}
+
 fn send_text_command(port: &mut dyn SerialPort, command: &str) -> anyhow::Result<Vec<u8>> {
     port.write_all(command.as_bytes())
         .with_context(|| format!("failed to write tinySA {command} command"))?;
@@ -643,6 +800,11 @@ fn send_text_command(port: &mut dyn SerialPort, command: &str) -> anyhow::Result
         .with_context(|| format!("failed to flush tinySA {command} command"))?;
     let frame = read_until_prompt(port, RESPONSE_TIMEOUT)?;
     protocol::parse_text_frame(&frame, command)
+}
+
+fn send_setter_command(port: &mut dyn SerialPort, command: &str) -> anyhow::Result<()> {
+    let body = send_text_command(port, command)?;
+    protocol::validate_setter_body(&body, command)
 }
 
 fn read_until_prompt(
@@ -951,6 +1113,7 @@ fn reject_command(command: Command, error: anyhow::Error) {
         | Command::SetFrequency(_, reply)
         | Command::NoOp(reply)
         | Command::SetDirectSweep(_, reply)
+        | Command::SetOption { reply, .. }
         | Command::Shutdown(reply) => {
             let _ = reply.send(Err(anyhow!(message)));
         }
@@ -967,6 +1130,7 @@ fn validate_direct_sweep(
     config: Option<DirectSweepConfig>,
     model: Model,
     basic_input: BasicInput,
+    points: u32,
 ) -> anyhow::Result<()> {
     let Some(config) = config else {
         return Ok(());
@@ -982,6 +1146,9 @@ fn validate_direct_sweep(
             maximum_hz
         );
     }
+    if config.stop_hz - config.start_hz < points as u64 {
+        bail!("tinySA sweep span is too narrow for {points} points");
+    }
     Ok(())
 }
 
@@ -996,7 +1163,7 @@ fn capabilities(model: Model, basic_input: BasicInput) -> DeviceCapabilities {
         trace_stale_ms: 5_000,
         freq_min_hz: minimum_hz,
         freq_max_hz: maximum_hz,
-        sample_rate_min_hz: DEFAULT_POINTS as f64,
+        sample_rate_min_hz: allowed_points()[0] as f64,
         sample_rate_max_hz: (maximum_hz - minimum_hz) as f64,
         default_frequency_hz: default_frequency(model, basic_input),
         default_sample_rate_hz: DEFAULT_SPAN_HZ as f64,
@@ -1108,51 +1275,509 @@ fn trace_frequencies(measured_hz: Vec<u64>, target: PowerTraceTarget) -> anyhow:
     }
 }
 
-fn startup_settings(model: Model) -> (ScanSettings, Vec<&'static str>) {
-    let spur = if model.is_ultra() {
-        SpurMode::Auto
+fn validate_settings_shape(settings: &TinySaSettings) -> anyhow::Result<()> {
+    if !allowed_points().contains(&settings.points) {
+        bail!(
+            "[tinysa].points has invalid value {}; allowed values: 64, 128, 290, 450, 900, 1800",
+            settings.points
+        );
+    }
+    if !(-100..=100).contains(&settings.ext_gain_db) {
+        bail!(
+            "[tinysa].ext_gain_db has invalid value {}; allowed range: -100..=100 dB",
+            settings.ext_gain_db
+        );
+    }
+    Ok(())
+}
+
+fn persisted_settings(
+    loaded: &TinySaSettings,
+    options: &[DeviceOption],
+    model: Model,
+    basic_input: BasicInput,
+    modified_options: &HashSet<String>,
+) -> anyhow::Result<TinySaSettings> {
+    let mut settings = loaded.clone();
+    for option in options {
+        let value = option.selected_choice.as_str();
+        validate_option_choice(options, &option.id, value)?;
+        if model == Model::Basic
+            && matches!(option.id.as_str(), "rbw" | "spur")
+            && !modified_options.contains(&option.id)
+        {
+            continue;
+        }
+        match option.id.as_str() {
+            "points" => {
+                settings.points = value.parse().context("tinySA point setting is invalid")?;
+            }
+            "rbw" => settings.rbw = value.to_string(),
+            "attenuation" => settings.attenuation = value.to_string(),
+            "high_attenuation" => {
+                settings.high_attenuation = match value {
+                    "off" => false,
+                    "on" => true,
+                    _ => bail!("tinySA HIGH attenuation setting is invalid"),
+                };
+            }
+            "lna" => {
+                settings.lna = match value {
+                    "off" => false,
+                    "on" => true,
+                    _ => bail!("tinySA LNA setting is invalid"),
+                };
+            }
+            "spur" => settings.spur = value.to_string(),
+            "ext_gain" => {
+                settings.ext_gain_db = value
+                    .parse()
+                    .context("tinySA external gain setting is invalid")?;
+            }
+            id => bail!("unknown tinySA option {id}"),
+        }
+    }
+    if model == Model::Basic {
+        settings.basic_input = basic_input;
+    }
+    validate_settings_shape(&settings)?;
+    Ok(settings)
+}
+
+fn startup_options(
+    model: Model,
+    basic_input: BasicInput,
+    settings: &TinySaSettings,
+) -> anyhow::Result<(Vec<DeviceOption>, Vec<String>)> {
+    validate_settings_shape(settings)?;
+    let mut options = option_definitions(model, basic_input);
+    let rbw = if model == Model::Basic && matches!(settings.rbw.as_str(), "0.2" | "1" | "850") {
+        "auto"
     } else {
-        SpurMode::On
+        &settings.rbw
     };
-    let mut commands = Vec::new();
-    if model.is_ultra() {
-        commands.extend(["ultra on", "ultra auto"]);
-    }
-    commands.extend(["rbw auto", "attenuate auto"]);
-    if model.is_ultra() {
-        commands.extend(["lna off", "lna2 auto", "agc auto", "spur auto"]);
+    let spur = if model == Model::Basic && settings.spur == "auto" {
+        "on"
     } else {
-        commands.push("spur on");
+        &settings.spur
+    };
+
+    let mut values = vec![
+        ("points", settings.points.to_string()),
+        ("rbw", rbw.to_string()),
+    ];
+    if model == Model::Basic && basic_input == BasicInput::High {
+        values.push((
+            "high_attenuation",
+            if settings.high_attenuation {
+                "on"
+            } else {
+                "off"
+            }
+            .to_string(),
+        ));
+    } else {
+        let attenuation = if model.is_ultra() && settings.lna {
+            "0"
+        } else {
+            &settings.attenuation
+        };
+        values.push(("attenuation", attenuation.to_string()));
     }
-    (
-        ScanSettings {
-            points: DEFAULT_POINTS,
-            rbw_khz: None,
-            spur,
+    if model.is_ultra() {
+        values.push(("lna", if settings.lna { "on" } else { "off" }.to_string()));
+    }
+    values.extend([
+        ("spur", spur.to_string()),
+        ("ext_gain", settings.ext_gain_db.to_string()),
+    ]);
+
+    let mut commands = Vec::new();
+    for (id, choice) in values {
+        let option_index = validate_setting_choice(&options, id, &choice)?;
+        commands.extend(option_commands(model, &options, id, &choice)?);
+        options[option_index].selected_choice = choice;
+    }
+    Ok((options, commands))
+}
+
+fn baseline_commands(model: Model, basic_input: BasicInput) -> Vec<String> {
+    if model.is_ultra() {
+        strings(&[
+            "ultra on",
+            "ultra auto",
+            "rbw auto",
+            "lna off",
+            "attenuate auto",
+            "spur auto",
+            "ext_gain 0",
+        ])
+    } else if basic_input == BasicInput::High {
+        let mut commands = vec!["rbw auto".to_string()];
+        commands.extend(high_attenuation_commands("off"));
+        commands.extend(strings(&["spur on", "ext_gain 0"]));
+        commands
+    } else {
+        strings(&["rbw auto", "attenuate auto", "spur on", "ext_gain 0"])
+    }
+}
+
+fn option_definitions(model: Model, basic_input: BasicInput) -> Vec<DeviceOption> {
+    let mut options = vec![
+        option(
+            "points",
+            "Points",
+            allowed_points().map(|value| value.to_string()).to_vec(),
+        ),
+        option(
+            "rbw",
+            "RBW (kHz)",
+            if model.is_ultra() {
+                strings(&[
+                    "auto", "0.2", "1", "3", "10", "30", "100", "300", "600", "850",
+                ])
+            } else {
+                strings(&["auto", "3", "10", "30", "100", "300", "600"])
+            },
+        ),
+    ];
+    if model == Model::Basic && basic_input == BasicInput::High {
+        options.push(option(
+            "high_attenuation",
+            "Coarse attenuation",
+            strings(&["off", "on"]),
+        ));
+    } else {
+        options.push(integer_option(
+            "attenuation",
+            "Attenuation (dB)",
+            std::iter::once("auto".to_string())
+                .chain((0..=31).map(|value| value.to_string()))
+                .collect(),
+            0..=31,
+        ));
+    }
+    if model.is_ultra() {
+        options.push(option("lna", "LNA", strings(&["off", "on"])));
+    }
+    options.push(option(
+        "spur",
+        "Spur removal",
+        if model.is_ultra() {
+            strings(&["off", "on", "auto"])
+        } else {
+            strings(&["off", "on"])
         },
+    ));
+    options.push(integer_option(
+        "ext_gain",
+        "External gain (dB)",
+        (-100..=100).map(|value| value.to_string()).collect(),
+        -100..=100,
+    ));
+    options
+}
+
+fn option(id: &str, label: &str, choices: Vec<String>) -> DeviceOption {
+    DeviceOption {
+        id: id.to_string(),
+        label: label.to_string(),
+        selected_choice: choices.first().cloned().unwrap_or_default(),
+        choices,
+        integer_range: None,
+    }
+}
+
+fn integer_option(
+    id: &str,
+    label: &str,
+    choices: Vec<String>,
+    range: std::ops::RangeInclusive<i32>,
+) -> DeviceOption {
+    DeviceOption {
+        integer_range: Some(range),
+        ..option(id, label, choices)
+    }
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+fn allowed_points() -> [u32; 6] {
+    [64, 128, 290, 450, 900, 1800]
+}
+
+fn validate_option_choice(
+    options: &[DeviceOption],
+    id: &str,
+    choice: &str,
+) -> anyhow::Result<usize> {
+    let option_index = options
+        .iter()
+        .position(|option| option.id == id)
+        .with_context(|| format!("unknown tinySA option {id}"))?;
+    if !options[option_index]
+        .choices
+        .iter()
+        .any(|candidate| candidate == choice)
+    {
+        bail!("invalid choice {choice:?} for tinySA option {id}");
+    }
+    Ok(option_index)
+}
+
+fn validate_setting_choice(
+    options: &[DeviceOption],
+    id: &str,
+    choice: &str,
+) -> anyhow::Result<usize> {
+    let option_index = options
+        .iter()
+        .position(|option| option.id == id)
+        .with_context(|| format!("unknown tinySA option {id}"))?;
+    if options[option_index]
+        .choices
+        .iter()
+        .any(|candidate| candidate == choice)
+    {
+        return Ok(option_index);
+    }
+    let key = match id {
+        "ext_gain" => "ext_gain_db",
+        other => other,
+    };
+    let allowed = match id {
+        "ext_gain" => "-100..=100".to_string(),
+        "attenuation" => "auto or 0..=31".to_string(),
+        _ => options[option_index].choices.join(", "),
+    };
+    bail!("[tinysa].{key} has invalid value {choice:?}; allowed values: {allowed}");
+}
+
+fn selected_option_value<'a>(options: &'a [DeviceOption], id: &str) -> Option<&'a str> {
+    options
+        .iter()
+        .find(|option| option.id == id)
+        .map(|option| option.selected_choice.as_str())
+}
+
+fn set_selected_option(options: &mut [DeviceOption], id: &str, choice: &str) -> anyhow::Result<()> {
+    let option_index = validate_option_choice(options, id, choice)?;
+    options[option_index].selected_choice = choice.to_string();
+    Ok(())
+}
+
+fn option_commands(
+    model: Model,
+    options: &[DeviceOption],
+    id: &str,
+    choice: &str,
+) -> anyhow::Result<Vec<String>> {
+    validate_option_choice(options, id, choice)?;
+    let commands = match id {
+        "points" => Vec::new(),
+        "rbw" => vec![format!("rbw {choice}")],
+        "attenuation" => manual_attenuation_commands(choice),
+        "high_attenuation" => high_attenuation_commands(choice),
+        "lna" if model.is_ultra() => vec![format!("lna {choice}")],
+        "spur" => vec![format!("spur {choice}")],
+        "ext_gain" => vec![format!("ext_gain {choice}")],
+        _ => bail!("unknown tinySA option {id}"),
+    };
+    Ok(commands)
+}
+
+fn manual_attenuation_commands(choice: &str) -> Vec<String> {
+    if choice == "auto" {
+        return vec!["attenuate auto".to_string()];
+    }
+    let target: u8 = choice
+        .parse()
+        .expect("validated tinySA attenuation choice must be numeric");
+    // Use a high attenuation transition because firmware ignores an equal numeric value
+    let transition = if target == 31 { 30 } else { 31 };
+    vec![
+        format!("attenuate {transition}"),
+        format!("attenuate {target}"),
+    ]
+}
+
+fn high_attenuation_commands(choice: &str) -> Vec<String> {
+    let mut commands = vec!["attenuate 1".to_string(), "attenuate 0".to_string()];
+    if choice == "on" {
+        commands.push("attenuate 1".to_string());
+    }
+    commands
+}
+
+struct PreparedOption {
+    option_index: usize,
+    commands: Vec<String>,
+}
+
+fn prepare_option_update(
+    options: &[DeviceOption],
+    model: Model,
+    id: &str,
+    choice: &str,
+    span_hz: u64,
+    direct_sweep: Option<DirectSweepConfig>,
+) -> anyhow::Result<PreparedOption> {
+    let option_index = validate_option_choice(options, id, choice)?;
+    if id == "attenuation" && choice != "0" && selected_option_value(options, "lna") == Some("on") {
+        bail!("turn the tinySA LNA off before changing attenuation");
+    }
+    if id == "points" {
+        let points: u32 = choice.parse().context("tinySA point setting is invalid")?;
+        if span_hz < points as u64 {
+            bail!("tinySA span is too narrow for {points} points");
+        }
+        if direct_sweep.is_some_and(|config| config.stop_hz - config.start_hz < points as u64) {
+            bail!("tinySA sweep span is too narrow for {points} points");
+        }
+    }
+    let lna_is_on = selected_option_value(options, "lna") == Some("on");
+    let mut commands = Vec::new();
+    if id == "lna" && choice == "on" {
+        commands.extend(manual_attenuation_commands("0"));
+    }
+    if id == "attenuation" && lna_is_on {
+        commands.push("lna off".to_string());
+        commands.extend(option_commands(model, options, id, choice)?);
+        commands.push("lna on".to_string());
+    } else {
+        commands.extend(option_commands(model, options, id, choice)?);
+    }
+    Ok(PreparedOption {
+        option_index,
         commands,
-    )
+    })
+}
+
+fn commit_option_update(
+    options: &mut [DeviceOption],
+    option_index: usize,
+    id: &str,
+    choice: &str,
+) -> anyhow::Result<()> {
+    options[option_index].selected_choice = choice.to_string();
+    if id == "lna" && choice == "on" {
+        set_selected_option(options, "attenuation", "0")?;
+    }
+    Ok(())
+}
+
+fn execute_option_update(
+    options: &mut [DeviceOption],
+    prepared: PreparedOption,
+    id: &str,
+    choice: &str,
+    mut send: impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    for command in &prepared.commands {
+        send(command)?;
+    }
+    commit_option_update(options, prepared.option_index, id, choice)
+}
+
+fn selected_points(options: &[DeviceOption]) -> anyhow::Result<u32> {
+    selected_option_value(options, "points")
+        .context("tinySA point setting is missing")?
+        .parse()
+        .context("tinySA point setting is invalid")
+}
+
+fn current_rbw_hz(options: &[DeviceOption]) -> Option<u32> {
+    let value = selected_option_value(options, "rbw")?;
+    if value == "auto" {
+        return None;
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .map(|khz| (khz * 1_000.0).round() as u32)
+}
+
+fn basic_option_commands(options: &[DeviceOption]) -> anyhow::Result<Vec<String>> {
+    let mut commands = Vec::new();
+    let attenuation_id = if options.iter().any(|option| option.id == "high_attenuation") {
+        "high_attenuation"
+    } else {
+        "attenuation"
+    };
+    for id in ["rbw", attenuation_id, "spur", "ext_gain"] {
+        let choice = selected_option_value(options, id)
+            .with_context(|| format!("tinySA {id} is missing"))?;
+        commands.extend(option_commands(Model::Basic, options, id, choice)?);
+    }
+    Ok(commands)
+}
+
+fn restore_option_commands(model: Model, options: &[DeviceOption]) -> anyhow::Result<Vec<String>> {
+    if !model.is_ultra() {
+        return basic_option_commands(options);
+    }
+
+    let mut commands = vec!["lna off".to_string()];
+    for id in ["rbw", "attenuation"] {
+        let choice = selected_option_value(options, id)
+            .with_context(|| format!("tinySA {id} is missing"))?;
+        commands.extend(option_commands(model, options, id, choice)?);
+    }
+    if selected_option_value(options, "lna") == Some("on") {
+        commands.push("lna on".to_string());
+    }
+    for id in ["spur", "ext_gain"] {
+        let choice = selected_option_value(options, id)
+            .with_context(|| format!("tinySA {id} is missing"))?;
+        commands.extend(option_commands(model, options, id, choice)?);
+    }
+    Ok(commands)
+}
+
+fn recover_option_state(
+    port: &mut dyn SerialPort,
+    model: Model,
+    basic_input: BasicInput,
+    options: &[DeviceOption],
+) -> anyhow::Result<()> {
+    best_effort_abort(port);
+    drain_startup(port)?;
+    send_setter_command(port, input_mode_command(model, basic_input))?;
+    send_setter_command(port, "abort on")?;
+    for command in baseline_commands(model, basic_input) {
+        send_setter_command(port, &command)?;
+    }
+    for command in restore_option_commands(model, options)? {
+        send_setter_command(port, &command)?;
+    }
+    Ok(())
 }
 
 fn scan_inactivity_timeout(
     segment: Segment,
     model: Model,
-    settings: ScanSettings,
+    options: &[DeviceOption],
 ) -> anyhow::Result<Duration> {
+    let rbw_setting = selected_option_value(options, "rbw").context("tinySA RBW is missing")?;
     let span_hz = segment.stop_hz.saturating_sub(segment.start_hz) as f64;
     let (minimum_rbw, maximum_rbw) = if model.is_ultra() {
         (0.2, 850.0)
     } else {
         (3.0, 600.0)
     };
-    let rbw_khz = settings
-        .rbw_khz
-        .unwrap_or_else(|| (span_hz * 7e-6).clamp(minimum_rbw, maximum_rbw));
+    let rbw_khz = if rbw_setting == "auto" {
+        (span_hz * 7e-6).clamp(minimum_rbw, maximum_rbw)
+    } else {
+        rbw_setting
+            .parse::<f64>()
+            .context("tinySA RBW setting is invalid")?
+    };
     let points = segment.points.max(1) as f64;
     let mut total_seconds = (span_hz / 20_000.0) / rbw_khz.powi(2) + points / 500.0;
-    if (settings.spur == SpurMode::On && segment.stop_hz > 800_000_000)
-        || settings.spur == SpurMode::Auto
-    {
+    let spur = selected_option_value(options, "spur").context("tinySA spur setting is missing")?;
+    if (spur == "on" && segment.stop_hz > 800_000_000) || spur == "auto" {
         total_seconds *= 2.0;
     }
     let block_seconds = total_seconds * 20.0 / points + 1.0;
@@ -1241,6 +1866,69 @@ mod tests {
         ReadStep::Bytes(value.iter().copied().collect())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unknown_serial_state_rejects_start_and_options_without_device_writes() {
+        let (worker_port, peer_port) = serialport::TTYPort::pair().unwrap();
+        let (_command_tx, command_rx) = crossbeam_channel::unbounded();
+        let options = option_definitions(Model::Basic, BasicInput::Low);
+        let mut worker = Worker {
+            port: Box::new(worker_port),
+            command_rx,
+            identity: Identity {
+                firmware: "test".into(),
+                hardware: None,
+                board: "test".into(),
+                zero_dbm: 0,
+                model: Model::Basic,
+            },
+            option_state: Arc::new(Mutex::new(options.clone())),
+            modified_options: Arc::new(Mutex::new(HashSet::new())),
+            options,
+            basic_input: BasicInput::Low,
+            center_hz: default_frequency(Model::Basic, BasicInput::Low),
+            span_hz: DEFAULT_SPAN_HZ,
+            direct_sweep: None,
+            rx_context: None,
+            prompt_ready: false,
+        };
+        let state = Arc::new(Mutex::new(crate::state::SdrMetrics::fixture()));
+        let (sample_tx, _) = crossbeam_channel::bounded(1);
+        let (demod_tx, _) = crossbeam_channel::bounded(1);
+        let (net_tx, _) = crossbeam_channel::bounded(1);
+        let (power_tx, _) = crossbeam_channel::bounded(1);
+        let context = Arc::new(RxContext {
+            metrics: state,
+            sample_tx,
+            fft_feed: crate::hardware::FeedHealth::default(),
+            demod_tx,
+            net_tx,
+            net_feed: crate::hardware::FeedHealth::default(),
+            power_tx,
+            geometry: capabilities(Model::Basic, BasicInput::Low).sample_geometry,
+        });
+
+        let (start_tx, start_rx) = bounded(1);
+        assert!(worker.handle_command(Command::Start(context, start_tx)));
+        let start_error = start_rx.recv().unwrap().unwrap_err().to_string();
+        assert!(start_error.contains("restart sdrtop"));
+        assert!(worker.rx_context.is_none());
+
+        let (option_tx, option_rx) = bounded(1);
+        assert!(worker.handle_command(Command::SetOption {
+            id: "spur".into(),
+            choice: "off".into(),
+            reply: option_tx,
+        }));
+        let option_error = option_rx.recv().unwrap().unwrap_err().to_string();
+        assert!(option_error.contains("restart sdrtop"));
+        assert_eq!(peer_port.bytes_to_read().unwrap(), 0);
+
+        let (shutdown_tx, shutdown_rx) = bounded(1);
+        assert!(!worker.handle_command(Command::Shutdown(shutdown_tx)));
+        shutdown_rx.recv().unwrap().unwrap();
+    }
+
     #[test]
     fn cancellation_waits_for_the_delayed_frame_close_before_the_next_request() {
         let mut peer = ScriptedPeer::new([
@@ -1302,26 +1990,669 @@ mod tests {
     }
 
     #[test]
-    fn startup_uses_safe_automatic_controls() {
-        let (ultra, commands) = startup_settings(Model::Zs407);
-        assert_eq!(ultra.points, DEFAULT_POINTS);
-        assert_eq!(ultra.rbw_khz, None);
+    fn option_definitions_match_each_model() {
+        let basic = option_definitions(Model::Basic, BasicInput::Low);
         assert_eq!(
-            commands,
+            basic
+                .iter()
+                .find(|option| option.id == "points")
+                .unwrap()
+                .choices,
+            ["64", "128", "290", "450", "900", "1800"]
+        );
+        assert_eq!(
+            basic
+                .iter()
+                .find(|option| option.id == "rbw")
+                .unwrap()
+                .choices,
+            ["auto", "3", "10", "30", "100", "300", "600"]
+        );
+        let low_attenuation = basic
+            .iter()
+            .find(|option| option.id == "attenuation")
+            .unwrap();
+        assert_eq!(low_attenuation.label, "Attenuation (dB)");
+        assert_eq!(low_attenuation.choices.first().unwrap(), "auto");
+        assert_eq!(low_attenuation.choices.last().unwrap(), "31");
+        assert_eq!(low_attenuation.integer_range, Some(0..=31));
+        assert!(basic
+            .iter()
+            .filter(|option| option.id != "attenuation" && option.id != "ext_gain")
+            .all(|option| option.integer_range.is_none()));
+        assert!(!basic.iter().any(|option| option.id == "lna"));
+        assert_eq!(
+            basic
+                .iter()
+                .find(|option| option.id == "spur")
+                .unwrap()
+                .choices,
+            ["off", "on"]
+        );
+
+        let high = option_definitions(Model::Basic, BasicInput::High);
+        let high_attenuation = high
+            .iter()
+            .find(|option| option.id == "high_attenuation")
+            .unwrap();
+        assert_eq!(high_attenuation.label, "Coarse attenuation");
+        assert_eq!(high_attenuation.choices, ["off", "on"]);
+        assert!(high_attenuation.integer_range.is_none());
+        assert!(!high.iter().any(|option| option.id == "attenuation"));
+
+        let ultra = option_definitions(Model::Zs407, BasicInput::Low);
+        assert_eq!(
+            ultra
+                .iter()
+                .find(|option| option.id == "rbw")
+                .unwrap()
+                .choices,
+            ["auto", "0.2", "1", "3", "10", "30", "100", "300", "600", "850"]
+        );
+        assert!(ultra.iter().any(|option| option.id == "lna"));
+        assert!(!ultra.iter().any(|option| option.id == "lna2"));
+        assert!(!ultra.iter().any(|option| option.id == "agc"));
+        let external_gain = ultra.iter().find(|option| option.id == "ext_gain").unwrap();
+        assert_eq!(external_gain.choices.len(), 201);
+        assert_eq!(external_gain.integer_range, Some(-100..=100));
+    }
+
+    #[test]
+    fn startup_sets_a_safe_baseline_before_saved_values() {
+        assert_eq!(
+            baseline_commands(Model::Zs407, BasicInput::Low),
             [
                 "ultra on",
                 "ultra auto",
                 "rbw auto",
-                "attenuate auto",
                 "lna off",
-                "lna2 auto",
-                "agc auto",
+                "attenuate auto",
                 "spur auto",
+                "ext_gain 0",
             ]
         );
-        let (basic, commands) = startup_settings(Model::Basic);
-        assert_eq!(basic.spur, SpurMode::On);
-        assert_eq!(commands, ["rbw auto", "attenuate auto", "spur on"]);
+        assert_eq!(
+            baseline_commands(Model::Basic, BasicInput::Low),
+            ["rbw auto", "attenuate auto", "spur on", "ext_gain 0"]
+        );
+        assert_eq!(
+            baseline_commands(Model::Basic, BasicInput::High),
+            [
+                "rbw auto",
+                "attenuate 1",
+                "attenuate 0",
+                "spur on",
+                "ext_gain 0",
+            ]
+        );
+
+        let settings = TinySaSettings {
+            basic_input: BasicInput::Low,
+            points: 900,
+            rbw: "0.2".into(),
+            attenuation: "12".into(),
+            high_attenuation: false,
+            lna: true,
+            spur: "off".into(),
+            ext_gain_db: -7,
+        };
+        let (options, commands) =
+            startup_options(Model::Zs407, BasicInput::Low, &settings).unwrap();
+        assert_eq!(
+            commands,
+            [
+                "rbw 0.2",
+                "attenuate 31",
+                "attenuate 0",
+                "lna on",
+                "spur off",
+                "ext_gain -7",
+            ]
+        );
+        assert_eq!(selected_points(&options).unwrap(), 900);
+        assert_eq!(selected_option_value(&options, "attenuation"), Some("0"));
+        assert_eq!(selected_option_value(&options, "lna"), Some("on"));
+    }
+
+    #[test]
+    fn basic_saved_values_normalize_only_documented_choices() {
+        for rbw in ["0.2", "1", "850"] {
+            let settings = TinySaSettings {
+                rbw: rbw.into(),
+                spur: "auto".into(),
+                ..TinySaSettings::default()
+            };
+            let (options, commands) =
+                startup_options(Model::Basic, BasicInput::Low, &settings).unwrap();
+            assert_eq!(selected_option_value(&options, "rbw"), Some("auto"));
+            assert_eq!(selected_option_value(&options, "spur"), Some("on"));
+            assert!(commands.iter().any(|command| command == "rbw auto"));
+            assert!(commands.iter().any(|command| command == "spur on"));
+        }
+
+        assert!(startup_options(
+            Model::Basic,
+            BasicInput::Low,
+            &TinySaSettings {
+                attenuation: "32".into(),
+                ..TinySaSettings::default()
+            },
+        )
+        .is_err());
+        assert!(startup_options(
+            Model::Basic,
+            BasicInput::Low,
+            &TinySaSettings {
+                rbw: "2".into(),
+                ..TinySaSettings::default()
+            },
+        )
+        .is_err());
+        assert!(startup_options(
+            Model::Basic,
+            BasicInput::Low,
+            &TinySaSettings {
+                spur: "maybe".into(),
+                ..TinySaSettings::default()
+            },
+        )
+        .is_err());
+        assert!(validate_settings_shape(&TinySaSettings {
+            points: 451,
+            ..TinySaSettings::default()
+        })
+        .is_err());
+        assert!(validate_settings_shape(&TinySaSettings {
+            ext_gain_db: 101,
+            ..TinySaSettings::default()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn option_commands_are_whitelisted_after_choice_validation() {
+        let basic = option_definitions(Model::Basic, BasicInput::Low);
+        assert_eq!(
+            option_commands(Model::Basic, &basic, "points", "450").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            option_commands(Model::Basic, &basic, "rbw", "10").unwrap(),
+            ["rbw 10"]
+        );
+        assert!(option_commands(Model::Basic, &basic, "rbw", "10; reset").is_err());
+        assert!(option_commands(Model::Basic, &basic, "lna", "on").is_err());
+        assert!(option_commands(Model::Basic, &basic, "missing", "on").is_err());
+
+        let high = option_definitions(Model::Basic, BasicInput::High);
+        assert_eq!(
+            option_commands(Model::Basic, &high, "high_attenuation", "off").unwrap(),
+            ["attenuate 1", "attenuate 0"]
+        );
+        assert_eq!(
+            option_commands(Model::Basic, &high, "high_attenuation", "on").unwrap(),
+            ["attenuate 1", "attenuate 0", "attenuate 1"]
+        );
+        assert!(option_commands(Model::Basic, &high, "high_attenuation", "auto").is_err());
+    }
+
+    #[test]
+    fn manual_attenuation_plans_clear_firmware_auto_mode() {
+        struct FirmwareAttenuation {
+            value: u8,
+            automatic: bool,
+            high_input: bool,
+        }
+
+        impl FirmwareAttenuation {
+            fn apply(&mut self, command: &str) {
+                let choice = command.strip_prefix("attenuate ").unwrap();
+                if choice == "auto" {
+                    self.value = if self.high_input { 0 } else { 30 };
+                    self.automatic = true;
+                    return;
+                }
+                let value = choice.parse().unwrap();
+                if self.value == value {
+                    return;
+                }
+                self.value = value;
+                if !self.high_input || value == 0 {
+                    self.automatic = false;
+                }
+            }
+        }
+
+        for (high_input, target, commands) in [
+            (false, 30, manual_attenuation_commands("30")),
+            (false, 31, manual_attenuation_commands("31")),
+            (true, 0, high_attenuation_commands("off")),
+            (true, 1, high_attenuation_commands("on")),
+        ] {
+            let mut firmware = FirmwareAttenuation {
+                value: if high_input { 0 } else { 30 },
+                automatic: true,
+                high_input,
+            };
+            for command in commands {
+                firmware.apply(&command);
+            }
+            assert_eq!(firmware.value, target);
+            assert!(!firmware.automatic);
+        }
+    }
+
+    #[test]
+    fn basic_low_startup_and_recovery_force_manual_attenuation() {
+        let settings = TinySaSettings {
+            attenuation: "30".into(),
+            ..TinySaSettings::default()
+        };
+        let (options, startup) = startup_options(Model::Basic, BasicInput::Low, &settings).unwrap();
+
+        assert_eq!(
+            startup,
+            [
+                "rbw auto",
+                "attenuate 31",
+                "attenuate 30",
+                "spur on",
+                "ext_gain 0",
+            ]
+        );
+        assert_eq!(
+            restore_option_commands(Model::Basic, &options).unwrap(),
+            startup
+        );
+    }
+
+    #[test]
+    fn lna_forces_zero_attenuation_and_blocks_other_values() {
+        let (mut options, _) =
+            startup_options(Model::Zs407, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        set_selected_option(&mut options, "attenuation", "12").unwrap();
+        let prepared =
+            prepare_option_update(&options, Model::Zs407, "lna", "on", 10_000, None).unwrap();
+        let mut commands = Vec::new();
+        execute_option_update(&mut options, prepared, "lna", "on", |command| {
+            commands.push(command.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(commands, ["attenuate 31", "attenuate 0", "lna on"]);
+        assert_eq!(selected_option_value(&options, "attenuation"), Some("0"));
+        assert!(
+            prepare_option_update(&options, Model::Zs407, "attenuation", "auto", 10_000, None,)
+                .is_err()
+        );
+        assert!(
+            prepare_option_update(&options, Model::Zs407, "attenuation", "1", 10_000, None,)
+                .is_err()
+        );
+        assert!(
+            prepare_option_update(&options, Model::Zs407, "attenuation", "0", 10_000, None,)
+                .is_ok()
+        );
+
+        let prepared =
+            prepare_option_update(&options, Model::Zs407, "attenuation", "0", 10_000, None)
+                .unwrap();
+        assert_eq!(
+            prepared.commands,
+            ["lna off", "attenuate 31", "attenuate 0", "lna on",]
+        );
+    }
+
+    #[test]
+    fn failed_setter_commands_do_not_change_option_state() {
+        let (mut options, _) =
+            startup_options(Model::Zs407, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        let before = options.clone();
+        let prepared =
+            prepare_option_update(&options, Model::Zs407, "rbw", "30", 10_000, None).unwrap();
+        let result = execute_option_update(&mut options, prepared, "rbw", "30", |_| {
+            bail!("injected serial failure")
+        });
+        assert!(result.is_err());
+        assert_eq!(options, before);
+    }
+
+    #[test]
+    fn failed_lna_activation_does_not_publish_dependent_state() {
+        let (mut options, _) =
+            startup_options(Model::Zs407, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        set_selected_option(&mut options, "attenuation", "12").unwrap();
+        let before = options.clone();
+        let prepared =
+            prepare_option_update(&options, Model::Zs407, "lna", "on", 10_000, None).unwrap();
+        let mut commands = Vec::new();
+        let result = execute_option_update(&mut options, prepared, "lna", "on", |command| {
+            commands.push(command.to_string());
+            if command == "lna on" {
+                bail!("injected serial failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(commands, ["attenuate 31", "attenuate 0", "lna on"]);
+        assert_eq!(options, before);
+    }
+
+    #[test]
+    fn restoring_ultra_controls_reestablishes_cached_dependencies() {
+        let settings = TinySaSettings {
+            rbw: "30".into(),
+            attenuation: "12".into(),
+            spur: "off".into(),
+            ext_gain_db: -7,
+            ..TinySaSettings::default()
+        };
+        let (options, _) = startup_options(Model::Zs407, BasicInput::Low, &settings).unwrap();
+        assert_eq!(
+            restore_option_commands(Model::Zs407, &options).unwrap(),
+            [
+                "lna off",
+                "rbw 30",
+                "attenuate 31",
+                "attenuate 12",
+                "spur off",
+                "ext_gain -7",
+            ]
+        );
+
+        let lna_settings = TinySaSettings {
+            lna: true,
+            ..settings
+        };
+        let (options, _) = startup_options(Model::Zs407, BasicInput::Low, &lna_settings).unwrap();
+        assert_eq!(
+            restore_option_commands(Model::Zs407, &options).unwrap(),
+            [
+                "lna off",
+                "rbw 30",
+                "attenuate 31",
+                "attenuate 0",
+                "lna on",
+                "spur off",
+                "ext_gain -7",
+            ]
+        );
+    }
+
+    #[test]
+    fn ultra_persistence_uses_authoritative_dependent_settings() {
+        let loaded = TinySaSettings {
+            basic_input: BasicInput::High,
+            attenuation: "12".into(),
+            lna: true,
+            ..TinySaSettings::default()
+        };
+        let (mut options, _) =
+            startup_options(Model::Zs407, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        for (id, choice) in [
+            ("points", "900"),
+            ("rbw", "0.2"),
+            ("attenuation", "0"),
+            ("lna", "on"),
+            ("spur", "off"),
+            ("ext_gain", "-12"),
+        ] {
+            set_selected_option(&mut options, id, choice).unwrap();
+        }
+
+        let modified = HashSet::from([
+            "points".to_string(),
+            "rbw".to_string(),
+            "attenuation".to_string(),
+            "lna".to_string(),
+            "spur".to_string(),
+            "ext_gain".to_string(),
+        ]);
+        let saved = persisted_settings(&loaded, &options, Model::Zs407, BasicInput::Low, &modified)
+            .unwrap();
+
+        assert_eq!(saved.points, 900);
+        assert_eq!(saved.rbw, "0.2");
+        assert_eq!(saved.attenuation, "0");
+        assert!(saved.lna);
+        assert_eq!(saved.basic_input, BasicInput::High);
+        assert_eq!(saved.spur, "off");
+        assert_eq!(saved.ext_gain_db, -12);
+    }
+
+    #[test]
+    fn config_hook_owns_the_resolved_basic_input_and_option_snapshot() {
+        let loaded = TinySaSettings {
+            basic_input: BasicInput::Low,
+            attenuation: "12".into(),
+            high_attenuation: true,
+            lna: true,
+            ..TinySaSettings::default()
+        };
+        let (mut options, _) = startup_options(Model::Basic, BasicInput::High, &loaded).unwrap();
+        set_selected_option(&mut options, "high_attenuation", "off").unwrap();
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        drop(command_rx);
+        let device = TinySaDevice {
+            caps: capabilities(Model::Basic, BasicInput::High),
+            info: DeviceInfo::default(),
+            notes: Vec::new(),
+            model: Model::Basic,
+            basic_input: BasicInput::High,
+            options: Arc::new(Mutex::new(options)),
+            modified_options: Arc::new(Mutex::new(HashSet::from(["high_attenuation".to_string()]))),
+            command_tx,
+            worker: Mutex::new(None),
+        };
+        let mut config = crate::config::AppConfig {
+            tinysa: loaded,
+            ..crate::config::AppConfig::default()
+        };
+
+        device.update_config(&mut config).unwrap();
+
+        assert_eq!(config.tinysa.basic_input, BasicInput::High);
+        assert_eq!(config.tinysa.attenuation, "12");
+        assert!(!config.tinysa.high_attenuation);
+        assert!(config.tinysa.lna);
+    }
+
+    #[test]
+    fn low_and_high_attenuation_persist_independently() {
+        let loaded = TinySaSettings {
+            basic_input: BasicInput::Low,
+            attenuation: "12".into(),
+            high_attenuation: true,
+            ..TinySaSettings::default()
+        };
+
+        let (mut low_options, _) = startup_options(Model::Basic, BasicInput::Low, &loaded).unwrap();
+        set_selected_option(&mut low_options, "attenuation", "7").unwrap();
+        let low_saved = persisted_settings(
+            &loaded,
+            &low_options,
+            Model::Basic,
+            BasicInput::Low,
+            &HashSet::from(["attenuation".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(low_saved.basic_input, BasicInput::Low);
+        assert_eq!(low_saved.attenuation, "7");
+        assert!(low_saved.high_attenuation);
+
+        let (mut high_options, _) =
+            startup_options(Model::Basic, BasicInput::High, &loaded).unwrap();
+        set_selected_option(&mut high_options, "high_attenuation", "off").unwrap();
+        let high_saved = persisted_settings(
+            &loaded,
+            &high_options,
+            Model::Basic,
+            BasicInput::High,
+            &HashSet::from(["high_attenuation".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(high_saved.basic_input, BasicInput::High);
+        assert_eq!(high_saved.attenuation, "12");
+        assert!(!high_saved.high_attenuation);
+    }
+
+    #[test]
+    fn basic_normalization_persists_only_after_successful_operator_updates() {
+        for rbw in ["0.2", "1", "850"] {
+            let loaded = TinySaSettings {
+                rbw: rbw.into(),
+                spur: "auto".into(),
+                ..TinySaSettings::default()
+            };
+            let (options, _) = startup_options(Model::Basic, BasicInput::Low, &loaded).unwrap();
+            assert_eq!(selected_option_value(&options, "rbw"), Some("auto"));
+            assert_eq!(selected_option_value(&options, "spur"), Some("on"));
+
+            let unchanged = persisted_settings(
+                &loaded,
+                &options,
+                Model::Basic,
+                BasicInput::Low,
+                &HashSet::new(),
+            )
+            .unwrap();
+            assert_eq!(unchanged.rbw, rbw);
+            assert_eq!(unchanged.spur, "auto");
+
+            let modified = HashSet::from(["rbw".to_string(), "spur".to_string()]);
+            let changed =
+                persisted_settings(&loaded, &options, Model::Basic, BasicInput::Low, &modified)
+                    .unwrap();
+            assert_eq!(changed.rbw, "auto");
+            assert_eq!(changed.spur, "on");
+        }
+    }
+
+    #[test]
+    fn option_failure_reports_successful_and_failed_recovery() {
+        let recovered =
+            option_update_failure(anyhow!("setter rejected: invalid\\x00response"), Ok(()))
+                .to_string();
+        assert!(recovered.contains("setter rejected: invalid\\x00response"));
+        assert!(recovered.contains("previous accepted tinySA controls were restored"));
+        assert!(recovered.contains("acquisition was stopped"));
+
+        let failed = option_update_failure(
+            anyhow!("setter rejected: invalid response"),
+            Err(anyhow!("recovery command was rejected")),
+        )
+        .to_string();
+        assert!(failed.contains("setter rejected: invalid response"));
+        assert!(failed.contains("failed to restore tinySA controls"));
+        assert!(failed.contains("recovery command was rejected"));
+        assert!(failed.contains("acquisition was stopped"));
+    }
+
+    #[test]
+    fn high_recovery_restores_the_coarse_attenuation_choice() {
+        let settings = TinySaSettings {
+            high_attenuation: true,
+            ..TinySaSettings::default()
+        };
+        let (options, commands) =
+            startup_options(Model::Basic, BasicInput::High, &settings).unwrap();
+        assert!(commands.iter().any(|command| command == "attenuate 1"));
+        assert_eq!(
+            restore_option_commands(Model::Basic, &options).unwrap(),
+            [
+                "rbw auto",
+                "attenuate 1",
+                "attenuate 0",
+                "attenuate 1",
+                "spur on",
+                "ext_gain 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn basic_persistence_preserves_ultra_settings() {
+        let loaded = TinySaSettings {
+            lna: true,
+            ..TinySaSettings::default()
+        };
+        let options = option_definitions(Model::Basic, BasicInput::Low);
+        let saved = persisted_settings(
+            &loaded,
+            &options,
+            Model::Basic,
+            BasicInput::Low,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(saved.lna);
+    }
+
+    #[test]
+    fn startup_errors_name_the_config_key_value_and_allowed_values() {
+        let points = validate_settings_shape(&TinySaSettings {
+            points: 451,
+            ..TinySaSettings::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(points.contains("[tinysa].points"));
+        assert!(points.contains("451"));
+        assert!(points.contains("64, 128, 290, 450, 900, 1800"));
+
+        let rbw = startup_options(
+            Model::Basic,
+            BasicInput::Low,
+            &TinySaSettings {
+                rbw: "2".into(),
+                ..TinySaSettings::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(rbw.contains("[tinysa].rbw"));
+        assert!(rbw.contains("\"2\""));
+        assert!(rbw.contains("auto, 3, 10, 30, 100, 300, 600"));
+    }
+
+    #[test]
+    fn persistence_rejects_malformed_option_state() {
+        for id in ["points", "ext_gain"] {
+            let mut options = option_definitions(Model::Zs407, BasicInput::Low);
+            options
+                .iter_mut()
+                .find(|option| option.id == id)
+                .unwrap()
+                .selected_choice = "invalid".into();
+
+            assert!(persisted_settings(
+                &TinySaSettings::default(),
+                &options,
+                Model::Zs407,
+                BasicInput::Low,
+                &HashSet::new(),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_set_option_commands_receive_one_reply() {
+        let (reply, replies) = bounded(1);
+        reject_command(
+            Command::SetOption {
+                id: "rbw".into(),
+                choice: "30".into(),
+                reply,
+            },
+            anyhow!("injected abort failure"),
+        );
+        assert!(replies.recv().unwrap().is_err());
+        assert!(matches!(
+            replies.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
     }
 
     #[test]
@@ -1341,6 +2672,8 @@ mod tests {
             normalize_span(1.0, 959_900_000, DEFAULT_POINTS).unwrap(),
             DEFAULT_POINTS as u64
         );
+        assert_eq!(normalize_span(899.0, 959_900_000, 900).unwrap(), 900);
+        assert_eq!(normalize_span(900.0, 959_900_000, 900).unwrap(), 900);
         let frequencies =
             protocol::scan_frequencies(100_000, 100_000 + DEFAULT_POINTS as u64, DEFAULT_POINTS);
         assert!(frequencies.windows(2).all(|pair| pair[1] > pair[0]));
@@ -1438,8 +2771,8 @@ mod tests {
             stop_hz: 108_000_000,
             generation: 7,
         };
-        assert!(validate_direct_sweep(Some(valid), Model::Basic, BasicInput::Low).is_ok());
-        assert!(validate_direct_sweep(None, Model::Basic, BasicInput::Low).is_ok());
+        assert!(validate_direct_sweep(Some(valid), Model::Basic, BasicInput::Low, 450).is_ok());
+        assert!(validate_direct_sweep(None, Model::Basic, BasicInput::Low, 450).is_ok());
         assert!(validate_direct_sweep(
             Some(DirectSweepConfig {
                 start_hz: valid.stop_hz,
@@ -1447,7 +2780,8 @@ mod tests {
                 ..valid
             }),
             Model::Basic,
-            BasicInput::Low
+            BasicInput::Low,
+            450,
         )
         .is_err());
         assert!(validate_direct_sweep(
@@ -1456,7 +2790,8 @@ mod tests {
                 ..valid
             }),
             Model::Basic,
-            BasicInput::Low
+            BasicInput::Low,
+            450,
         )
         .is_err());
         assert!(validate_direct_sweep(
@@ -1466,7 +2801,8 @@ mod tests {
                 ..valid
             }),
             Model::Basic,
-            BasicInput::High
+            BasicInput::High,
+            450,
         )
         .is_ok());
         assert!(validate_direct_sweep(
@@ -1476,7 +2812,8 @@ mod tests {
                 ..valid
             }),
             Model::Basic,
-            BasicInput::High
+            BasicInput::High,
+            450,
         )
         .is_err());
         assert!(validate_direct_sweep(
@@ -1486,9 +2823,40 @@ mod tests {
                 ..valid
             }),
             Model::Basic,
-            BasicInput::Low
+            BasicInput::Low,
+            450,
         )
         .is_err());
+        let exact = DirectSweepConfig {
+            start_hz: 100_000,
+            stop_hz: 100_450,
+            generation: 1,
+        };
+        assert!(validate_direct_sweep(Some(exact), Model::Basic, BasicInput::Low, 450).is_ok());
+        assert!(validate_direct_sweep(Some(exact), Model::Basic, BasicInput::Low, 900).is_err());
+    }
+
+    #[test]
+    fn point_updates_fit_both_normal_and_direct_spans() {
+        let (options, _) =
+            startup_options(Model::Basic, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        assert_eq!(
+            capabilities(Model::Basic, BasicInput::Low).sample_rate_min_hz,
+            64.0
+        );
+        assert!(prepare_option_update(&options, Model::Basic, "points", "900", 900, None).is_ok());
+        assert!(prepare_option_update(&options, Model::Basic, "points", "900", 899, None).is_err());
+        let direct = Some(DirectSweepConfig {
+            start_hz: 100_000,
+            stop_hz: 100_899,
+            generation: 1,
+        });
+        assert!(
+            prepare_option_update(&options, Model::Basic, "points", "900", 10_000, direct).is_err()
+        );
+        assert!(
+            prepare_option_update(&options, Model::Basic, "points", "450", 450, direct).is_ok()
+        );
     }
 
     #[test]
@@ -1534,6 +2902,53 @@ mod tests {
     }
 
     #[test]
+    fn basic_input_resolution_uses_config_until_the_cli_overrides_it() {
+        assert_eq!(
+            resolve_basic_input(None, BasicInput::High),
+            BasicInput::High
+        );
+        assert_eq!(
+            resolve_basic_input(Some(BasicInput::Low), BasicInput::High),
+            BasicInput::Low
+        );
+        assert_eq!(
+            resolve_basic_input(Some(BasicInput::High), BasicInput::Low),
+            BasicInput::High
+        );
+    }
+
+    #[test]
+    fn ultra_ignores_basic_input_and_warns_only_for_an_explicit_selector() {
+        let settings = TinySaSettings {
+            basic_input: BasicInput::High,
+            ..TinySaSettings::default()
+        };
+        let (options, _) = startup_options(Model::Zs407, settings.basic_input, &settings).unwrap();
+        let saved = persisted_settings(
+            &settings,
+            &options,
+            Model::Zs407,
+            settings.basic_input,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(saved.basic_input, BasicInput::High);
+        assert_eq!(
+            input_mode_command(Model::Zs407, BasicInput::High),
+            "mode input"
+        );
+        assert!(ignored_explicit_basic_input_note(Model::Zs407, None).is_none());
+        for input in [BasicInput::Low, BasicInput::High] {
+            let note = ignored_explicit_basic_input_note(Model::Zs407, Some(input)).unwrap();
+            assert!(note.contains(&format!(
+                "explicit Basic {} input selection was ignored",
+                input.label()
+            )));
+        }
+        assert!(ignored_explicit_basic_input_note(Model::Basic, Some(BasicInput::High)).is_none());
+    }
+
+    #[test]
     fn only_an_explicit_selector_overrides_the_basic_input() {
         let bare = list(Some("/dev/ttyACM2"));
         assert_eq!(bare.len(), 1);
@@ -1557,18 +2972,41 @@ mod tests {
 
     #[test]
     fn narrow_rbw_expands_the_scan_deadline() {
-        let settings = ScanSettings {
-            points: DEFAULT_POINTS,
-            rbw_khz: Some(0.2),
-            spur: SpurMode::Auto,
+        let settings = TinySaSettings {
+            rbw: "0.2".into(),
+            ..TinySaSettings::default()
         };
+        let (options, _) = startup_options(Model::Zs405, BasicInput::Low, &settings).unwrap();
         let segment = Segment {
             start_hz: 400_000_000,
             stop_hz: 500_000_000,
             points: 450,
         };
-        let timeout = scan_inactivity_timeout(segment, Model::Zs405, settings).unwrap();
+        assert_eq!(current_rbw_hz(&options), Some(200));
+        let timeout = scan_inactivity_timeout(segment, Model::Zs405, &options).unwrap();
         assert!(timeout > Duration::from_secs(120), "{timeout:?}");
+        let (automatic, _) =
+            startup_options(Model::Zs405, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        assert_eq!(current_rbw_hz(&automatic), None);
+    }
+
+    #[test]
+    fn explicit_rbw_updates_the_next_trace_metadata_and_timeout() {
+        let (mut options, _) =
+            startup_options(Model::Zs405, BasicInput::Low, &TinySaSettings::default()).unwrap();
+        let segment = Segment {
+            start_hz: 400_000_000,
+            stop_hz: 500_000_000,
+            points: 450,
+        };
+        let automatic_timeout = scan_inactivity_timeout(segment, Model::Zs405, &options).unwrap();
+        let prepared =
+            prepare_option_update(&options, Model::Zs405, "rbw", "0.2", 10_000, None).unwrap();
+        execute_option_update(&mut options, prepared, "rbw", "0.2", |_| Ok(())).unwrap();
+        assert_eq!(current_rbw_hz(&options), Some(200));
+        assert!(
+            scan_inactivity_timeout(segment, Model::Zs405, &options).unwrap() > automatic_timeout
+        );
     }
 
     #[cfg(test)]
@@ -1579,7 +3017,13 @@ mod tests {
         #[ignore = "requires SDRTOP_TINYSA_TEST to name a connected serial port"]
         fn connected_device_streams_spectrum_frames() {
             let path = std::env::var("SDRTOP_TINYSA_TEST").expect("SDRTOP_TINYSA_TEST is not set");
-            let device = TinySaDevice::open(Path::new(&path), BasicInput::Low).unwrap();
+            let device = TinySaDevice::open(
+                Path::new(&path),
+                BasicInput::Low,
+                None,
+                &TinySaSettings::default(),
+            )
+            .unwrap();
             assert!(device
                 .info()
                 .board_name
@@ -1607,6 +3051,8 @@ mod tests {
             assert_eq!(spectrum.target, PowerTraceTarget::Spectrum);
             assert_eq!(spectrum.frequencies_hz.len(), spectrum.levels_dbm.len());
             assert!(!spectrum.frequencies_hz.is_empty());
+            assert!(device.options().iter().any(|option| option.id == "rbw"));
+            device.set_option("points", "64").unwrap();
             device.stop_rx().unwrap();
             assert!(!device.is_streaming());
         }

@@ -246,7 +246,10 @@ fn offer_soapy(
 }
 
 /// Opens the device a listing points at, as a trait object.
-pub fn open_device(listing: &DeviceListing) -> anyhow::Result<Arc<dyn SdrDevice>> {
+pub fn open_device(
+    listing: &DeviceListing,
+    tinysa_settings: &crate::config::TinySaSettings,
+) -> anyhow::Result<Arc<dyn SdrDevice>> {
     match listing.kind {
         DeviceKind::HackRf => Ok(Arc::new(hackrf::HackRfDevice::open(listing.index)?)),
         DeviceKind::RtlSdr => Ok(Arc::new(rtlsdr::RtlDevice::open(listing.index)?)),
@@ -260,9 +263,13 @@ pub fn open_device(listing: &DeviceListing) -> anyhow::Result<Arc<dyn SdrDevice>
             let Some(path) = listing.path.as_deref() else {
                 anyhow::bail!("a tinySA listing with no serial port cannot be opened");
             };
+            let basic_input =
+                tinysa::resolve_basic_input(listing.tiny_sa_input, tinysa_settings.basic_input);
             Ok(Arc::new(tinysa::TinySaDevice::open(
                 path,
-                listing.tiny_sa_input.unwrap_or_default(),
+                basic_input,
+                listing.tiny_sa_input,
+                tinysa_settings,
             )?))
         }
     }

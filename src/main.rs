@@ -20,7 +20,7 @@ mod state;
 mod tasks;
 mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use app::App;
 use clap::Parser;
 use cli::Cli;
@@ -83,6 +83,12 @@ fn restore_stderr(saved: Option<i32>) {
             libc::close(s);
         }
     }
+}
+
+fn application_result(result: io::Result<()>) -> Result<()> {
+    result
+        .map_err(anyhow::Error::from)
+        .context("Application error")
 }
 
 #[tokio::main]
@@ -218,17 +224,37 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = result {
-        eprintln!("Application error: {:?}", err);
-    }
-
-    Ok(())
+    application_result(result)
 }
 
 #[cfg(test)]
 mod cli_tests {
-    use super::Cli;
+    use super::{application_result, Cli};
     use clap::CommandFactory;
+    use std::io;
+
+    #[test]
+    fn application_errors_keep_the_full_chain_for_process_failure() {
+        let error = anyhow::anyhow!("config file could not be replaced")
+            .context("failed to save session settings");
+        let rendered = format!(
+            "{:?}",
+            application_result(Err(io::Error::other(error))).unwrap_err()
+        );
+
+        assert_eq!(rendered.matches("Application error").count(), 1);
+        assert_eq!(
+            rendered.matches("failed to save session settings").count(),
+            1
+        );
+        assert_eq!(
+            rendered
+                .matches("config file could not be replaced")
+                .count(),
+            1
+        );
+        assert!(!rendered.contains("Custom {"));
+    }
 
     /// `--version` has to exist and lead with the crate's own version.
     ///

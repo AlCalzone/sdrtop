@@ -59,6 +59,16 @@ base = "nord"                        # see themes.md for the six palettes
 start_hz = 400000000       # scanner band start
 stop_hz  = 500000000       # scanner band end
 dwell_ms = 200             # measure time per step (50–2000)
+
+[tinysa]
+basic_input = "low"        # Basic only: low or high
+points = 450                # 64, 128, 290, 450, 900 or 1800
+rbw = "auto"                # resolution bandwidth in kHz
+attenuation = "auto"        # Basic LOW and Ultra: auto or 0–31 dB
+high_attenuation = false    # Basic HIGH coarse attenuation
+lna = false                 # Ultra only
+spur = "auto"               # Basic uses on/off; Ultra also accepts auto
+ext_gain_db = 0             # -100–100 dB
 ```
 
 Each waterfall cell shows two rows of history, so `waterfall_max_rows` is twice
@@ -122,6 +132,38 @@ spectrum focus, and both persist once you've picked one.
 [Themes](themes.md).
 
 **`[sweep]`** configures the band scanner, described below.
+
+**`[tinysa]`** sets the controls applied after the backend resets the analyzer to
+a safe input baseline. The Options pane updates these values at runtime. They
+are saved from the analyzer's current state on quit. Other backends preserve the
+block unchanged.
+
+`basic_input` selects the Basic model's physical connector for the full session.
+It accepts `low` from 100 kHz to 350 MHz or `high` from 240 MHz to 959 MHz.
+This is a startup-only setting. Restart sdrtop after editing it. An explicit
+`?input=low` or `?input=high` in `--device` takes priority at startup. A
+bare `--device tinysa` or `--device tinysa=PATH` uses `basic_input`.
+
+Basic LOW and Ultra use `attenuation`. Its choices are `auto` or 0–31 dB. Basic
+HIGH uses `high_attenuation`. `false` sends `attenuate 0`. `true` sends
+`attenuate 1`, which enables the firmware's frequency-dependent coarse
+attenuation of roughly 25–40 dB. Each connector's setting is saved separately.
+Press Enter on LOW or Ultra attenuation to type a value from 0 to 31. Use the
+arrow keys to select `auto`. External gain accepts direct integer entry from
+-100 to 100 dB.
+
+Ultra firmware always selects its input automatically. `basic_input` remains
+unchanged after an Ultra session. An explicit Basic input in `--device` is
+ignored on Ultra and produces a note in the startup log.
+
+Basic analyzers use `spur = "on"` when the file contains `"auto"` and use
+`rbw = "auto"` for Ultra-only RBW values `0.2`, `1` and `850`. These original
+values stay in the file unless you explicitly change the corresponding option
+during the Basic session. The Ultra-only LNA value also stays in the file when
+a Basic analyzer is used.
+
+Invalid values are reported with the `[tinysa]` key and its allowed choices when
+a tinySA opens.
 
 ---
 

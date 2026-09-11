@@ -539,7 +539,7 @@ impl Worker {
             Command::Start(context, reply) => {
                 let result = if !self.prompt_ready {
                     Err(anyhow!(
-                        "tinySA serial state is unknown; reconnect the analyzer"
+                        "tinySA serial state is unknown; restart sdrtop, reconnecting the analyzer first if needed"
                     ))
                 } else if self.rx_context.is_some() {
                     Err(anyhow!("tinySA acquisition is already running"))
@@ -614,7 +614,9 @@ impl Worker {
 
     fn apply_option(&mut self, id: &str, choice: &str) -> anyhow::Result<()> {
         if !self.prompt_ready {
-            bail!("tinySA serial state is unknown; reconnect the analyzer");
+            bail!(
+                "tinySA serial state is unknown; restart sdrtop, reconnecting the analyzer first if needed"
+            );
         }
         let prepared = prepare_option_update(
             &self.options,
@@ -1862,6 +1864,69 @@ mod tests {
 
     fn bytes(value: &[u8]) -> ReadStep {
         ReadStep::Bytes(value.iter().copied().collect())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_serial_state_rejects_start_and_options_without_device_writes() {
+        let (worker_port, peer_port) = serialport::TTYPort::pair().unwrap();
+        let (_command_tx, command_rx) = crossbeam_channel::unbounded();
+        let options = option_definitions(Model::Basic, BasicInput::Low);
+        let mut worker = Worker {
+            port: Box::new(worker_port),
+            command_rx,
+            identity: Identity {
+                firmware: "test".into(),
+                hardware: None,
+                board: "test".into(),
+                zero_dbm: 0,
+                model: Model::Basic,
+            },
+            option_state: Arc::new(Mutex::new(options.clone())),
+            modified_options: Arc::new(Mutex::new(HashSet::new())),
+            options,
+            basic_input: BasicInput::Low,
+            center_hz: default_frequency(Model::Basic, BasicInput::Low),
+            span_hz: DEFAULT_SPAN_HZ,
+            direct_sweep: None,
+            rx_context: None,
+            prompt_ready: false,
+        };
+        let state = Arc::new(Mutex::new(crate::state::SdrMetrics::fixture()));
+        let (sample_tx, _) = crossbeam_channel::bounded(1);
+        let (demod_tx, _) = crossbeam_channel::bounded(1);
+        let (net_tx, _) = crossbeam_channel::bounded(1);
+        let (power_tx, _) = crossbeam_channel::bounded(1);
+        let context = Arc::new(RxContext {
+            metrics: state,
+            sample_tx,
+            fft_feed: crate::hardware::FeedHealth::default(),
+            demod_tx,
+            net_tx,
+            net_feed: crate::hardware::FeedHealth::default(),
+            power_tx,
+            geometry: capabilities(Model::Basic, BasicInput::Low).sample_geometry,
+        });
+
+        let (start_tx, start_rx) = bounded(1);
+        assert!(worker.handle_command(Command::Start(context, start_tx)));
+        let start_error = start_rx.recv().unwrap().unwrap_err().to_string();
+        assert!(start_error.contains("restart sdrtop"));
+        assert!(worker.rx_context.is_none());
+
+        let (option_tx, option_rx) = bounded(1);
+        assert!(worker.handle_command(Command::SetOption {
+            id: "spur".into(),
+            choice: "off".into(),
+            reply: option_tx,
+        }));
+        let option_error = option_rx.recv().unwrap().unwrap_err().to_string();
+        assert!(option_error.contains("restart sdrtop"));
+        assert_eq!(peer_port.bytes_to_read().unwrap(), 0);
+
+        let (shutdown_tx, shutdown_rx) = bounded(1);
+        assert!(!worker.handle_command(Command::Shutdown(shutdown_tx)));
+        shutdown_rx.recv().unwrap().unwrap();
     }
 
     #[test]

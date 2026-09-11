@@ -781,6 +781,46 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_quit_reports_save_failure_and_preserves_existing_config() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "sdrtop-quit-save-failure-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let original = b"[radio]\nfrequency_hz = 123456789\n";
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(path.with_extension("tmp")).unwrap();
+
+        let state = Arc::new(Mutex::new(SdrMetrics::fixture()));
+        let device = Arc::new(QuitDevice::new(state.lock().unwrap().caps.as_ref().clone()));
+        let mut app = App::assemble(
+            AppConfig::default(),
+            Some(path.clone()),
+            state,
+            Some(device),
+            None,
+            None,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        app.events = EventStream::from_channel(tx.clone(), rx);
+        tx.send(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))))
+            .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        let error = app.run(&mut terminal).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir(path.with_extension("tmp")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn numeric_menu_entry_preserves_the_deck_footer_setting() {
         use crate::state::{InputMode, MenuPane, MenuState};
         let (mut app, _, _, _) = quit_test_app();
